@@ -1,7 +1,7 @@
 [project]
-name = "python-scaffolding"
+name = "atlas"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local-CLI agent orchestrator + metrics logger for a phase-gated dev workflow."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = []

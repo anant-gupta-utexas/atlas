@@ -53,16 +53,26 @@ Once your feature is merged and live, move your folder from `dev/active/` to `de
 ```
 dev/
 ├── active/
-│   └── user-authentication/
-│       ├── user-authentication-plan.md
-│       ├── user-authentication-context.md
-│       └── user-authentication-tasks.md
+│   └── cache-middleware/                  # v1 first-run target
+│       ├── cache-middleware-plan.md       # TDS
+│       ├── cache-middleware-context.md    # files, decisions
+│       └── cache-middleware-tasks.md      # canonical state file
 └── archive/
     └── initial-setup/
         ├── initial-setup-plan.md
         ├── initial-setup-context.md
         └── initial-setup-tasks.md
 ```
+
+## Atlas-specific note
+
+For atlas, `dev/active/<slug>/tasks.md` is more than a checklist — it's
+the **canonical state file** the atlas CLI reads and writes as it walks
+the 7-stage pipeline. See
+[`../docs/1_product_and_research/PRD.md`](../docs/1_product_and_research/PRD.md)
+§ "Must Have (MVP) — Canonical state file" for the required structure.
+The `## current` block at the top is load-bearing; `atlas status` prints
+it and the resume protocol reads it first.
 
 ## Benefits
 
