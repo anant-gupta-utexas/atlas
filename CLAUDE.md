@@ -1,95 +1,85 @@
-# [Your Project Name]
+# atlas
 
-`[Add a one-sentence description of what this project does and for whom.]`
+**Local-CLI agent orchestrator + metrics logger for phase-gated dev workflows.**
 
-This document is the central "signpost" for our repository. It provides quick setup commands, links to our core documentation library, and explains our development workflow.
+Walks a fixed 7-stage pipeline (research → PRD → SDD+TRD → TDS → plan review → code → review), stops at six explicit human gates, and writes every run as a typed span tree into plumb for later analysis.
 
-## Quick Start: Developer Setup
+## Quick Start
+
 ```bash
-# 1. Set up the virtual environment and install dependencies
+# 1. Set up Python 3.11+ environment
+uv venv
 source .venv/bin/activate
 uv sync
 
-# 2. Run the stack locally
-docker-compose up --build
+# 2. Install the post-commit git hook (optional, for stage 5+)
+atlas hook install
 
-# 3. Run local tests
-pytest
+# 3. Run a test task
+atlas run "add response-cache middleware to this Flask repo"
 ```
 
-## Directory Structure & Walkthrough
+## Documentation Map
 
-### Core Documentation (`docs/`)
-**EVERGREEN DOCS**: The single source of truth for the project.
-```
-docs/
-├── 1_product_and_research/  # "Why": Product Requirements (PRD.md) and research
-├── 2_architecture/ # "High-Level How": System Design, TRD, diagrams
-├── 3_guides/       # "How-to": Developer guides (getting_started.md, core_concepts.md)
-└── 4_testing/      # "Quality": Testing strategy (index.md, unit_tests.md)
-```
+- **[README.md](README.md)** — v1 deliverables, status, quick start
+- **[docs/1_product_and_research/PRD.md](docs/1_product_and_research/PRD.md)** — v1 Product Requirements Document (MVP scope, user stories, gates, success metrics)
+- **[docs/2_architecture/system_design.md](docs/2_architecture/system_design.md)** — 7-stage state machine, span tree shape, worktree boundary
+- **[docs/2_architecture/TRD.md](docs/2_architecture/TRD.md)** — Technical Requirements (NFRs, integrations, data model)
+- **[docs/3_guides/getting_started.md](docs/3_guides/getting_started.md)** — Dev environment setup
+- **[docs/4_testing/index.md](docs/4_testing/index.md)** — Testing strategy and fixtures
 
-### Development Documentation (`dev/`)
-**WORK-IN-PROGRESS**: Technical designs and planning for features being built.
-```
-dev/
-├── active/   # Active feature development plans (TDS, tasks)
-└── archive/  # Historical record of completed features
-```
+## Project Structure
 
-**Dev Workflow:**
-1. **Start Planning**: Create `dev/active/[feature-name]/`
-2. **Define the Spec**: Create inside your feature folder:
-   * `[feature-name]-plan.md` - Technical Design Specification (TDS)
-   * `[feature-name]-context.md` - Key decisions, dependencies, files to touch
-   * `[feature-name]-tasks.md` - Progress checklist
-3. **Build**: Get TDS reviewed, then implement
-4. **Update Core Docs**: Update `docs/` to reflect changes (part of Definition of Done)
-5. **Archive**: Move folder from `dev/active/` to `dev/archive/` after merge
-
-### Source Code (`src/`)
-**Clean Architecture** implementation with three layers:
 ```
-src/
-├── application/    # "Use Cases": Orchestrates workflows (e.g., CreateConversation)
-├── domain/         # "Business Logic": Pure entities & rules (e.g., Conversation entity)
-└── infrastructure/ # "Frameworks": API (FastAPI), DB (SQLAlchemy), etc.
+atlas/
+├── src/atlas/               # Main package
+│   ├── cli.py              # Entry point (@click commands)
+│   ├── orchestrator.py      # 7-stage state machine
+│   ├── plumb_adapter.py     # plumb integration (span/score writes)
+│   ├── worktree_manager.py  # git worktree lifecycle (stage 5)
+│   └── post_commit_hook.py  # Score writing from commit output
+├── tests/
+│   ├── fixtures/            # routing_ground_truth.json, test repos
+│   └── unit/                # State machine, span tree, hook parser tests
+└── dev/active/              # Feature TDS/plans during implementation
 ```
 
-**Key Principles:**
-* Dependency Inversion: Inner layers define interfaces, outer layers implement
-* Single Responsibility: Each component has one reason to change
-* Testability: Pure business logic independent of frameworks
-* Immutability: Use frozen dataclasses for domain entities, never mutate existing objects
-* Security-First: Validate all inputs, no hardcoded secrets, parameterized queries only
+## v1 Scope
+
+- **CLI only.** One command: `atlas run "<task description>"`.
+- **Seven deterministic stages.** research → prd_draft → trd_draft → tds_gen → plan_review → code_gen → code_review. No dynamic routing in v1.
+- **Six human gates.** Hard stops with user signal scoring at each gate.
+- **Single-user, single-machine.** No auth, no multi-tenancy, one run per repo at a time.
+- **Span tree per run.** Integration with plumb for `runs` / `spans` / `scores` / `examples` rows.
+- **Post-commit hook.** Captures `/verify` and `/code-review` output, writes deterministic scores.
+- **~300 lines target.** "A state machine, not a framework."
+
+## Key Files
+
+- **`.atlas.toml`** — Per-repo config (model routing, plumb db path, worktree stage).
+- **`~/.atlas/config.toml`** — User-wide defaults (merged over `.atlas.toml`).
+- **`dev/active/<task-name>/tasks.md`** — Canonical state file (phase, gate, next, per-stage checkboxes).
+- **`.git/hooks/post-commit`** — Installed by `atlas hook install`; parses output, writes scores.
+
+## Development Workflow
+
+1. **Before writing code:** Read `[docs/2_architecture/TRD.md](docs/2_architecture/TRD.md)` for integration boundaries and data contracts.
+2. **Stages are black boxes.** Each stage invokes an external tool (agent plugin, `/verify` slash command) and parses output. Don't reimplement agent logic inside atlas.
+3. **State lives in files.** `dev/active/<task>/tasks.md` is the source of truth. Resume protocol reads it, no in-memory state.
+4. **Testing:** Fixture `routing_ground_truth.json` validates the 7-stage table. Mock agent responses in tests; run E2E against a real throwaway feature once per release.
+5. **Commitment:** No scope creep past 300 LoC. If a feature is a new file type (router module, agent registry), it fails design review.
 
 ## Coding Style
 
-- Frozen `dataclass(frozen=True)` for domain entities; `pydantic.BaseModel` for API schemas
-- Functions < 50 lines, files < 400 lines (800 max)
-- No deep nesting (> 4 levels) — use early returns and extract helpers
-- Use `pydantic_settings.BaseSettings` for configuration, never `os.environ` directly
+- Functions < 50 lines; files < 400 lines (800 max for complex logic).
+- No deep nesting (> 4 levels); use early returns.
+- `click` for CLI, `pydantic` for validation, `pathlib` for filesystem operations.
+- Sync-only in v1 (no async/await).
+- Never mutate `tasks.md` after run close; append to git history instead.
 
-## Error Handling
+## Assumptions
 
-- Custom exception hierarchy per domain (`DomainError` → `NotFoundError`, `ValidationError`, etc.)
-- Never silently swallow errors
-- Log detailed context server-side, return user-friendly messages in API responses
-- Use FastAPI exception handlers for consistent error response format
-
-## Security Checklist
-
-Before every commit, verify:
-- No hardcoded secrets (API keys, passwords, tokens)
-- All user inputs validated (Pydantic schemas at API boundary)
-- SQL injection prevention (SQLAlchemy parameterized queries)
-- Authentication/authorization verified on all protected routes
-- Rate limiting on public endpoints
-- Error messages don't leak internal details (stack traces, DB errors)
-
-## Anti-Patterns (Avoid)
-
-- Never use Pydantic V1 APIs (`class Config:`, `.dict()`, `.json()`) — use V2 equivalents
-- Never put business logic in API routers — use application layer use cases
-- Never import domain from infrastructure (dependency rule violation)
-- Never commit `.env` files or hardcoded credentials
+- Python 3.11+; git 2.5+ (for worktree).
+- plumb is installed as a local path dependency during v1 (see `pyproject.toml`).
+- Agent plugins (DEV-ESSENTIALS, agent model) are installed in the user's environment; atlas invokes them as black boxes.
+- One `atlas run` per repo at a time; no concurrent run handling until v2.
