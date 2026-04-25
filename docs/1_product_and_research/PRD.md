@@ -5,11 +5,11 @@
 **Status:** Draft, pre-implementation
 **Last reviewed:** 2026-04-23
 
-This PRD defines the v1 release of **atlas**, the orchestrator component
-of the author's Personal OS. Scope is intentionally tight: local CLI
-only. Multi-model routing in production, the HTTP shell, and an autonomy
-target against downstream repos are explicitly **out of scope** and will
-be covered by follow-up PRDs.
+This PRD defines the v1 release of **atlas**, a local CLI orchestrator
+for a phase-gated agentic dev workflow. Scope is intentionally tight:
+local CLI only. Multi-model routing in production, the HTTP shell, and
+an autonomy target against downstream repos are explicitly **out of
+scope** and will be covered by follow-up PRDs.
 
 Grounds on:
 
@@ -39,7 +39,7 @@ sides of that split are measured.
 ## Problem Statement
 
 Agentic dev workflows today sit at two extremes, neither of which fits
-a measured personal-OS build:
+a measured solo-developer build:
 
 - **All-manual.** Every stage (research → PRD → TRD → TDS → code →
   review) runs in a fresh chat session. State lives only in the chat
@@ -53,12 +53,11 @@ a measured personal-OS build:
   this the right PRD?", "is this TDS complete?", "did the diff match
   the plan?" — is gone. The result is velocity without acceptance.
 
-Neither mode produces data that answers the question the Personal OS is
-built to answer: *how much of agent-driven dev work actually needs
-intervention, at what cost, and where do the failures cluster?* The
-first mode produces no structured data at all; the second produces only
-outcome data (merged or not), losing the intermediate signal that
-explains *why*.
+Neither mode produces data that answers the question atlas is built to
+answer: *how much of agent-driven dev work actually needs intervention,
+at what cost, and where do the failures cluster?* The first mode
+produces no structured data at all; the second produces only outcome
+data (merged or not), losing the intermediate signal that explains *why*.
 
 Atlas v1 is the middle-ground runtime that fills this gap. A local CLI
 that walks a fixed 7-stage pipeline, stops at six explicit human gates,
@@ -80,10 +79,10 @@ adding "and a login page" / "and a team dashboard". Neither is in scope.
 
 ### Secondary stakeholder
 
-**Portfolio audience** — hiring managers and engineers at DevEx, AI/ML,
-and agentic-systems teams who read this repo as part of the Personal OS
-story. They do not run `atlas run`; they read the repo, the `runs` it
-produces, and the derived plumb metrics.
+**Public reader** — engineers at DevEx, AI/ML, and agentic-systems teams
+who encounter the repo and want to understand the workflow. They do not
+run `atlas run`; they read the repo, the `runs` it produces, and the
+derived plumb metrics.
 
 **Implication for v1:** the CLI surface, the TOML config shape, and the
 README must be publishable-quality even though runtime usage is
