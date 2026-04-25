@@ -2,8 +2,7 @@
 
 **Project:** atlas — v1 local CLI
 **Scope:** v1 (Week 4 local CLI). Subsequent releases get their own TRDs.
-**Status:** Stub (pending Tech Lead pass). Open questions below are the
-primary input to that pass.
+**Status:** v1 approved (Tech Lead pass complete 2026-04-24).
 
 ## Executive Summary
 
@@ -13,11 +12,6 @@ a typed span tree into [plumb](https://github.com/anant-gupta-utexas/plumb).
 There is no network surface, no UI, and no database of its own. Stage 5
 runs code generation inside a `git worktree` so `main` is never touched
 without an explicit user merge.
-
-Non-technical framing: atlas is the "middle-ground" runtime between
-all-manual chat sessions and all-autonomous overnight PR bots. The
-attestation/labor split is the thesis — humans own every decision, atlas
-owns the work in between, both sides are measured.
 
 ## Business Context & Objectives
 
@@ -56,6 +50,12 @@ one test that runs in CI.
   flow feel broken.)
 - No SLA on gate-to-gate time; it is human-bounded. Per-stage latency
   is recorded for later analysis, not enforced.
+
+**Measurement protocol.** `atlas status` measured via `time atlas status`
+over 10 runs on a warm SSD; P95 must be under target. Post-commit hook
+measured via `time git commit` on a trivial diff with the hook
+installed. Both targets are spot-checked during the Week 4 real run;
+no continuous perf gate in CI for v1.
 
 ### Security
 
@@ -106,15 +106,25 @@ Per PRD §6.4:
 
 | Integration          | Surface                              | Version / shape           | Owner         |
 | -------------------- | ------------------------------------ | ------------------------- | ------------- |
-| plumb                | Python API (decorator + ctx manager) | v1 (path install)         | sibling repo  |
+| plumb                | Python API (decorator + ctx manager) — direct in-process calls | path install pinned to commit SHA recorded in `pyproject.toml` | sibling repo  |
 | git                  | Subprocess (`git worktree`, `log`, `rev-parse`) | ≥ 2.5           | system        |
-| DEV-ESSENTIALS       | Slash commands invoked by name (`/code-review`, `/verify`, etc.) | Stable names   | external agent plugin |
-| DEV-BE-PYTHON        | Slash commands invoked by name (`/dev-docs-be`) | Stable names | external agent plugin |
+| DEV-ESSENTIALS       | Slash commands invoked by name (`/code-review`, `/verify`, etc.) | plugin commit SHA pinned in `pyproject.toml` | external agent plugin |
+| DEV-BE-PYTHON        | Slash commands invoked by name (`/dev-docs-be`) | plugin commit SHA pinned in `pyproject.toml` | external agent plugin |
 | LLM providers        | Keys via env; calls go through plugins, not atlas directly | — | external       |
 
-Atlas's code does not import from the plugins. Communication is
-subprocess stdout + exit code. (The exact shape of "plugin finished"
-detection is **open question #2**.)
+**Atlas ↔ plumb boundary.** Direct in-process Python calls (no IPC).
+Rationale: same author, no trust boundary to enforce; subprocess adds
+serialization overhead and a second failure mode the v1 LoC budget
+can't absorb. Revisit at v1.1 when the HTTP shell lands — that layer
+*does* want a boundary because web-request lifetimes and plumb writes
+have different failure semantics.
+
+**Plugin lifecycle detection.** Exit code is the primary signal. Atlas
+invokes plugins via `subprocess.run(..., capture_output=True, check=False)`,
+inspects `returncode` for lifecycle, and parses `stdout` only for score
+extraction (not for liveness). Each plugin invocation is wrapped in a
+timeout; on timeout or non-zero exit the span is closed with
+`status='failure'` and the run halts at the current gate.
 
 ## Data Requirements
 
@@ -124,6 +134,13 @@ detection is **open question #2**.)
   `.git/hooks/post-commit`. Full list in
   [`system_design.md`](./system_design.md) §"Atlas-owned on-disk
   state."
+- **State consistency contract.** On every `atlas run` and
+  `atlas status` invocation, atlas reads `.atlas/current-run` and the
+  `## current` block of the referenced `tasks.md`. If the `run_id` in
+  `.atlas/current-run` does not match the `run_id` recorded in
+  `tasks.md`'s header, atlas exits non-zero with a recovery hint
+  naming both values. No automatic reconciliation; the user resolves
+  the mismatch before the run can continue.
 - **Retention:** indefinite for plumb's DB; `dev/active/<slug>/` moves
   to `dev/archive/<slug>/` on phase complete and is retained with the
   repo's history.
@@ -134,7 +151,7 @@ detection is **open question #2**.)
 
 - **Dev:** local laptop. `uv sync` + `uv run pytest`. No hosted infra.
 - **CI:** GitHub Actions on push + PR. `pytest`, `ruff check`,
-  `mypy src` (if adopted), and the routing-ground-truth fixture test.
+  `mypy src`, and the routing-ground-truth fixture test.
 - **Staging / prod:** none. v1 has no deployed surface.
 
 ## Compliance & Regulatory Requirements
@@ -157,8 +174,13 @@ what the user explicitly types into prompts.
     first unchecked box).
   - Hook idempotency test (two commits on the same SHA do not
     double-write scores).
-- **Linters:** `ruff check`, `ruff format`. `mypy src` is a nice-to-have
-  for v1; mandatory in v1.1 if atlas grows past ~300 LoC.
+  - State consistency test (mismatch between `.atlas/current-run` and
+    `tasks.md` header `run_id` causes `atlas run` / `atlas status` to
+    exit non-zero with a recovery hint naming both values).
+- **Linters:** `ruff check`, `ruff format`, `mypy src`. All three are
+  CI gates in v1. Frozen dataclasses already give half the type-coverage
+  value for free; retrofitting annotations later is more expensive than
+  writing them the first time.
 - **Quality gates:** CI must be green before merging to `main`. No
   manual override.
 
@@ -170,8 +192,9 @@ what the user explicitly types into prompts.
 - **Monitoring:** plumb queries over the user's own DB. No Prometheus,
   no Grafana, no hosted telemetry.
 - **Logging:** atlas writes a run-scoped log at `.atlas/runs/<run_id>.log`.
-  Rotation is "delete anything older than 30 days" — a trivial cron on
-  the user's machine, not atlas code.
+  No rotation in v1; logs accumulate until the user cleans them. A
+  rotation policy lands when disk usage becomes a real problem (track
+  in v1.1 backlog).
 - **Alerting:** none. A failed run is visible in the terminal; that is
   sufficient for a solo-user tool.
 
@@ -179,42 +202,40 @@ what the user explicitly types into prompts.
 
 ### Dependencies
 
-- plumb (required; see Integration Requirements).
-- DEV-ESSENTIALS, DEV-BE-PYTHON plugin packages installed in the
-  user's agent environment.
-- git 2.5+, Python 3.11+.
+- **plumb** (required; see Integration Requirements). Path install,
+  pinned to a specific commit SHA recorded in `pyproject.toml`.
+- **Agent plugins:** DEV-ESSENTIALS and DEV-BE-PYTHON installed in the
+  user's agent environment, pinned to specific commit SHAs recorded in
+  `pyproject.toml`.
+- **System:** git 2.5+, Python 3.11+.
+- **Python packages (minimum versions, pinned in `pyproject.toml`):**
+  `typer >= 0.12` (CLI; pick over `click` for type-hint ergonomics — if
+  this proves wrong during Day 1, swap is one file), `pytest >= 8.0`,
+  `mypy >= 1.10`, `ruff >= 0.4`. Major-version bumps require a
+  conscious upgrade, not a silent `pip install`.
 
 ### Risks
 
 See [`../1_product_and_research/PRD.md`](../1_product_and_research/PRD.md)
 § "Risks and Mitigation."
 
-### Open questions (for the Tech Lead pass)
+### Resolved decisions (Tech Lead pass, 2026-04-24)
 
-The PRD flags four; re-listed here with TRD framing:
+The PRD flagged four open questions. All four are resolved; recorded
+here for traceability.
 
-1. **Atlas ↔ plumb boundary.** Direct in-process Python calls, or a
-   subprocess + stdout/IPC boundary?
-   - *Trade-off:* direct is simpler and faster; subprocess gives a
-     harder failure boundary and easier mocking.
-   - *Recommendation pending Tech Lead input.*
-2. **Plugin "finished" detection.** Exit code, output marker string,
-   or poll on a sentinel file?
-   - *Trade-off:* exit-code is cleanest but requires plugins to
-     exit on completion; output markers are robust but brittle to
-     plugin format changes.
-   - *Recommendation pending Tech Lead input.*
-3. **`.atlas/current-run` consistency.** What's the contract if
-   `.atlas/current-run` and `dev/active/*/tasks.md` disagree? (E.g.
-   user deletes `tasks.md` by hand while a run is open.)
-   - *Default:* `atlas status` / `atlas run` detect the mismatch,
-     print a recovery hint, refuse to continue.
-4. **`runs.kind` discriminator.** Add the column in v1 (value fixed
-   to `"dev_workflow"`), or defer until a second run kind appears?
-   - *Trade-off:* adding it early costs nothing and makes the later
-     split free; adding it late means a migration.
-   - *Recommendation:* add the column in v1 (plumb's schema
-     decision, not atlas's), value fixed to `"dev_workflow"`.
+1. **Atlas ↔ plumb boundary.** Direct in-process Python calls. See
+   §"Integration Requirements."
+2. **Plugin lifecycle detection.** Exit code primary; stdout for score
+   parsing only. See §"Integration Requirements."
+3. **`.atlas/current-run` consistency.** Detect mismatch, print
+   recovery hint, refuse to continue. See §"Data Requirements" — state
+   consistency contract.
+4. **`runs.kind` discriminator.** Deferred. v1 writes runs without a
+   kind column; if a second run kind appears later, the schema change
+   is prioritized in plumb's planning at that time. Cost of adding
+   later (a single column + backfill of existing rows to
+   `"dev_workflow"`) is acceptable.
 
 ## Success Criteria & Acceptance Criteria
 
@@ -230,7 +251,9 @@ v1 ships when all five hold, measured on the Week 4 real run:
    isolation test in CI.
 4. **Routing top-1 accuracy.** 100% on the 7-row fixture. The
    deterministic sanity baseline — a real measurement when
-   orchestrator models vary.
+   orchestrator models vary. **A fixture failure is a release blocker
+   even if all other criteria pass**; a routing regression is too easy
+   to rationalize as "the pipeline still ran."
 5. **Resume protocol works.** A simulated session compaction
    mid-run is followed by a clean resume from the first unchecked
    box in `tasks.md`.
