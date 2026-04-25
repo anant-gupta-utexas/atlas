@@ -1,9 +1,8 @@
 # System Design
 
-> **Status:** Stub (v1 Week 4). This document captures the design
-> intent at PRD-approval time. Sections marked *TBD* will be filled
-> during the Tech Lead pass; sections marked *locked* are design
-> decisions already made in the PRD.
+> **Status:** v1 finalized (Tech Lead pass complete 2026-04-24).
+> Captures the architecture as it will ship for the Week 4 local CLI.
+> Subsequent releases get their own SDD revisions.
 
 ## Problem Statement & Requirements
 
@@ -42,7 +41,7 @@ Key technical challenges:
 │   [2] dev/active/<task>/tasks.md                (canonical state)│
 │   [3] .atlas/current-run                        (run_id pointer) │
 └────────────────────────────┬─────────────────────────────────────┘
-                             │ plumb Python API (no direct SQLite)
+                             │ plumb Python API (direct in-process)
                              ▼
                ┌─────────────────────────────┐
                │   plumb (sibling project)   │
@@ -68,6 +67,33 @@ imports. Atlas itself owns only:
 - Post-commit hook install/uninstall.
 
 ## System Components & Services
+
+```mermaid
+graph TD
+    User([Operator])
+    CLI[atlas.cli<br/>entry point]
+    Pipeline[atlas.pipeline<br/>7-stage state machine]
+    State[atlas.state<br/>tasks.md + .atlas/current-run]
+    Hook[atlas.hook<br/>post-commit writer]
+    Config[atlas.config<br/>TOML layering]
+    PlumbIO[atlas.plumb_io<br/>measurement wrapper]
+
+    Plumb[(plumb<br/>SQLite)]
+    Plugins[DEV-ESSENTIALS<br/>DEV-BE-PYTHON]
+    Git[git<br/>worktree + hooks]
+
+    User -->|run / status / hook| CLI
+    CLI --> Config
+    CLI --> Pipeline
+    Pipeline --> State
+    Pipeline --> PlumbIO
+    Pipeline -->|invoke slash-cmds| Plugins
+    Pipeline -->|worktree add/merge| Git
+    Git -->|fires on commit| Hook
+    Hook --> State
+    Hook --> PlumbIO
+    PlumbIO --> Plumb
+```
 
 ### `atlas.cli` — CLI surface
 
@@ -99,6 +125,10 @@ One command entrypoint registered via `pyproject.toml`.
 - Updates the `## current` block on gate transitions.
 - `.atlas/current-run` holds the active `run_id` for the post-commit
   hook to read.
+- Enforces the state-consistency contract: on every `atlas run` /
+  `atlas status`, the `run_id` in `.atlas/current-run` must match
+  the `run_id` in the referenced `tasks.md` header. Mismatch → exit
+  non-zero with a recovery hint naming both values.
 
 ### `atlas.hook` — post-commit hook
 
@@ -120,10 +150,9 @@ One command entrypoint registered via `pyproject.toml`.
 ### `atlas.plumb_io` — measurement writes
 
 - Thin wrapper over plumb's decorator + context-manager API.
-- Never touches plumb's SQLite directly.
-- Named here so Tech Lead can decide whether atlas ↔ plumb is a
-  direct function call or a thin IPC layer (**open question #1** in
-  the PRD).
+- Direct in-process calls (resolved 2026-04-24); never touches plumb's
+  SQLite directly.
+- Pinned to a specific plumb commit SHA in `pyproject.toml`.
 
 ## Data Architecture
 
@@ -131,12 +160,55 @@ One command entrypoint registered via `pyproject.toml`.
 
 Atlas does not own a schema. It writes into plumb's four tables:
 
-- `runs(id, task, status, start_ts, end_ts, dollar_cost, ...)`
-- `spans(id, run_id, parent_id, kind, name, input_hash, start_ts, end_ts, ...)`
-- `scores(id, span_id | run_id, scorer, metric, value_label, value_numeric, ...)`
-- `examples(id, origin_run_id, origin_span_id, input, expected_output, ...)`
+```mermaid
+erDiagram
+    runs ||--o{ spans : "has"
+    runs ||--o{ scores : "scored by"
+    runs ||--o{ examples : "originates"
+    spans ||--o{ spans : "parent_of"
+    spans ||--o{ scores : "scored by"
+    spans ||--o{ examples : "origin span"
 
-Full schema lives in plumb's repo.
+    runs {
+        id PK
+        task string
+        status enum
+        start_ts timestamp
+        end_ts timestamp
+        dollar_cost numeric
+    }
+    spans {
+        id PK
+        run_id FK
+        parent_id FK
+        kind enum
+        name string
+        input_hash string
+        start_ts timestamp
+        end_ts timestamp
+    }
+    scores {
+        id PK
+        span_id FK
+        run_id FK
+        scorer string
+        metric string
+        value_label string
+        value_numeric numeric
+        reason_text string
+    }
+    examples {
+        id PK
+        origin_run_id FK
+        origin_span_id FK
+        input text
+        expected_output text
+    }
+```
+
+Full schema lives in plumb's repo. `runs.kind` is intentionally absent
+in v1 (resolved 2026-04-24 — added later as a single column + backfill
+to `"dev_workflow"` if a second run kind appears).
 
 ### Atlas-owned on-disk state
 
@@ -148,6 +220,7 @@ Full schema lives in plumb's repo.
 | `dev/active/<slug>/tasks.md`     | Canonical pipeline state              | Atlas CLI + user edits allowed | Created on `atlas run`; moved to `dev/archive/` on phase complete |
 | `dev/active/<slug>/context.md`   | Session context notes                 | Agent (via `/dev-docs-update`) | Free-form |
 | `.git/hooks/post-commit`         | Score-writer hook                     | Atlas CLI (via `hook install`) | Idempotent install/uninstall |
+| `.atlas/runs/<run_id>.log`       | Run-scoped log                        | Atlas CLI  | Append-only; no rotation in v1 |
 
 ### Data flow (one run)
 
@@ -191,25 +264,57 @@ Internal "APIs" worth naming:
 
 - **CLI ↔ user.** Each gate is a one-line prompt. Approve/reject + a
   free-form reason line captured as `scores.reason_text` (optional).
-- **Atlas ↔ plumb.** A thin wrapper module in atlas
-  (`atlas.plumb_io`) calls plumb's Python surface. Whether this is
-  direct in-process calls vs. an IPC boundary is PRD open question
-  #1.
+- **Atlas ↔ plumb.** Direct in-process Python calls via `atlas.plumb_io`
+  (resolved 2026-04-24). No IPC layer in v1; revisited at v1.1 when the
+  HTTP shell lands and request lifetimes diverge from plumb writes.
 - **Atlas ↔ plugins.** Atlas invokes plugin slash-commands as black
-  boxes. How atlas knows the plugin command finished (exit code,
-  output marker, polling) is PRD open question #2.
+  boxes via `subprocess.run(..., capture_output=True, check=False)`.
+  Exit code is the lifecycle signal (resolved 2026-04-24); stdout is
+  parsed only for score extraction, not liveness. Each invocation is
+  wrapped in a timeout; on timeout / non-zero exit the span closes with
+  `status='failure'` and the run halts at the current gate.
+
+### Critical sequence: gate transition (Stage 3 → Stage 4)
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant CLI as atlas.cli
+    participant Pipe as atlas.pipeline
+    participant State as atlas.state
+    participant Plumb as plumb (SQLite)
+
+    User->>CLI: atlas run continues at gate 3
+    CLI->>Pipe: resume(run_id)
+    Pipe->>State: read tasks.md ## current
+    State-->>Pipe: phase=tds_gen, gate=3
+    Pipe->>Plumb: open span (verify:plan_review)
+    Pipe->>User: gate 3 prompt — approve/reject?
+    User-->>Pipe: approved (+ optional reason)
+    Pipe->>Plumb: write score (gate_tds, approved, turn_count)
+    Pipe->>Plumb: close span
+    Pipe->>State: update ## current → phase=code_gen
+    Pipe-->>CLI: advance OK
+    CLI-->>User: stage 5 (code_gen) — opening worktree
+```
+
+The same shape repeats at every gate. The Stage-4 → Stage-5 transition
+adds a `git worktree add` between span close and `## current` update;
+gate-4 (`gate_commit`) is the only gate written by the post-commit
+hook rather than the CLI prompt path.
 
 ## Technology Stack
 
 | Layer                  | Choice                        | Rationale                                                                     |
 | ---------------------- | ----------------------------- | ----------------------------------------------------------------------------- |
 | Language               | Python 3.11+                  | Matches plumb + the rest of the author's backend work; stdlib `tomllib` ships with 3.11. |
-| CLI library            | `click` or `typer` (TBD)      | Tech Lead pick. Both are fine; `typer` if the type-hint ergonomics pay off; `click` if stability over novelty. |
+| CLI library            | `typer` ≥ 0.12                | Type-hint ergonomics over `click`. If this proves wrong during Day 1, swap is one file. |
 | Config                 | `tomllib` (stdlib)            | No runtime dep.                                                               |
-| Measurement            | plumb (local path install)    | Required dependency; out of scope to fork.                                    |
-| Version control        | git 2.5+                      | Needed for `git worktree`; post-commit hook is standard.                     |
+| Measurement            | plumb (path install, pinned SHA) | Required dependency; out of scope to fork. Lifted to versioned release at v1.1. |
+| Version control        | git ≥ 2.5                     | Needed for `git worktree`; post-commit hook is standard.                     |
 | Persistence (atlas)    | Flat files only               | See "Storage strategy" above.                                                 |
-| Testing                | `pytest`                      | Already in the scaffolding.                                                   |
+| Testing                | `pytest` ≥ 8.0                | Already in the scaffolding.                                                   |
+| Lint / type            | `ruff` ≥ 0.4, `mypy` ≥ 1.10   | All three (`ruff check`, `ruff format`, `mypy src`) are CI gates in v1.       |
 
 No databases, no ORMs, no web framework. If atlas grows any of these
 in v1, it has drifted from scope.
@@ -222,10 +327,12 @@ as data, not as a constraint.
 
 Performance ceilings that *do* matter:
 
-- `atlas status` must return in < 500ms on cold cache (it reads one
-  markdown file).
-- Post-commit hook must complete in < 1s (otherwise the user's commit
-  flow feels broken).
+- `atlas status` < 500 ms cold cache (reads one markdown file).
+- Post-commit hook < 1 s (longer makes the user's commit flow feel
+  broken).
+
+Both targets are spot-checked during the Week 4 real run via `time`;
+no continuous perf gate in CI for v1.
 
 ## Security Architecture
 
@@ -249,10 +356,12 @@ Restated from PRD §6.4 for completeness:
   against a sacrificial Flask repo.
 - **"Production."** There is no production for v1. The tool runs on
   the author's laptop.
-- **CI.** GitHub Actions running `pytest`, `ruff check`, and the
-  routing-ground-truth fixture test. No deployment step.
+- **CI.** GitHub Actions on push + PR: `pytest`, `ruff check`,
+  `mypy src`, and the routing-ground-truth fixture test. No deployment
+  step.
 - **Release.** No release mechanism in v1 — the repo *is* the
-  artifact. A tagged `v1.0` when Week 4 ships.
+  artifact. A tagged `v1.0` when Week 4 ships and a full end-to-end
+  run completes on the real target.
 
 ## Trade-offs & Alternatives
 
@@ -262,43 +371,73 @@ Restated from PRD §6.4 for completeness:
    deterministic 7-stage pipeline, a framework imports complexity
    the pipeline doesn't use.
 2. **plumb via direct Python calls vs. subprocess.**
-   *Tentative:* direct calls (simpler, faster, shared process).
-   *Open question #1* in the PRD — Tech Lead decides.
-3. **Score writing via post-commit hook vs. direct plugin edits.**
-   *Chosen:* post-commit hook parses plugin stdout.
-   *Rejected:* modifying `DEV-ESSENTIALS` to write scores directly.
-   Keeps the plugin unchanged; accepts that parsing is brittle and
-   will break if the plugin's output format changes.
-4. **Resume protocol via CLAUDE.md instruction vs. `/dev-resume`
+   *Chosen (2026-04-24):* direct in-process calls. Same author, no
+   trust boundary to enforce; subprocess adds serialization overhead
+   and a second failure mode the v1 LoC budget can't absorb.
+   *Revisit:* v1.1, when the HTTP shell lands — request lifetimes
+   and plumb writes diverge in failure semantics, and a boundary
+   becomes worth its cost.
+3. **Plugin lifecycle: exit code vs. stdout marker vs. polling.**
+   *Chosen (2026-04-24):* exit code primary, stdout for score parsing
+   only. *Rejected:* sentinel markers (couples atlas to plugin output
+   format) and polling (no plugin emits a heartbeat). Each invocation
+   wrapped in a timeout to bound the worst case.
+4. **Score writing via post-commit hook vs. direct plugin edits.**
+   *Chosen:* post-commit hook parses plugin stdout. *Rejected:*
+   modifying `DEV-ESSENTIALS` to write scores directly. Keeps the
+   plugin unchanged; accepts that parsing is brittle and will break
+   if the plugin's output format changes.
+5. **Resume protocol via CLAUDE.md instruction vs. `/dev-resume`
    slash command.**
-   *Chosen for v1:* instruction paragraph.
-   *Deferred to v2:* slash command. The cost of drifting once is
-   low; the cost of building the wrong slash command twice is
-   higher.
-5. **Stage 5 worktree boundary vs. branch + reset.**
-   *Chosen:* `git worktree`.
-   *Rejected:* feature branch on the main working tree. Worktree
-   gives a physical directory boundary the code-gen agent cannot
-   accidentally escape; feature branches do not.
+   *Chosen for v1:* instruction paragraph. *Deferred to v2:* slash
+   command. The cost of drifting once is low; the cost of building
+   the wrong slash command twice is higher.
+6. **Stage 5 worktree boundary vs. branch + reset.**
+   *Chosen:* `git worktree`. *Rejected:* feature branch on the main
+   working tree. Worktree gives a physical directory boundary the
+   code-gen agent cannot accidentally escape; feature branches do
+   not.
+7. **`runs.kind` discriminator now vs. later.**
+   *Chosen (2026-04-24):* defer. v1 writes runs without a kind
+   column. *Rejected:* speculative schema. Adding later (single
+   column + backfill of existing rows to `"dev_workflow"`) is
+   cheap; designing for an undefined second kind is not.
+8. **`.atlas/current-run` mismatch handling.**
+   *Chosen (2026-04-24):* detect, print recovery hint naming both
+   `run_id` values, refuse to continue. *Rejected:* automatic
+   reconciliation. A silent fix is the failure mode the resume
+   protocol is built to avoid.
 
 ## Risks & Mitigation
 
-See [`../1_product_and_research/PRD.md`](../1_product_and_research/PRD.md)
-"Risks and Mitigation."
+Architectural risks specific to the design (operational risks live
+in [`../1_product_and_research/PRD.md`](../1_product_and_research/PRD.md) §"Risks and Mitigation"):
+
+| Risk                                                                      | Architectural mitigation                                                                                          |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Worktree boundary leaks — Stage 5 commits land on `main`                  | Physical directory boundary via `git worktree`; CI test asserts `git log main` unchanged from run start to gate 4. |
+| Post-commit hook stdout parser breaks on plugin output drift              | Treat parsing as best-effort; on parse failure, log + continue, do not block the run. Revisit once schema stabilizes. |
+| `.atlas/current-run` ↔ `tasks.md` divergence corrupts pipeline state      | State-consistency contract: every CLI entry point validates run_id match and refuses to continue on mismatch.     |
+| plumb API churn during v1                                                 | Path install pinned to a specific commit SHA in `pyproject.toml`; lifted to versioned release at v1.1.            |
+| Direct in-process plumb calls become a problem when the HTTP shell lands  | Boundary kept thin (`atlas.plumb_io` is the single seam); v1.1 swaps the wrapper without touching the pipeline.   |
+| Resume-from-compaction fails because `tasks.md` is missing or malformed   | `atlas run` creates `tasks.md` before any other side effect; `atlas status` fails loudly if the file is absent.   |
 
 ## Future Considerations
 
 - **v1.1 — HTTP shell.** A thin FastAPI or Flask layer around the
   CLI so a mobile shortcut can trigger `atlas run`. Adds
   authentication, request validation, and a small queue; none of
-  that is in v1.
+  that is in v1. This is also when the atlas ↔ plumb boundary
+  warrants reconsideration as IPC rather than direct calls.
 - **v1.2 — Bounded auto-retry in the worktree.** Stage 5 retries
   `/verify` failures automatically with a hard iteration cap. This
   is where paired `examples` rows (failed span → passing span) start
   appearing at zero marginal authoring cost.
 - **v2 — Multiple run kinds.** If atlas picks up non-dev-workflow
   tasks (content-pipeline runs, data-migration runs), `runs.kind`
-  becomes meaningful. PRD open question #4.
+  becomes meaningful and the schema gains the column.
+- **v2 — `/dev-resume` slash command.** Replaces the CLAUDE.md
+  resume-instruction paragraph once drift is felt twice.
 - **Upstream contribution path.** If a reference repo ends up
   implementing the phase-gated-pipeline-with-state-file pattern
   first, atlas should fork-and-trim rather than ship a third
