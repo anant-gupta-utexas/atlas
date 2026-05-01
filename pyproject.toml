@@ -1,12 +1,24 @@
 [project]
 name = "atlas"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local-CLI agent orchestrator + metrics logger for a phase-gated dev workflow."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # plumb — pin commit SHA once available; optional for Phase 1 stubs
     # "plumb @ git+https://github.com/example/plumb.git@<sha>",
+    "typer>=0.12",
+]
+
+[project.scripts]
+atlas = "atlas.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=6",
+    "ruff>=0.4",
+    "mypy>=1.10",
 ]
 
 [build-system]
@@ -19,6 +31,21 @@ packages = ["src/atlas"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "e2e: end-to-end tests requiring a real git repo and stub plugins",
+]
+addopts = "--ignore=tests/e2e"
+
+[tool.coverage.run]
+source = ["src/atlas"]
+omit = [
+    "src/atlas/cli.py",              # thin Typer wrapper; tested via E2E / integration
+    "src/atlas/post_commit_hook.py", # runs in a separate subprocess (git hook)
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
 
 [tool.mypy]
 strict = true
@@ -30,3 +57,4 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+ignore = ["UP007"]  # allow X | Y union syntax for older-mypy compat

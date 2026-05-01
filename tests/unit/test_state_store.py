@@ -166,3 +166,61 @@ def test_tasks_md_write_is_atomic(tmp_path, monkeypatch):
 
     tmp_file = tmp_path / "dev" / "active" / ctx.slug / "tasks.md.tmp"
     assert not tmp_file.exists(), ".tmp file should not remain after atomic write"
+
+
+# ---------------------------------------------------------------------------
+# Edge cases — coverage for uncovered branches
+# ---------------------------------------------------------------------------
+
+
+def test_read_current_run_returns_none_when_file_absent(tmp_path):
+    store = _make_store(tmp_path)
+    assert store.read_current_run() is None
+
+
+def test_read_current_run_returns_none_when_file_has_one_line(tmp_path):
+    store = _make_store(tmp_path)
+    atlas_dir = tmp_path / ".atlas"
+    atlas_dir.mkdir()
+    (atlas_dir / "current-run").write_text("only-one-line\n")
+    assert store.read_current_run() is None
+
+
+def test_delete_current_run_is_noop_when_absent(tmp_path):
+    store = _make_store(tmp_path)
+    store.delete_current_run()  # should not raise
+
+
+def test_first_unchecked_skips_unknown_stage_name(tmp_path):
+    """first_unchecked must not crash on unrecognised checkbox label."""
+    store = _make_store(tmp_path)
+    ctx = _make_ctx(tmp_path)
+    store.create_tasks_md(ctx)
+
+    # Inject a line with a bad stage name directly into tasks.md
+    path = tmp_path / "dev" / "active" / ctx.slug / "tasks.md"
+    content = path.read_text()
+    content = content.replace("- [ ] research", "- [ ] unknown_stage\n- [ ] research")
+    path.write_text(content)
+
+    # Should return research (skipping "unknown_stage")
+    result = store.first_unchecked(ctx)
+    assert result == StageName.RESEARCH
+
+
+def test_assert_consistent_raises_when_tasks_md_has_no_run_id_comment(tmp_path):
+    store = _make_store(tmp_path)
+    ctx = _make_ctx(tmp_path)
+    store.create_tasks_md(ctx)
+    store.write_current_run(ctx.run_id, ctx.slug)
+
+    # Remove the run_id comment from tasks.md
+    path = tmp_path / "dev" / "active" / ctx.slug / "tasks.md"
+    content = path.read_text()
+    content = "\n".join(
+        line for line in content.splitlines() if "run_id:" not in line
+    )
+    path.write_text(content)
+
+    with pytest.raises(StateInconsistencyError, match="no run_id comment"):
+        store.assert_consistent(ctx)

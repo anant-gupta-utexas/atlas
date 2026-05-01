@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
-import uuid
-from dataclasses import dataclass, replace
+import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -12,10 +12,25 @@ from atlas.stages import STAGE_BY_NAME, STAGES, GateLabel, StageName, StageSpec
 if TYPE_CHECKING:
     from atlas.plumb_io import PlumbIO
     from atlas.state import StateStore
+    from atlas.worktree import WorktreeManager
 
 _ROUTING_FIXTURE_PATH = (
     Path(__file__).parent.parent.parent / "tests" / "fixtures" / "routing_ground_truth.json"
 )
+
+# Per-stage subprocess timeouts (seconds). code_gen gets extra headroom.
+_DEFAULT_TIMEOUT_S: dict[str, int] = {
+    "research": 600,
+    "prd_draft": 600,
+    "trd_draft": 600,
+    "tds_gen": 600,
+    "plan_review": 600,
+    "code_gen": 1800,
+    "code_review": 600,
+}
+
+_GATE_MAX_REASON_BYTES = 4096
+_GATE_MAX_RETRIES = 3
 
 
 class RoutingDriftError(Exception):
@@ -83,12 +98,14 @@ class Pipeline:
         plumb: "PlumbIO",
         runner: StageRunner,
         prompter: GatePrompter,
+        worktree: "WorktreeManager | None" = None,
     ) -> None:
         self._repo_root = repo_root
         self._state = state
         self._plumb = plumb
         self._runner = runner
         self._prompter = prompter
+        self._worktree = worktree
         self._validate_routing_fixture()
 
     # ------------------------------------------------------------------
@@ -134,6 +151,18 @@ class Pipeline:
             return None
 
         stage = STAGE_BY_NAME[next_name]
+
+        # Stage 5 (code_gen) runs inside a git worktree; create it before invoking the runner.
+        if stage.name == StageName.CODE_GEN and self._worktree is not None:
+            worktree_path = self._worktree.create(slug=ctx.slug, run_id=ctx.run_id)
+            ctx = RunContext(
+                run_id=ctx.run_id,
+                slug=ctx.slug,
+                task=ctx.task,
+                repo_root=ctx.repo_root,
+                worktree_path=worktree_path,
+            )
+
         outcome = self._runner.run(ctx=ctx, stage=stage)
 
         span_id = self._plumb.record_span(
@@ -175,7 +204,8 @@ class Pipeline:
             )
 
         if stage.gate_label == GateLabel.GATE_COMMIT:
-            # Gate 4 — written by post-commit hook; orchestrator returns awaiting_hook
+            # Gate 4 — written by post-commit hook; orchestrator returns awaiting_hook.
+            # No gate_commit user_signal score is written here.
             return StageOutcome(
                 stage=stage,
                 span_id=span_id,
@@ -282,3 +312,135 @@ def _parse_task_from_tasks_md(path: Path) -> str:
         if line.startswith("# tasks —"):
             return line[len("# tasks —"):].strip()
     return path.parent.name
+
+
+# ---------------------------------------------------------------------------
+# SubprocessStageRunner (T4.1 + T4.3)
+# ---------------------------------------------------------------------------
+
+
+class SubprocessStageRunner:
+    """
+    Invokes plugins via ``claude --slash <plugin> --context <ctx_file>``.
+
+    All subprocess calls are list-form (no ``shell=True``).  Plugin names are
+    validated against the allow-list in ``plugin_resolver`` before any
+    subprocess is spawned (T4.3).
+    """
+
+    def __init__(
+        self,
+        *,
+        timeout_overrides: dict[str, int] | None = None,
+        command_overrides: dict[str, str] | None = None,
+    ) -> None:
+        self._timeout_overrides = timeout_overrides or {}
+        self._command_overrides = command_overrides or {}
+
+    def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        from atlas.plugin_resolver import resolve  # local import to avoid cycles
+
+        # T4.3 — allow-list check before any subprocess call
+        plugin_cmd = resolve(stage.tool, overrides=self._command_overrides)
+
+        timeout_s = self._timeout_overrides.get(
+            stage.name.value, _DEFAULT_TIMEOUT_S[stage.name.value]
+        )
+        cwd = ctx.worktree_path if ctx.worktree_path is not None else ctx.repo_root
+
+        try:
+            result = subprocess.run(
+                ["claude", "--slash", plugin_cmd, "--context", stage.tool],
+                cwd=cwd,
+                capture_output=True,
+                check=False,
+                timeout=timeout_s,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            return StageOutcome(
+                stage=stage,
+                span_id="",
+                status="failure",
+                output_text="",
+                error_type="plugin_timeout",
+            )
+
+        if result.returncode != 0:
+            return StageOutcome(
+                stage=stage,
+                span_id="",
+                status="failure",
+                output_text=result.stdout,
+                error_type="plugin_nonzero_exit",
+            )
+
+        return StageOutcome(
+            stage=stage,
+            span_id="",
+            status="success",
+            output_text=result.stdout,
+            error_type=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# ClickPrompter (T4.2)
+# ---------------------------------------------------------------------------
+
+
+class AbortedError(Exception):
+    """Raised by ClickPrompter when the user quits or gives too many bad inputs."""
+
+
+class ClickPrompter:
+    """
+    Interactive gate prompter using ``input()`` (swappable for Typer/Click).
+
+    Re-asks up to ``_GATE_MAX_RETRIES`` times on unparseable input, then
+    aborts the run.  ``q`` / ``quit`` aborts immediately.  The reason is
+    length-clamped to ``_GATE_MAX_REASON_BYTES`` bytes.
+    """
+
+    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+        prompt = (
+            f"\nGate {gate_index} — {stage.name.value}\n"
+            "Output reviewed. [a]pprove / [r]eject reason / q to quit: "
+        )
+
+        for attempt in range(_GATE_MAX_RETRIES):
+            try:
+                raw = input(prompt).strip()
+            except EOFError:
+                raw = "q"
+
+            if raw.lower() in ("q", "quit"):
+                raise AbortedError("User quit at gate.")
+
+            if raw.lower() in ("a", "approve"):
+                return GateDecision(label="approved", turn_count=attempt + 1, reason=None)
+
+            if raw.lower().startswith("r"):
+                reason_raw = raw[1:].strip() if len(raw) > 1 else ""
+                if not reason_raw:
+                    try:
+                        reason_raw = input("  Reason: ").strip()
+                    except EOFError:
+                        reason_raw = ""
+                reason = _clamp_reason(reason_raw)
+                return GateDecision(label="rejected", turn_count=attempt + 1, reason=reason)
+
+            print(f"  Unrecognised input {raw!r}. Expected a, r <reason>, or q.")
+
+        raise AbortedError(
+            f"Gate {gate_index}: {_GATE_MAX_RETRIES} unparseable inputs — aborting run."
+        )
+
+
+def _clamp_reason(reason: str) -> str:
+    """Truncate reason to _GATE_MAX_REASON_BYTES bytes; append a note if truncated."""
+    encoded = reason.encode()
+    if len(encoded) <= _GATE_MAX_REASON_BYTES:
+        return reason
+    truncated = encoded[:_GATE_MAX_REASON_BYTES].decode(errors="ignore")
+    return truncated + " … [truncated]"
