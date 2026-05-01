@@ -36,7 +36,7 @@ next:  resolve D1 (plugin command resolution) before Phase 4; Phase 1 unblocked
 
 ## Phase 4 — Real plugin invocation + error paths
 
-- [ ] **D1 resolved** before starting (plugin command resolution shape)
+- [x] **D1 resolved** — mapping table (C) + agent CLI invocation (A)
 - [ ] **T4.1** — `SubprocessStageRunner` (list-form, timeout, capture)
 - [ ] **T4.2** — `ClickPrompter` (re-prompt 3x, `q` aborts, 4 KB clamp)
 - [ ] **T4.3** — Subprocess argument allow-list (`RoutingDriftError`)

@@ -251,15 +251,46 @@ Effort scale: S = ½ day, M = 1 day, L = 1.5 days, XL = 2+ days.
 
 These came up during this TRS and need user input before the relevant phase starts. Listed in order of urgency.
 
-### D1 — Plugin command resolution shape (Phase 4 blocker)
+### D1 — Plugin command resolution shape (RESOLVED)
 
-The orchestrator needs a way to map a `StageSpec.tool` string (e.g. `"consult-experts:pm"`) to an actual subprocess argv. The PRD/TRD don't specify how plugins are invoked at the shell.
+**Decision: Option C — A small `atlas/plugin_resolver.py` mapping table + Option A for actual invocation.**
 
-- **Option A — Slash-command shell wrapper.** Atlas invokes `claude --slash consult-experts:pm "<task>"` (or whatever the agent CLI exposes). *Pros:* aligns with how the user would invoke them manually. *Cons:* tight coupling to a specific agent CLI; tool resolution becomes "whatever that CLI does."
-- **Option B — Direct plugin entry-point invocation.** Each plugin exposes a command in `~/.claude/plugins/<name>/bin/<entry>`; atlas invokes that directly. *Pros:* fewer layers; testable. *Cons:* requires plugin authors to expose entry points; not how DEV-ESSENTIALS ships today.
-- **Option C — A small `atlas/plugin_resolver.py` mapping table.** Hard-code the four plugin commands atlas needs in a config-overridable dict. *Pros:* simplest, ~10 LoC. *Cons:* drift if plugin shapes change (mitigated by routing fixture).
+The orchestrator maps a `StageSpec.tool` string (e.g. `"consult-experts:pm"`) to a subprocess argv via:
 
-**Recommendation:** Option C. It matches the "state machine, not a framework" line and keeps the LoC budget intact. Option A is a v1.1 thing once the agent CLI surface stabilizes.
+1. **Mapping table.** `src/atlas/plugin_resolver.py` contains a dict mapping tool names to agent commands:
+   ```python
+   PLUGIN_COMMANDS = {
+       "consult-experts:research": "consult-experts",
+       "consult-experts:pm": "consult-experts",
+       "consult-experts:tech-lead": "consult-experts",
+       "dev-docs-be": "dev-docs-be",
+       "plan-reviewer": "plan-reviewer",
+       "code-gen-agent": "code-gen-agent",
+       "code-review": "code-review",
+   }
+   ```
+
+2. **Invocation shape (Option A).** Atlas invokes the agent CLI via slash commands:
+   ```python
+   subprocess.run(
+       ["claude", "--slash", plugin_name, "--context", context_file],
+       cwd=cwd,
+       capture_output=True,
+       check=False,
+       timeout=STAGE_TIMEOUT_S,
+   )
+   ```
+   The agent CLI resolves the slash command to the actual plugin. Atlas stays decoupled from plugin internals.
+
+3. **Config override.** `.atlas.toml` can override individual tool mappings if a user has a custom agent setup.
+
+**Rationale:**
+- Simplicity: ~10 LoC mapping table, no custom entry-point discovery logic.
+- Decoupling: Atlas speaks agent CLI, not directly to plugins. Plugin changes don't break atlas.
+- Testability: Mapping table is data; subprocess calls are easily mocked.
+- v1.1 ready: If the agent CLI surface changes, update the mapping table + routing fixture. No code churn.
+
+**LoC impact:** +15 lines for `plugin_resolver.py` (table + resolver function + allow-list check). No impact on Phase 4 LoC budget.
 
 ### D2 — `examples.expected_output` semantics on rejection (Phase 2)
 
