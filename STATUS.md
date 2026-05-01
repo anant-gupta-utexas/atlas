@@ -49,6 +49,31 @@ to start Phase 1: skeleton state machine.
 - **Phase 5** (Day 8): E2E + release gates
   - Real run on throwaway target; coverage/lint gates; v1.0 tag
 
+## v1 module coverage
+
+The TRS covers `atlas.pipeline` and its collaborators. The three remaining
+modules (`cli`, `config`, `hook`) are owned within the same TRS phases but
+were scoped out of the design sections. Full picture:
+
+| Module | File | Est. LoC | TRS coverage | Status |
+| --- | --- | --- | --- | --- |
+| CLI entry point | `src/atlas/cli.py` | 25 | Out of scope (thin Typer wrapper) | Not started |
+| Stage table + enums | `src/atlas/stages.py` | 25 | T1.1 | Not started |
+| State machine | `src/atlas/orchestrator.py` | 110 | T1.2, T1.4, T2.2, T3.2, T4.1, T4.2, T4.3 | Not started |
+| State store | `src/atlas/state.py` | 60 | T1.3 | Not started |
+| plumb wrapper | `src/atlas/plumb_io.py` | 30 | T2.1, T2.3 | Not started |
+| Worktree manager | `src/atlas/worktree.py` | 35 | T3.1 | Not started |
+| Plugin resolver | `src/atlas/plugin_resolver.py` | 15 | T4.3 (D1 decision) | Not started |
+| TOML config | `src/atlas/config.py` | 20 | Out of scope (load + freeze only) | Not started |
+| Post-commit hook | `src/atlas/post_commit_hook.py` | 30 | Out of scope (separate process) | Not started |
+| Routing fixture | `tests/fixtures/routing_ground_truth.json` | — | T1.1 | Not started |
+| CI workflow | `.github/workflows/ci.yml` | — | T5.2 | Not started |
+| **Total** | | **~350** | | |
+
+All modules are v1 blockers. `cli.py`, `config.py`, and `post_commit_hook.py`
+have no TRS but are small enough to implement directly against the SDD +
+TRD specs. Flag for a quick spec pass before Phase 4 if they grow unexpectedly.
+
 ## Blocked / waiting
 
 - Nothing blocked. Phase 1 ready to start.
