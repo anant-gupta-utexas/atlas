@@ -1,0 +1,58 @@
+[
+  {
+    "stage_index": 0,
+    "stage_name": "research",
+    "expected_tool": "consult-experts:research",
+    "expected_span_kind": "plan",
+    "gate_label": "gate_research",
+    "gate_index": 0
+  },
+  {
+    "stage_index": 1,
+    "stage_name": "prd_draft",
+    "expected_tool": "consult-experts:pm",
+    "expected_span_kind": "plan",
+    "gate_label": "gate_prd",
+    "gate_index": 1
+  },
+  {
+    "stage_index": 2,
+    "stage_name": "trd_draft",
+    "expected_tool": "consult-experts:tech-lead",
+    "expected_span_kind": "plan",
+    "gate_label": "gate_trd",
+    "gate_index": 2
+  },
+  {
+    "stage_index": 3,
+    "stage_name": "tds_gen",
+    "expected_tool": "dev-docs-be",
+    "expected_span_kind": "plan",
+    "gate_label": null,
+    "gate_index": null
+  },
+  {
+    "stage_index": 4,
+    "stage_name": "plan_review",
+    "expected_tool": "plan-reviewer",
+    "expected_span_kind": "verify",
+    "gate_label": "gate_tds",
+    "gate_index": 3
+  },
+  {
+    "stage_index": 5,
+    "stage_name": "code_gen",
+    "expected_tool": "code-gen-agent",
+    "expected_span_kind": "subagent",
+    "gate_label": "gate_commit",
+    "gate_index": 4
+  },
+  {
+    "stage_index": 6,
+    "stage_name": "code_review",
+    "expected_tool": "code-review",
+    "expected_span_kind": "verify",
+    "gate_label": "gate_phase_complete",
+    "gate_index": 5
+  }
+]
