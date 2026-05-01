@@ -292,31 +292,36 @@ The orchestrator maps a `StageSpec.tool` string (e.g. `"consult-experts:pm"`) to
 
 **LoC impact:** +15 lines for `plugin_resolver.py` (table + resolver function + allow-list check). No impact on Phase 4 LoC budget.
 
-### D2 — `examples.expected_output` semantics on rejection (Phase 2)
+### D2 — `examples.expected_output` semantics on rejection (RESOLVED)
 
-Per PRD §"Gate rejection path", the rejected artifact is the *input* half of a future paired example, with the corrected output filled in on the next approval. Plumb's `Example` type takes `inputs_hash` + `expected_output_hash` at write time.
+**Decision: Option A — Write `examples` row with `expected_output_hash=None` on rejection; backfill on next approval.**
 
-- **Option A — Write `examples` row with `expected_output_hash=None` on rejection; backfill on next approval.** Requires plumb to allow null `expected_output_hash` (the plumb API ref doesn't specify nullability).
-- **Option B — Write `examples` row only on the *corrected* approval, capturing both halves at once.** Simpler; loses the "rejection captured at zero marginal cost" property the PRD wants.
-- **Option C — Write two examples rows: rejection (input only) and approval (input + corrected output), linked via a v1.1 column.** Speculative, kicks the can.
+On gate rejection:
+- Write `examples` row with `origin_run_id`, `origin_span_id`, `inputs_hash` (SHA256 of task description), `expected_output_hash=None`.
+- This captures the rejected artifact as a "input half" with no expected output yet.
 
-**Recommendation:** Confirm with plumb's author whether `expected_output_hash` can be null in the schema. If yes, A. If no, B (and revisit at v1.1).
+On gate re-approval (after correction):
+- Write a second `examples` row (or backfill the first; schema TBD) with the corrected `expected_output_hash`.
+- Together, they form a paired example for future training.
 
-### D3 — Per-stage timeout defaults (Phase 4)
+**Rationale:**
+- Plumb allows null `expected_output_hash` (confirmed).
+- Achieves the PRD goal: "rejection captured at zero marginal cost."
+- Paired examples are automatically available for offline→online loop without extra user work.
+- v1.1 can refine the backfill mechanism if needed.
 
-The orchestrator's stage timeouts are in `.atlas.toml`. Defaults proposed: 600s for plan stages, 1800s for code_gen. Code_gen timeout in particular is a guess.
+### D3 — Per-stage timeout defaults (RESOLVED)
 
-- **Option A — Use the proposed defaults; let the user tune via config.**
-- **Option B — Disable timeout for code_gen entirely; rely on the user quitting via `q`.**
-- **Option C — Make all stage timeouts user-configurable with no defaults; require the user to set them in `.atlas.toml` before first run.**
+**Decision: Option A — Use the proposed defaults; let the user tune via config.**
 
-**Recommendation:** A. The numbers are guesses but they bound the worst case (a runaway plugin loop). Real-world adjustment after the Day-5 run.
+Defaults committed to `.atlas.toml.example`:
+- Plan stages (0–4): 600s timeout.
+- Code_gen stage (5): 1800s timeout.
 
-### D4 — Whether to ship Phase 4's `prompter.py` as a separate file (Phase 4)
+These are educated guesses bounded to prevent runaway loops. Real-world tuning happens post-Day-5 run based on actual plugin latencies. Users can override per-stage in `.atlas.toml`.
 
-If `ClickPrompter` + abort handling exceeds ~30 LoC inside `orchestrator.py`, it should split into `src/atlas/prompter.py`. Mentioned because it bumps file count and would normally trigger CLAUDE.md's "new file type is a design-review trigger."
+### D4 — Whether to ship Phase 4's `prompter.py` as a separate file (RESOLVED)
 
-- **Option A — Keep in `orchestrator.py`** if it fits; split only if it grows past ~30 LoC.
-- **Option B — Split now** for testability symmetry with the other collaborators.
+**Decision: Option A — Keep in `orchestrator.py` if it fits; split only if it grows past ~30 LoC.**
 
-**Recommendation:** A — judge during implementation. The CLAUDE.md rule targets *new conceptual surfaces*, not pure refactor.
+`ClickPrompter` + abort handling is expected to be ~20–25 LoC. Lives inline in `orchestrator.py` until/unless it exceeds the threshold. The CLAUDE.md rule targets *new conceptual surfaces* (router modules, agent registries, UI frameworks), not internal refactors.

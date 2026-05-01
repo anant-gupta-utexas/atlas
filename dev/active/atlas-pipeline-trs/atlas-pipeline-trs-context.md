@@ -35,11 +35,7 @@ Reference notes for anyone picking up this work cold.
 | 7 | `add_span` is recorded *after* the stage completes (not opened on entry). | Matches plumb's buffer-once API. Status is known by the time atlas writes the span — there's no reason to open early. |
 | **D1** | Plugin command resolution: mapping table (C) + agent CLI invocation (A). | Decoupled, ~15 LoC, testable, config-overridable. Atlas speaks agent CLI; plugins are black boxes. |
 
-## Decisions still pending (see [`atlas-pipeline-trs-phases.md`](./atlas-pipeline-trs-phases.md) §"Pending Decisions")
-
-- **D2 — `examples.expected_output` nullability.** Blocker for Phase 2 if plumb forbids null. Need plumb-author confirmation.
-- **D3 — Per-stage timeout defaults.** Soft — we ship with guessed defaults, tune after Day-5 run.
-- **D4 — Whether prompter is its own file.** Soft — judged during Phase 4 implementation.
+All decisions resolved (D1–D4). See [`atlas-pipeline-trs-phases.md`](./atlas-pipeline-trs-phases.md) §"Pending Decisions" for details.
 
 ## Integration points
 

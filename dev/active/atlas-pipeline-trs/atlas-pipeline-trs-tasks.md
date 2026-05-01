@@ -6,9 +6,9 @@ Progress checklist. Source-of-truth for Phase scope is
 ## Current
 
 ```
-phase: not_started
+phase: decisions_complete
 gate:  none
-next:  resolve D1 (plugin command resolution) before Phase 4; Phase 1 unblocked
+next:  Phase 1 ready to start (all decisions resolved)
 ```
 
 ## Phase 1 — Skeleton + state machine
@@ -23,9 +23,9 @@ next:  resolve D1 (plugin command resolution) before Phase 4; Phase 1 unblocked
 
 - [ ] **T2.1** — `PlumbIO` wrapper (`record_span`, `record_user_signal`, `write_example`, `close_run`)
 - [ ] **T2.2** — Wire real `PlumbIO` into `Pipeline.step`
-- [ ] **T2.3** — Examples row on rejection (sha256 hashes per plumb ID format)
+- [ ] **T2.3** — Examples row on rejection (sha256 hashes per plumb ID format; `expected_output_hash=None` initially, backfill on correction)
 - [ ] Integration test: `test_pipeline_writes_full_span_tree`
-- [ ] Resolve **D2** before this phase ships
+- [ ] **D2 resolved** — write examples with null expected_output_hash
 
 ## Phase 3 — Worktree + gate-4 hand-off
 
@@ -38,10 +38,11 @@ next:  resolve D1 (plugin command resolution) before Phase 4; Phase 1 unblocked
 
 - [x] **D1 resolved** — mapping table (C) + agent CLI invocation (A)
 - [ ] **T4.1** — `SubprocessStageRunner` (list-form, timeout, capture)
-- [ ] **T4.2** — `ClickPrompter` (re-prompt 3x, `q` aborts, 4 KB clamp)
+- [ ] **T4.2** — `ClickPrompter` (re-prompt 3x, `q` aborts, 4 KB clamp; inline if <30 LoC)
 - [ ] **T4.3** — Subprocess argument allow-list (`RoutingDriftError`)
 - [ ] Unit tests for every plan §7 error scenario
-- [ ] **D3 resolved** (per-stage timeout defaults committed to `.atlas.toml.example`)
+- [x] **D3 resolved** — timeouts: 600s plan stages, 1800s code_gen
+- [x] **D4 resolved** — ClickPrompter inline if <30 LoC
 
 ## Phase 5 — End-to-end real run + release gates
 
