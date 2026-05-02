@@ -1,4 +1,5 @@
 """Unit tests for WorktreeManager (subprocess mocks)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from atlas.worktree import WorktreeError, WorktreeManager
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,7 +72,7 @@ def test_create_raises_on_dirty_repo(tmp_path: Path) -> None:
         # git status returns dirty output
         mock_run.return_value = _completed(stdout=" M some_file.py")
         with pytest.raises(WorktreeError, match="uncommitted changes to tracked files"):
-                mgr.create(slug=_SLUG, run_id=_RUN_ID)
+            mgr.create(slug=_SLUG, run_id=_RUN_ID)
 
 
 def test_create_raises_when_git_worktree_add_fails(tmp_path: Path) -> None:

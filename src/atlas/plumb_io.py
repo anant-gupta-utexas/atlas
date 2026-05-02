@@ -1,17 +1,17 @@
 """Plumb wrapper — exposes the only calls the orchestrator needs."""
+
 from __future__ import annotations
 
 import hashlib
 import json
 import secrets
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 try:
-    from plumb import ScorerKind, SpanKind, SpanStatus, run as plumb_run
-    from plumb.core.entities import Example, ExampleSource
+    from plumb import run as plumb_run  # type: ignore[import-not-found]
+    from plumb.core.entities import Example, ExampleSource  # type: ignore[import-not-found]
 
     _PLUMB_AVAILABLE = True
 except ModuleNotFoundError:  # pragma: no cover — only absent in CI without plumb
@@ -35,7 +35,7 @@ class PlumbIO:
     def __init__(self, *, real: bool = True, task_id: str = "") -> None:
         self._real = real and _PLUMB_AVAILABLE
         self._task_id = task_id
-        self._run_handle: object | None = None
+        self._run_handle: Any = None
         self._run_id: str | None = None
 
         # In-memory record for unit tests / stubs
@@ -54,9 +54,9 @@ class PlumbIO:
             self._run_id = _make_id()
             return self._run_id
 
-        ctx = plumb_run(task_id=task, kind="online")  # type: ignore[call-arg]
-        self._run_handle = ctx.__enter__()  # type: ignore[attr-defined]
-        self._run_id = self._run_handle.run_id  # type: ignore[attr-defined]
+        ctx = plumb_run(task_id=task, kind="online")
+        self._run_handle = ctx.__enter__()
+        self._run_id = self._run_handle.run_id
         return self._run_id
 
     def close_run(self, *, run_id: str, status: str) -> None:
@@ -70,9 +70,7 @@ class PlumbIO:
         if status != "success":
             exc = RuntimeError(status)
         try:
-            self._run_handle.__exit__(  # type: ignore[attr-defined]
-                type(exc), exc, None
-            )
+            self._run_handle.__exit__(type(exc), exc, None)
         except Exception:
             pass
 
@@ -92,7 +90,7 @@ class PlumbIO:
     ) -> str:
         """Buffer a span in plumb. Returns span_id."""
         if self._real and self._run_handle is not None:
-            span_id: str = self._run_handle.add_span(  # type: ignore[attr-defined]
+            span_id: str = self._run_handle.add_span(
                 kind,
                 name,
                 latency_ms=latency_ms,
@@ -121,11 +119,11 @@ class PlumbIO:
         run_id: str,
         span_id: str,
         metric: str,
-        decision: "GateDecision",
+        decision: GateDecision,
     ) -> None:
         """Buffer a user-signal score in plumb."""
         if self._real and self._run_handle is not None:
-            self._run_handle.add_score(  # type: ignore[attr-defined]
+            self._run_handle.add_score(
                 metric,
                 "user_signal",
                 value_label=decision.label,
@@ -144,9 +142,7 @@ class PlumbIO:
             }
         )
 
-    def flush_pending_scores(
-        self, *, run_id: str, pending_path: Path, span_id: str = ""
-    ) -> int:
+    def flush_pending_scores(self, *, run_id: str, pending_path: Path, span_id: str = "") -> int:
         """
         Drain ``.atlas/pending-scores.jsonl`` (written by the post-commit hook)
         through the live plumb run handle. Returns the number of scores flushed.
@@ -206,12 +202,12 @@ class PlumbIO:
         expected_hash = _sha256(expected) if expected is not None else None
 
         if self._real and _PLUMB_AVAILABLE:
-            example = Example(  # type: ignore[call-arg]
+            example = Example(
                 example_id=_make_id(),
                 task_id=self._task_id,
                 inputs_hash=inputs_hash,
                 expected_output_hash=expected_hash,
-                source=ExampleSource.PRODUCTION_PROMOTION,  # type: ignore[attr-defined]
+                source=ExampleSource.PRODUCTION_PROMOTION,
                 created_at=datetime.now(tz=UTC),
             )
             # write via storage adapter (per plumb API ref §"Recording Examples")
@@ -219,7 +215,7 @@ class PlumbIO:
             # for now buffer locally just like other records.
             self.examples.append(
                 {
-                    "example_id": example.example_id,  # type: ignore[attr-defined]
+                    "example_id": example.example_id,
                     "run_id": run_id,
                     "span_id": span_id,
                     "inputs_hash": inputs_hash,

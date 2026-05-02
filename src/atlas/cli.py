@@ -1,4 +1,5 @@
 """atlas CLI — thin Typer wrapper around Pipeline."""
+
 from __future__ import annotations
 
 import sys
@@ -58,7 +59,9 @@ def _make_pipeline(repo_root: Path, cfg: Config) -> Pipeline:
 @app.command()
 def run(
     task: str = typer.Argument(..., help="Task description, e.g. 'add response-cache middleware'"),
-    slug: str = typer.Option("", "--slug", "-s", help="Short name for the tasks.md directory (auto-derived if omitted)"),
+    slug: str = typer.Option(
+        "", "--slug", "-s", help="Short name for the tasks.md directory (auto-derived if omitted)"
+    ),
 ) -> None:
     """Start a new atlas pipeline run."""
     repo_root = _find_repo_root()
@@ -152,6 +155,7 @@ def hook(
     repo_root = _find_repo_root()
     if action == "install":
         from atlas.post_commit_hook import install
+
         install(repo_root)
     else:
         typer.echo(f"Unknown hook action: {action!r}. Use 'install'.", err=True)
@@ -166,6 +170,7 @@ def hook(
 def _slugify(text: str) -> str:
     """Convert task description to a filesystem-safe slug (max 40 chars)."""
     import re
+
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:40]
 

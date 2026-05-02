@@ -13,6 +13,7 @@ Each test pins one of the four behaviours fixed in that review pass:
 4. tasks.md checkbox stays unchecked when a stage fails or its gate rejects,
    so resume re-tries the same stage.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,7 +35,6 @@ from atlas.plumb_io import PlumbIO
 from atlas.post_commit_hook import _main_repo_root
 from atlas.stages import STAGES, StageName, StageSpec
 from atlas.state import StateStore
-
 
 # ---------------------------------------------------------------------------
 # Shared fakes
@@ -159,7 +159,9 @@ def _init_main_and_worktree(tmp_path: Path) -> tuple[Path, Path]:
     main = tmp_path / "main"
     main.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=main, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=main, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.t"], cwd=main, check=True, capture_output=True
+    )
     subprocess.run(["git", "config", "user.name", "t"], cwd=main, check=True, capture_output=True)
     (main / "README.md").write_text("x\n")
     subprocess.run(["git", "add", "."], cwd=main, check=True, capture_output=True)
@@ -300,9 +302,7 @@ def test_runner_passes_tasks_md_path_as_context(tmp_path: Path) -> None:
     assert "--task" in args
     assert args[args.index("--task") + 1] == "add cache middleware"
     # And NOT the bare tool identifier
-    assert research.tool not in (ctx_arg,), (
-        "regression: --context must not be the tool name"
-    )
+    assert research.tool not in (ctx_arg,), "regression: --context must not be the tool name"
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ The hook MUST resolve the *main* repo root, not the worktree root, because
 --git-common-dir`` for this — it returns the shared ``.git`` directory across
 worktrees.
 """
+
 from __future__ import annotations
 
 import json

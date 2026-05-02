@@ -1,4 +1,5 @@
 """tasks.md + .atlas/current-run state I/O."""
+
 from __future__ import annotations
 
 import os
@@ -49,24 +50,25 @@ class StateStore:
     def _tasks_md_path(self, slug: str) -> Path:
         return self._repo_root / "dev" / "active" / slug / "tasks.md"
 
-    def create_tasks_md(self, ctx: "RunContext") -> None:
+    def create_tasks_md(self, ctx: RunContext) -> None:
         path = self._tasks_md_path(ctx.slug)
         path.parent.mkdir(parents=True, exist_ok=True)
 
         stage_lines = "".join(_STAGE_LINE.format(name=s.name.value) for s in STAGES)
-        content = _TASKS_MD_HEADER.format(
-            slug=ctx.slug,
-            run_id=ctx.run_id,
-            phase=STAGES[0].name.value,
-            gate="none",
-            next_action="run stage 0 (research)",
-        ) + stage_lines
+        content = (
+            _TASKS_MD_HEADER.format(
+                slug=ctx.slug,
+                run_id=ctx.run_id,
+                phase=STAGES[0].name.value,
+                gate="none",
+                next_action="run stage 0 (research)",
+            )
+            + stage_lines
+        )
 
         _atomic_write(path, content)
 
-    def write_current_run(
-        self, run_id: str, slug: str, worktree_path: Path | None = None
-    ) -> None:
+    def write_current_run(self, run_id: str, slug: str, worktree_path: Path | None = None) -> None:
         self._atlas_dir.mkdir(parents=True, exist_ok=True)
         body = f"{run_id}\n{slug}\n"
         if worktree_path is not None:
@@ -99,7 +101,7 @@ class StateStore:
 
     def update_current_block(
         self,
-        ctx: "RunContext",
+        ctx: RunContext,
         *,
         phase: StageName,
         gate: str,
@@ -111,7 +113,7 @@ class StateStore:
         updated = _CURRENT_BLOCK_RE.sub(new_block, content)
         _atomic_write(path, updated)
 
-    def check_box(self, ctx: "RunContext", stage: StageName) -> None:
+    def check_box(self, ctx: RunContext, stage: StageName) -> None:
         path = self._tasks_md_path(ctx.slug)
         content = path.read_text()
 
@@ -124,7 +126,7 @@ class StateStore:
         updated = _CHECKBOX_RE.sub(replacer, content)
         _atomic_write(path, updated)
 
-    def first_unchecked(self, ctx: "RunContext") -> StageName | None:
+    def first_unchecked(self, ctx: RunContext) -> StageName | None:
         path = self._tasks_md_path(ctx.slug)
         content = path.read_text()
         for m in _CHECKBOX_RE.finditer(content):
@@ -136,7 +138,7 @@ class StateStore:
                     continue
         return None
 
-    def assert_consistent(self, ctx: "RunContext") -> None:
+    def assert_consistent(self, ctx: RunContext) -> None:
         pair = self.read_current_run()
         if pair is None:
             raise StateInconsistencyError(

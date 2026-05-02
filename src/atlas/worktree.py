@@ -1,4 +1,5 @@
 """Git worktree lifecycle management for stage 5 (code_gen)."""
+
 from __future__ import annotations
 
 import subprocess
@@ -175,12 +176,10 @@ class WorktreeManager:
             raise WorktreeError(f"git status failed: {result.stderr.strip()}")
 
         # Filter out untracked-file lines (start with "??")
-        dirty_lines = [
-            line for line in result.stdout.splitlines() if not line.startswith("??")
-        ]
+        dirty_lines = [line for line in result.stdout.splitlines() if not line.startswith("??")]
         if dirty_lines:
             raise WorktreeError(
                 "Repository has uncommitted changes to tracked files; "
                 "cannot create worktree.\n"
-                f"Dirty files:\n" + "\n".join(dirty_lines)
+                "Dirty files:\n" + "\n".join(dirty_lines)
             )

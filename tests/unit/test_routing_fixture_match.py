@@ -1,4 +1,5 @@
 """Release-blocker test: STAGES must match routing_ground_truth.json row-for-row."""
+
 from __future__ import annotations
 
 import json
@@ -40,9 +41,7 @@ def test_fixture_matches_stages_row_for_row() -> None:
     assert len(rows) == len(STAGES), "Fixture row count must equal STAGES length"
 
     for spec, row in zip(STAGES, rows, strict=True):
-        assert spec.index == row["stage_index"], (
-            f"Stage {spec.index}: index mismatch"
-        )
+        assert spec.index == row["stage_index"], f"Stage {spec.index}: index mismatch"
         assert spec.name.value == row["stage_name"], (
             f"Stage {spec.index}: name mismatch {spec.name.value!r} vs {row['stage_name']!r}"
         )
@@ -50,7 +49,8 @@ def test_fixture_matches_stages_row_for_row() -> None:
             f"Stage {spec.index}: tool mismatch {spec.tool!r} vs {row['expected_tool']!r}"
         )
         assert spec.span_kind == row["expected_span_kind"], (
-            f"Stage {spec.index}: span_kind mismatch {spec.span_kind!r} vs {row['expected_span_kind']!r}"
+            f"Stage {spec.index}: span_kind mismatch "
+            f"{spec.span_kind!r} vs {row['expected_span_kind']!r}"
         )
         expected_gate = row["gate_label"]
         actual_gate = spec.gate_label.value if spec.gate_label is not None else None

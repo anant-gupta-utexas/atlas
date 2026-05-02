@@ -8,6 +8,7 @@ the worktree hand-off.
 
 Skip when git is unavailable (CI without git configured).
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -22,10 +23,9 @@ from atlas.orchestrator import (
     StageOutcome,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, StageName, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateStore
 from atlas.worktree import WorktreeManager
-
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures

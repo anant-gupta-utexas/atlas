@@ -1,4 +1,5 @@
 """7-stage atlas pipeline orchestrator."""
+
 from __future__ import annotations
 
 import json
@@ -94,11 +95,11 @@ class Pipeline:
         self,
         *,
         repo_root: Path,
-        state: "StateStore",
-        plumb: "PlumbIO",
+        state: StateStore,
+        plumb: PlumbIO,
         runner: StageRunner,
         prompter: GatePrompter,
-        worktree: "WorktreeManager | None" = None,
+        worktree: WorktreeManager | None = None,
     ) -> None:
         self._repo_root = repo_root
         self._state = state
@@ -321,23 +322,17 @@ class Pipeline:
 
     def _validate_routing_fixture(self) -> None:
         if not _ROUTING_FIXTURE_PATH.exists():
-            raise RoutingDriftError(
-                f"Routing fixture not found: {_ROUTING_FIXTURE_PATH}"
-            )
+            raise RoutingDriftError(f"Routing fixture not found: {_ROUTING_FIXTURE_PATH}")
         rows = json.loads(_ROUTING_FIXTURE_PATH.read_text())
         if len(rows) != len(STAGES):
-            raise RoutingDriftError(
-                f"Fixture has {len(rows)} rows; STAGES has {len(STAGES)}"
-            )
+            raise RoutingDriftError(f"Fixture has {len(rows)} rows; STAGES has {len(STAGES)}")
         for spec, row in zip(STAGES, rows, strict=True):
             if (
                 spec.tool != row["expected_tool"]
                 or spec.span_kind != row["expected_span_kind"]
                 or spec.name.value != row["stage_name"]
             ):
-                raise RoutingDriftError(
-                    f"Stage {spec.index} drifted from fixture: {spec} vs {row}"
-                )
+                raise RoutingDriftError(f"Stage {spec.index} drifted from fixture: {spec} vs {row}")
 
 
 def _parse_task_from_tasks_md(path: Path) -> str:
@@ -345,7 +340,7 @@ def _parse_task_from_tasks_md(path: Path) -> str:
     content = path.read_text()
     for line in content.splitlines():
         if line.startswith("# tasks —"):
-            return line[len("# tasks —"):].strip()
+            return line[len("# tasks —") :].strip()
     return path.parent.name
 
 

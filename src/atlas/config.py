@@ -1,17 +1,10 @@
 """TOML config loader — merges .atlas.toml (repo) over ~/.atlas/config.toml (user)."""
+
 from __future__ import annotations
 
-import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomllib  # type: ignore[no-redef]
-    except ImportError:
-        import tomli as tomllib  # type: ignore[no-redef]
 
 
 @dataclass(frozen=True)
@@ -22,7 +15,7 @@ class Config:
     timeout_overrides: dict[str, int] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, repo_root: Path) -> "Config":
+    def load(cls, repo_root: Path) -> Config:
         """
         Load config by merging:
           1. Built-in defaults
@@ -43,20 +36,27 @@ class Config:
         if repo_cfg.exists():
             _deep_merge(merged, _read_toml(repo_cfg))
 
+        raw_plugin = merged.get("plugin_commands", {})
+        plugin_commands: dict[str, str] = (
+            {str(k): str(v) for k, v in raw_plugin.items()} if isinstance(raw_plugin, dict) else {}
+        )
+        raw_timeout = merged.get("timeout_overrides", {})
+        timeout_overrides: dict[str, int] = (
+            {str(k): int(v) for k, v in raw_timeout.items()}
+            if isinstance(raw_timeout, dict)
+            else {}
+        )
         return cls(
             repo_root=repo_root,
             plumb_db_path=Path(str(merged["plumb_db_path"])),
-            plugin_commands=dict(merged.get("plugin_commands", {})),  # type: ignore[arg-type]
-            timeout_overrides={
-                k: int(v)  # type: ignore[arg-type]
-                for k, v in dict(merged.get("timeout_overrides", {})).items()  # type: ignore[union-attr]
-            },
+            plugin_commands=plugin_commands,
+            timeout_overrides=timeout_overrides,
         )
 
 
 def _read_toml(path: Path) -> dict[str, object]:
     with path.open("rb") as f:
-        return tomllib.load(f)  # type: ignore[arg-type]
+        return tomllib.load(f)
 
 
 def _deep_merge(base: dict[str, object], override: dict[str, object]) -> None:

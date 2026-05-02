@@ -1,4 +1,5 @@
 """Unit tests for config.py — TOML loader + merge logic."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from atlas.config import Config, _deep_merge
-
 
 # ---------------------------------------------------------------------------
 # _deep_merge
@@ -58,20 +58,14 @@ def test_config_load_repo_toml_overrides_plumb_db(tmp_path: Path) -> None:
 
 def test_config_load_repo_toml_plugin_commands(tmp_path: Path) -> None:
     toml = tmp_path / ".atlas.toml"
-    toml.write_text(
-        "[plugin_commands]\n"
-        '"code-gen-agent" = "my-custom-agent"\n'
-    )
+    toml.write_text('[plugin_commands]\n"code-gen-agent" = "my-custom-agent"\n')
     cfg = Config.load(tmp_path)
     assert cfg.plugin_commands["code-gen-agent"] == "my-custom-agent"
 
 
 def test_config_load_repo_toml_timeout_overrides(tmp_path: Path) -> None:
     toml = tmp_path / ".atlas.toml"
-    toml.write_text(
-        "[timeout_overrides]\n"
-        "code_gen = 300\n"
-    )
+    toml.write_text("[timeout_overrides]\ncode_gen = 300\n")
     cfg = Config.load(tmp_path)
     assert cfg.timeout_overrides["code_gen"] == 300
 
@@ -81,7 +75,9 @@ def test_config_load_repo_toml_timeout_overrides(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_config_load_repo_takes_priority_over_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_config_load_repo_takes_priority_over_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Repo .atlas.toml must win over ~/.atlas/config.toml."""
     user_dir = tmp_path / "home" / ".atlas"
     user_dir.mkdir(parents=True)

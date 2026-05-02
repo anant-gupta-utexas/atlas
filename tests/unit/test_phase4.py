@@ -1,26 +1,22 @@
 """Unit tests for Phase 4: SubprocessStageRunner, ClickPrompter, plugin allow-list."""
+
 from __future__ import annotations
 
 import subprocess
-from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from atlas.orchestrator import (
+    _GATE_MAX_REASON_BYTES,
     AbortedError,
     ClickPrompter,
-    GateDecision,
     RunContext,
-    StageOutcome,
     SubprocessStageRunner,
     _clamp_reason,
-    _GATE_MAX_REASON_BYTES,
 )
 from atlas.stages import STAGES, StageName
-from atlas.worktree import WorktreeError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -80,7 +76,9 @@ def test_runner_timeout_returns_failure_with_plugin_timeout(tmp_path: Path) -> N
     runner = SubprocessStageRunner()
     ctx = _ctx(tmp_path)
 
-    with patch("atlas.orchestrator.subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 600)):
+    with patch(
+        "atlas.orchestrator.subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 600)
+    ):
         outcome = runner.run(ctx=ctx, stage=_RESEARCH_STAGE)
 
     assert outcome.status == "failure"
@@ -150,7 +148,7 @@ def test_runner_timeout_override_respected(tmp_path: Path) -> None:
 
 
 def test_unknown_plugin_raises_routing_drift_error_before_subprocess(tmp_path: Path) -> None:
-    from atlas.stages import StageSpec, GateLabel
+    from atlas.stages import GateLabel, StageSpec
 
     bad_stage = StageSpec(
         index=0,

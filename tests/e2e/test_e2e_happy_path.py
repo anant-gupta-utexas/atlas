@@ -9,6 +9,7 @@ Mark ``@pytest.mark.e2e`` is applied; run with ``pytest -m e2e`` to execute.
 The full manual run against real plugins is gated on the v1.0 tag (see T5.1
 in atlas-pipeline-trs-phases.md).
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -150,14 +151,16 @@ def test_e2e_all_trd_success_criteria(tmp_path: Path) -> None:
         if outcome.status == "awaiting_hook":
             # Simulate the post-commit hook writing the gate_commit score,
             # then step through the remaining stage manually.
-            plumb.scores.append({
-                "run_id": ctx.run_id,
-                "span_id": outcomes[-1].span_id,
-                "metric": "gate_commit",
-                "scorer": "user_signal",
-                "value_label": "approved",
-                "rationale": None,
-            })
+            plumb.scores.append(
+                {
+                    "run_id": ctx.run_id,
+                    "span_id": outcomes[-1].span_id,
+                    "metric": "gate_commit",
+                    "scorer": "user_signal",
+                    "value_label": "approved",
+                    "rationale": None,
+                }
+            )
 
     # --- Criterion 2: 7 spans in the correct order
     assert len(plumb.spans) == 7, f"Expected 7 spans, got {len(plumb.spans)}"
@@ -169,7 +172,8 @@ def test_e2e_all_trd_success_criteria(tmp_path: Path) -> None:
     # Stages with gates: 0, 1, 2, 4, 6 = 5 orchestrator scores; 1 hook score
     orchestrator_scores = [s for s in plumb.scores if s.get("metric") != "gate_commit"]
     assert len(orchestrator_scores) == 5, (
-        f"Expected 5 orchestrator gate scores, got {len(orchestrator_scores)}: {orchestrator_scores}"
+        f"Expected 5 orchestrator gate scores, "
+        f"got {len(orchestrator_scores)}: {orchestrator_scores}"
     )
     total_scores = len(plumb.scores)
     assert total_scores >= 5, f"Expected ≥5 total scores, got {total_scores}"

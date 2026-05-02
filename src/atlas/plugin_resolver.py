@@ -1,4 +1,5 @@
 """Plugin name → agent CLI command mapping (D1 resolution)."""
+
 from __future__ import annotations
 
 from atlas.orchestrator import RoutingDriftError

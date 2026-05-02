@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class StageName(str, Enum):
+class StageName(StrEnum):
     RESEARCH = "research"
     PRD_DRAFT = "prd_draft"
     TRD_DRAFT = "trd_draft"
@@ -14,7 +14,7 @@ class StageName(str, Enum):
     CODE_REVIEW = "code_review"
 
 
-class GateLabel(str, Enum):
+class GateLabel(StrEnum):
     GATE_RESEARCH = "gate_research"
     GATE_PRD = "gate_prd"
     GATE_TRD = "gate_trd"
@@ -34,7 +34,9 @@ class StageSpec:
 
 
 STAGES: tuple[StageSpec, ...] = (
-    StageSpec(0, StageName.RESEARCH, "plan", "consult-experts:research", GateLabel.GATE_RESEARCH, 0),
+    StageSpec(
+        0, StageName.RESEARCH, "plan", "consult-experts:research", GateLabel.GATE_RESEARCH, 0
+    ),
     StageSpec(1, StageName.PRD_DRAFT, "plan", "consult-experts:pm", GateLabel.GATE_PRD, 1),
     StageSpec(2, StageName.TRD_DRAFT, "plan", "consult-experts:tech-lead", GateLabel.GATE_TRD, 2),
     StageSpec(3, StageName.TDS_GEN, "plan", "dev-docs-be", None, None),

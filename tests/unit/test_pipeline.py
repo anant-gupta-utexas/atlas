@@ -1,4 +1,5 @@
 """Unit tests for the Pipeline state machine (Phase 1 + 2 coverage)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,7 +16,6 @@ from atlas.orchestrator import (
 from atlas.plumb_io import PlumbIO
 from atlas.stages import STAGES, GateLabel, StageName, StageSpec
 from atlas.state import StateInconsistencyError, StateStore
-
 
 # ---------------------------------------------------------------------------
 # Fakes / stubs
@@ -187,15 +187,12 @@ def test_stage_3_does_not_write_score(tmp_path):
     pipeline, plumb, _ = _make_pipeline(tmp_path)
     ctx = pipeline.start(task="task", slug="slug")
 
-    scores_before: list[dict] = []  # type: ignore[type-arg]
     for i in range(4):  # stages 0-3
         scores_before_step = list(plumb.scores)
         outcome = pipeline.step(ctx)
         assert outcome is not None
         if i == 3:  # tds_gen — no gate
-            assert len(plumb.scores) == len(scores_before_step), (
-                "Stage 3 should not write a score"
-            )
+            assert len(plumb.scores) == len(scores_before_step), "Stage 3 should not write a score"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +222,7 @@ def test_stage_5_does_not_write_gate_commit_score(tmp_path):
     scores_before = list(plumb.scores)
     pipeline.step(ctx)  # code_gen — no user-signal score
 
-    new_scores = plumb.scores[len(scores_before):]
+    new_scores = plumb.scores[len(scores_before) :]
     gate_commit_scores = [s for s in new_scores if s.get("metric") == "gate_commit"]
     assert len(gate_commit_scores) == 0
 

@@ -1,4 +1,5 @@
 """Unit tests for atlas.state.StateStore."""
+
 from __future__ import annotations
 
 import pytest
@@ -217,9 +218,7 @@ def test_assert_consistent_raises_when_tasks_md_has_no_run_id_comment(tmp_path):
     # Remove the run_id comment from tasks.md
     path = tmp_path / "dev" / "active" / ctx.slug / "tasks.md"
     content = path.read_text()
-    content = "\n".join(
-        line for line in content.splitlines() if "run_id:" not in line
-    )
+    content = "\n".join(line for line in content.splitlines() if "run_id:" not in line)
     path.write_text(content)
 
     with pytest.raises(StateInconsistencyError, match="no run_id comment"):
