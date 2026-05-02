@@ -106,6 +106,7 @@ class Pipeline:
         self._runner = runner
         self._prompter = prompter
         self._worktree = worktree
+        self._last_code_gen_span_id: str = ""
         self._validate_routing_fixture()
 
     # ------------------------------------------------------------------
@@ -128,13 +129,19 @@ class Pipeline:
         Resume an in-flight run from .atlas/current-run + tasks.md.
         Validates state consistency before returning the RunContext.
         """
-        pair = self._state.read_current_run()
-        if pair is None:
+        triple = self._state.read_current_run_with_worktree()
+        if triple is None:
             raise NoActiveRunError("No active atlas run in this repo.")
-        run_id, slug = pair
+        run_id, slug, worktree_path = triple
         tasks_path = self._repo_root / "dev" / "active" / slug / "tasks.md"
         task = _parse_task_from_tasks_md(tasks_path)
-        ctx = RunContext(run_id=run_id, slug=slug, task=task, repo_root=self._repo_root)
+        ctx = RunContext(
+            run_id=run_id,
+            slug=slug,
+            task=task,
+            repo_root=self._repo_root,
+            worktree_path=worktree_path,
+        )
         self._state.assert_consistent(ctx)
         return ctx
 
@@ -146,6 +153,17 @@ class Pipeline:
         """
         self._state.assert_consistent(ctx)
 
+        # Drain any gate_commit scores written by the post-commit hook since
+        # the last step. The hook can't open a plumb run handle itself, so it
+        # buffers to .atlas/pending-scores.jsonl.
+        pending = self._repo_root / ".atlas" / "pending-scores.jsonl"
+        if pending.exists():
+            self._plumb.flush_pending_scores(
+                run_id=ctx.run_id,
+                pending_path=pending,
+                span_id=self._last_code_gen_span_id,
+            )
+
         next_name = self._state.first_unchecked(ctx)
         if next_name is None:
             return None
@@ -153,7 +171,13 @@ class Pipeline:
         stage = STAGE_BY_NAME[next_name]
 
         # Stage 5 (code_gen) runs inside a git worktree; create it before invoking the runner.
-        if stage.name == StageName.CODE_GEN and self._worktree is not None:
+        # The path must outlive this step() call so stage 6 (code_review) operates on the
+        # generated code, not main. Persist it to .atlas/current-run.
+        if (
+            stage.name == StageName.CODE_GEN
+            and self._worktree is not None
+            and ctx.worktree_path is None
+        ):
             worktree_path = self._worktree.create(slug=ctx.slug, run_id=ctx.run_id)
             ctx = RunContext(
                 run_id=ctx.run_id,
@@ -162,6 +186,7 @@ class Pipeline:
                 repo_root=ctx.repo_root,
                 worktree_path=worktree_path,
             )
+            self._state.write_current_run(ctx.run_id, ctx.slug, worktree_path)
 
         outcome = self._runner.run(ctx=ctx, stage=stage)
 
@@ -181,13 +206,17 @@ class Pipeline:
             error_type=outcome.error_type,
         )
 
-        self._state.check_box(ctx, stage.name)
+        # NOTE: tasks.md checkbox is NOT marked here. We only check the box once
+        # the gate decision is finalized (success / awaiting_hook / approved) so
+        # that resume after a failure or rejection re-runs the same stage instead
+        # of skipping past it.
 
         if outcome.status == "failure":
             return outcome
 
         if stage.gate_label is None:
             # Stage 3 — no gate; advance directly
+            self._state.check_box(ctx, stage.name)
             next_stage = STAGES[stage.index + 1]
             self._state.update_current_block(
                 ctx,
@@ -205,7 +234,12 @@ class Pipeline:
 
         if stage.gate_label == GateLabel.GATE_COMMIT:
             # Gate 4 — written by post-commit hook; orchestrator returns awaiting_hook.
-            # No gate_commit user_signal score is written here.
+            # No gate_commit user_signal score is written here. Remember the
+            # span_id so the next step()'s flush can attribute hook scores to it.
+            # The stage's *work* succeeded, so check the box; the hook score is
+            # a separate, asynchronous concern.
+            self._state.check_box(ctx, stage.name)
+            self._last_code_gen_span_id = span_id
             return StageOutcome(
                 stage=stage,
                 span_id=span_id,
@@ -238,7 +272,8 @@ class Pipeline:
                 error_type=None,
             )
 
-        # Approved — advance current block
+        # Approved — check the box and advance current block
+        self._state.check_box(ctx, stage.name)
         if stage.index < len(STAGES) - 1:
             next_stage = STAGES[stage.index + 1]
             self._state.update_current_block(
@@ -348,9 +383,22 @@ class SubprocessStageRunner:
         )
         cwd = ctx.worktree_path if ctx.worktree_path is not None else ctx.repo_root
 
+        # tasks.md is the canonical state file the plugin should read for prior
+        # stage outputs and the current phase/gate. Always reference the main-
+        # repo copy (it is not duplicated into the worktree).
+        tasks_md = ctx.repo_root / "dev" / "active" / ctx.slug / "tasks.md"
+
         try:
             result = subprocess.run(
-                ["claude", "--slash", plugin_cmd, "--context", stage.tool],
+                [
+                    "claude",
+                    "--slash",
+                    plugin_cmd,
+                    "--context",
+                    str(tasks_md),
+                    "--task",
+                    ctx.task,
+                ],
                 cwd=cwd,
                 capture_output=True,
                 check=False,

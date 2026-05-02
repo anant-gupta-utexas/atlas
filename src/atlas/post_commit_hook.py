@@ -1,28 +1,48 @@
 """
-Post-commit hook — runs in a separate subprocess after each git commit in the worktree.
+Post-commit hook — runs in a separate subprocess after each git commit.
 
-Reads the active run from .atlas/current-run, writes a ``gate_commit`` score row
-to plumb, and exits.  Atlas itself never calls this; git invokes it.
+Atlas itself never calls this; git invokes it via .git/hooks/post-commit.
 
-Install via: ``atlas hook install``
+Contract: the hook does NOT open its own plumb run handle (it can't — plumb
+runs are owned by the orchestrator process that started them). Instead, it
+appends a single line to ``<main-repo>/.atlas/pending-scores.jsonl``.  The
+next orchestrator ``step()`` (or ``run_to_completion``) flushes this file
+through the live ``PlumbIO`` run handle, guaranteeing durable, span-attributed
+delivery of the ``gate_commit`` score.
+
+The hook MUST resolve the *main* repo root, not the worktree root, because
+``.atlas/`` lives only in the main checkout. We use ``git rev-parse
+--git-common-dir`` for this — it returns the shared ``.git`` directory across
+worktrees.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
-def _repo_root() -> Path:
+def _main_repo_root() -> Path | None:
+    """Return the main repo root (not the worktree root). None if not in a repo."""
     result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "rev-parse", "--git-common-dir"],
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
-        sys.exit(0)  # not in a git repo — nothing to do
-    return Path(result.stdout.strip())
+        return None
+    common_dir = Path(result.stdout.strip())
+    if not common_dir.is_absolute():
+        # Resolve relative to the current cwd (git's default behaviour).
+        common_dir = Path.cwd() / common_dir
+    common_dir = common_dir.resolve()
+    # .git/ is a child of the main repo root.
+    if common_dir.name == ".git":
+        return common_dir.parent
+    return common_dir.parent if common_dir.parent.exists() else None
 
 
 def _head_sha(cwd: Path) -> str:
@@ -38,9 +58,11 @@ def _head_sha(cwd: Path) -> str:
 
 def run() -> None:
     """Entry point called by the git post-commit hook script."""
-    repo = _repo_root()
-    current_run_path = repo / ".atlas" / "current-run"
+    repo = _main_repo_root()
+    if repo is None:
+        sys.exit(0)
 
+    current_run_path = repo / ".atlas" / "current-run"
     if not current_run_path.exists():
         sys.exit(0)
 
@@ -49,34 +71,21 @@ def run() -> None:
         sys.exit(0)
 
     run_id = lines[0].strip()
-    slug = lines[1].strip()
+    sha = _head_sha(Path.cwd())
 
-    # Find the most-recent span_id for code_gen by reading tasks.md.
-    # The hook only records the gate_commit score; the span_id is the
-    # one written when step() returned awaiting_hook.  We look it up
-    # from plumb if available, otherwise skip gracefully.
-    sha = _head_sha(repo)
+    pending_path = repo / ".atlas" / "pending-scores.jsonl"
+    pending_path.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        from atlas.plumb_io import PlumbIO
-
-        plumb = PlumbIO(real=True)
-        # Re-use the existing open run by synthesising a minimal signal.
-        # The score is written with span_id="" when no span is available —
-        # plumb accepts null span_id for hook-written scores.
-        from atlas.orchestrator import GateDecision
-
-        decision = GateDecision(label="approved", turn_count=1, reason=f"commit {sha[:8]}")
-        plumb._run_id = run_id  # attach to existing run  # noqa: SLF001
-        plumb.record_user_signal(
-            run_id=run_id,
-            span_id="",
-            metric="gate_commit",
-            decision=decision,
-        )
-    except Exception:
-        # Hooks must not break the commit flow — fail silently.
-        pass
+    record = {
+        "run_id": run_id,
+        "metric": "gate_commit",
+        "value_label": "approved",
+        "rationale": f"commit {sha[:8]}" if sha else None,
+        "ts": time.time(),
+    }
+    # Append-only; safe under concurrent commits in worktrees.
+    with pending_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
 
     sys.exit(0)
 

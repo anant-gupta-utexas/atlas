@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 try:
@@ -141,6 +143,55 @@ class PlumbIO:
                 "rationale": decision.reason,
             }
         )
+
+    def flush_pending_scores(
+        self, *, run_id: str, pending_path: Path, span_id: str = ""
+    ) -> int:
+        """
+        Drain ``.atlas/pending-scores.jsonl`` (written by the post-commit hook)
+        through the live plumb run handle. Returns the number of scores flushed.
+
+        Only flushes records matching ``run_id``; rows for other runs are kept
+        (defensive — should not happen in single-run-per-repo v1).
+        """
+        if not pending_path.exists():
+            return 0
+
+        # Local import avoids cycle with orchestrator.GateDecision.
+        from atlas.orchestrator import GateDecision
+
+        kept: list[str] = []
+        flushed = 0
+        for line in pending_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line)
+                continue
+            if rec.get("run_id") != run_id:
+                kept.append(line)
+                continue
+            decision = GateDecision(
+                label=rec.get("value_label", "approved"),
+                turn_count=1,
+                reason=rec.get("rationale"),
+            )
+            self.record_user_signal(
+                run_id=run_id,
+                span_id=span_id,
+                metric=rec.get("metric", "gate_commit"),
+                decision=decision,
+            )
+            flushed += 1
+
+        if kept:
+            pending_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        else:
+            pending_path.unlink()
+        return flushed
 
     def write_example(
         self,

@@ -64,17 +64,34 @@ class StateStore:
 
         _atomic_write(path, content)
 
-    def write_current_run(self, run_id: str, slug: str) -> None:
+    def write_current_run(
+        self, run_id: str, slug: str, worktree_path: Path | None = None
+    ) -> None:
         self._atlas_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write(self._current_run_path, f"{run_id}\n{slug}\n")
+        body = f"{run_id}\n{slug}\n"
+        if worktree_path is not None:
+            body += f"{worktree_path}\n"
+        _atomic_write(self._current_run_path, body)
 
     def read_current_run(self) -> tuple[str, str] | None:
+        pair_with_wt = self.read_current_run_with_worktree()
+        if pair_with_wt is None:
+            return None
+        run_id, slug, _ = pair_with_wt
+        return run_id, slug
+
+    def read_current_run_with_worktree(self) -> tuple[str, str, Path | None] | None:
         if not self._current_run_path.exists():
             return None
         lines = self._current_run_path.read_text().splitlines()
         if len(lines) < 2:
             return None
-        return lines[0].strip(), lines[1].strip()
+        run_id = lines[0].strip()
+        slug = lines[1].strip()
+        worktree_path: Path | None = None
+        if len(lines) >= 3 and lines[2].strip():
+            worktree_path = Path(lines[2].strip())
+        return run_id, slug, worktree_path
 
     def delete_current_run(self) -> None:
         if self._current_run_path.exists():
