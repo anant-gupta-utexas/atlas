@@ -91,17 +91,21 @@ def run() -> None:
     sys.exit(0)
 
 
-HOOK_SCRIPT = """\
+def _hook_script() -> str:
+    """Return hook script using the same Python that installed atlas."""
+    import sys
+    python = sys.executable
+    return f"""\
 #!/bin/sh
 # Installed by atlas hook install
-python -m atlas.post_commit_hook
+{python} -m atlas.post_commit_hook
 """
 
 
 def install(repo_root: Path) -> None:
     """Write the post-commit hook script and make it executable."""
     hook_path = repo_root / ".git" / "hooks" / "post-commit"
-    hook_path.write_text(HOOK_SCRIPT)
+    hook_path.write_text(_hook_script())
     hook_path.chmod(0o755)
     print(f"Installed atlas post-commit hook at {hook_path}")
 

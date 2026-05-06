@@ -302,6 +302,10 @@ class Pipeline:
     def run_to_completion(self, ctx: RunContext) -> RunContext:
         """
         Loop: step() until all 7 stages done OR a gate rejects OR a stage fails.
+
+        ``awaiting_hook`` (code_gen gate) continues the loop; the pending-scores
+        file is flushed at the start of the next step() call, keeping the plumb
+        run open for the full pipeline duration.
         """
         while True:
             outcome = self.step(ctx)
@@ -313,8 +317,8 @@ class Pipeline:
                 self._plumb.close_run(run_id=ctx.run_id, status="failure")
                 self._state.delete_current_run()
                 return ctx
-            if outcome.status == "awaiting_hook":
-                return ctx
+            # awaiting_hook: the post-commit hook fires and writes pending-scores.jsonl;
+            # continue the loop so the next step() flushes those scores before code_review.
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -351,7 +355,7 @@ def _parse_task_from_tasks_md(path: Path) -> str:
 
 class SubprocessStageRunner:
     """
-    Invokes plugins via ``claude --slash <plugin> --context <ctx_file>``.
+    Invokes plugins via ``claude -p "/<plugin> <task>" --no-session-persistence``.
 
     All subprocess calls are list-form (no ``shell=True``).  Plugin names are
     validated against the allow-list in ``plugin_resolver`` before any
@@ -368,7 +372,7 @@ class SubprocessStageRunner:
         self._command_overrides = command_overrides or {}
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
-        from atlas.plugin_resolver import resolve  # local import to avoid cycles
+        from atlas.plugin_resolver import build_prompt, resolve  # local import to avoid cycles
 
         # T4.3 — allow-list check before any subprocess call
         plugin_cmd = resolve(stage.tool, overrides=self._command_overrides)
@@ -376,25 +380,36 @@ class SubprocessStageRunner:
         timeout_s = self._timeout_overrides.get(
             stage.name.value, _DEFAULT_TIMEOUT_S[stage.name.value]
         )
-        cwd = ctx.worktree_path if ctx.worktree_path is not None else ctx.repo_root
+
+        # Plugin slash-commands are workspace-scoped; run claude from the atlas
+        # install root so local plugins resolve. Traverse up from __file__ to
+        # find the repo root (the directory containing .git), skipping any
+        # .claude/worktrees/<branch> intermediate directory in case this module
+        # is loaded from a git worktree.
+        atlas_root = _find_atlas_root()
+        target_dir = ctx.worktree_path if ctx.worktree_path is not None else ctx.repo_root
 
         # tasks.md is the canonical state file the plugin should read for prior
-        # stage outputs and the current phase/gate. Always reference the main-
-        # repo copy (it is not duplicated into the worktree).
+        # stage outputs and the current phase/gate.
         tasks_md = ctx.repo_root / "dev" / "active" / ctx.slug / "tasks.md"
+        context_hint = f"Context file: {tasks_md}\nWorking directory: {target_dir}"
+
+        prompt = build_prompt(plugin_cmd, ctx.task, context_hint)
+
+        add_dirs = [str(ctx.repo_root)]
+        if ctx.worktree_path is not None:
+            add_dirs.append(str(ctx.worktree_path))
 
         try:
             result = subprocess.run(
                 [
                     "claude",
-                    "--slash",
-                    plugin_cmd,
-                    "--context",
-                    str(tasks_md),
-                    "--task",
-                    ctx.task,
+                    "-p",
+                    prompt,
+                    "--no-session-persistence",
+                    *[arg for d in add_dirs for arg in ("--add-dir", d)],
                 ],
-                cwd=cwd,
+                cwd=str(atlas_root),
                 capture_output=True,
                 check=False,
                 timeout=timeout_s,
@@ -480,6 +495,23 @@ class ClickPrompter:
         )
 
 
+def _find_atlas_root() -> Path:
+    """
+    Find the main atlas repo root from the location of this module file.
+
+    Handles the case where the module is loaded from a git worktree
+    (.claude/worktrees/<branch>/src/atlas/orchestrator.py) by walking up
+    until we find a real .git *directory* (not a worktree .git file).
+    """
+    candidate = Path(__file__).resolve()
+    for parent in candidate.parents:
+        git = parent / ".git"
+        if git.is_dir():
+            return parent
+    # Fallback: three levels up from src/atlas/orchestrator.py → repo root
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def _clamp_reason(reason: str) -> str:
     """Truncate reason to _GATE_MAX_REASON_BYTES bytes; append a note if truncated."""
     encoded = reason.encode()
@@ -487,3 +519,11 @@ def _clamp_reason(reason: str) -> str:
         return reason
     truncated = encoded[:_GATE_MAX_REASON_BYTES].decode(errors="ignore")
     return truncated + " … [truncated]"
+
+
+class AutoPrompter:
+    """Non-interactive prompter that auto-approves all gates (for testing)."""
+
+    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+        print(f"\nGate {gate_index} — {stage.name.value} [AUTO-APPROVED]")
+        return GateDecision(label="approved", turn_count=1, reason=None)

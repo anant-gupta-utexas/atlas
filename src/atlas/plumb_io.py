@@ -35,7 +35,8 @@ class PlumbIO:
     def __init__(self, *, real: bool = True, task_id: str = "") -> None:
         self._real = real and _PLUMB_AVAILABLE
         self._task_id = task_id
-        self._run_handle: Any = None
+        self._run_ctx: Any = None   # the _RunFactory context manager (holds __exit__)
+        self._run_handle: Any = None  # the RunHandle (returned by __enter__)
         self._run_id: str | None = None
 
         # In-memory record for unit tests / stubs
@@ -54,8 +55,8 @@ class PlumbIO:
             self._run_id = _make_id()
             return self._run_id
 
-        ctx = plumb_run(task_id=task, kind="online")
-        self._run_handle = ctx.__enter__()
+        self._run_ctx = plumb_run(task_id=task, kind="online")
+        self._run_handle = self._run_ctx.__enter__()
         self._run_id = self._run_handle.run_id
         return self._run_id
 
@@ -64,15 +65,19 @@ class PlumbIO:
         if self._closed:
             return
         self._closed = True
-        if not self._real or self._run_handle is None:
+        if not self._real or self._run_ctx is None:
             return
-        exc: BaseException | None = None
         if status != "success":
-            exc = RuntimeError(status)
-        try:
-            self._run_handle.__exit__(type(exc), exc, None)
-        except Exception:
-            pass
+            exc: BaseException = RuntimeError(status)
+            try:
+                self._run_ctx.__exit__(type(exc), exc, None)
+            except Exception:
+                pass
+        else:
+            try:
+                self._run_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Span / score / example writes

@@ -291,18 +291,16 @@ def test_runner_passes_tasks_md_path_as_context(tmp_path: Path) -> None:
         runner.run(ctx=ctx, stage=research)
 
     args = mock_run.call_args.args[0]
-    # Context must point at tasks.md, not the tool identifier
-    ctx_idx = args.index("--context")
-    ctx_arg = args[ctx_idx + 1]
-    assert ctx_arg.endswith("tasks.md"), (
-        f"--context should reference tasks.md path, got {ctx_arg!r}"
+    # Prompt (second arg after -p) must reference tasks.md and the task description
+    assert "-p" in args
+    prompt = args[args.index("-p") + 1]
+    assert "tasks.md" in prompt, f"prompt should reference tasks.md path, got {prompt!r}"
+    assert "my-task" in prompt, "prompt should include the slug directory"
+    assert "add cache middleware" in prompt, "task description must be in the prompt"
+    # And NOT the bare tool identifier as the context value
+    assert research.tool not in prompt.split("\n")[0], (
+        "regression: tool name must not be the sole prompt content"
     )
-    assert "my-task" in ctx_arg, "context path should include the slug directory"
-    # Task description must be passed too
-    assert "--task" in args
-    assert args[args.index("--task") + 1] == "add cache middleware"
-    # And NOT the bare tool identifier
-    assert research.tool not in (ctx_arg,), "regression: --context must not be the tool name"
 
 
 # ---------------------------------------------------------------------------

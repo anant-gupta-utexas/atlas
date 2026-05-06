@@ -98,7 +98,7 @@ def test_runner_success_returns_success_outcome(tmp_path: Path) -> None:
     assert outcome.error_type is None
 
 
-def test_runner_code_gen_uses_worktree_cwd(tmp_path: Path) -> None:
+def test_runner_code_gen_passes_worktree_via_add_dir(tmp_path: Path) -> None:
     runner = SubprocessStageRunner()
     worktree = tmp_path / ".atlas" / "worktrees" / "test-task-aaaaaaaa"
     worktree.mkdir(parents=True)
@@ -114,8 +114,12 @@ def test_runner_code_gen_uses_worktree_cwd(tmp_path: Path) -> None:
         mock_run.return_value = _completed()
         runner.run(ctx=ctx, stage=_CODE_GEN_STAGE)
 
-    call_kwargs = mock_run.call_args.kwargs
-    assert call_kwargs.get("cwd") == worktree
+    args = mock_run.call_args.args[0]
+    # Worktree must be accessible via --add-dir, not cwd
+    add_dir_values = [args[i + 1] for i, a in enumerate(args) if a == "--add-dir"]
+    assert str(worktree) in add_dir_values, (
+        f"worktree path must appear after --add-dir, got: {add_dir_values}"
+    )
 
 
 def test_runner_applies_per_stage_timeout(tmp_path: Path) -> None:
