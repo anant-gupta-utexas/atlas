@@ -102,9 +102,9 @@ def test_worktree_path_persists_to_current_run_file(tmp_path: Path) -> None:
         pipeline.step(ctx)
     pipeline.step(ctx)  # stage 5: code_gen — creates worktree
 
-    triple = state.read_current_run_with_worktree()
-    assert triple is not None
-    _, _, persisted = triple
+    quad = state.read_current_run_with_worktree()
+    assert quad is not None
+    _, _, persisted, _ = quad
     assert persisted == worktree.created[0], (
         "worktree_path must be persisted to .atlas/current-run after code_gen"
     )

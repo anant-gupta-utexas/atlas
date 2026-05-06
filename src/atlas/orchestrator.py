@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -32,6 +33,8 @@ _DEFAULT_TIMEOUT_S: dict[str, int] = {
 
 _GATE_MAX_REASON_BYTES = 4096
 _GATE_MAX_RETRIES = 3
+_AWAITING_HOOK_MAX_ATTEMPTS = 3
+_DEFAULT_COMMIT_WAIT_TIMEOUT_S = 1800  # 30 minutes
 
 
 class RoutingDriftError(Exception):
@@ -40,6 +43,10 @@ class RoutingDriftError(Exception):
 
 class NoActiveRunError(Exception):
     """Raised by resume() when .atlas/current-run is absent."""
+
+
+class AwaitingHookExceededError(Exception):
+    """Raised when awaiting_hook repeats more than _AWAITING_HOOK_MAX_ATTEMPTS times."""
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +107,7 @@ class Pipeline:
         runner: StageRunner,
         prompter: GatePrompter,
         worktree: WorktreeManager | None = None,
+        commit_wait_timeout_s: int = _DEFAULT_COMMIT_WAIT_TIMEOUT_S,
     ) -> None:
         self._repo_root = repo_root
         self._state = state
@@ -107,6 +115,7 @@ class Pipeline:
         self._runner = runner
         self._prompter = prompter
         self._worktree = worktree
+        self._commit_wait_timeout_s = commit_wait_timeout_s
         self._last_code_gen_span_id: str = ""
         self._validate_routing_fixture()
 
@@ -130,10 +139,10 @@ class Pipeline:
         Resume an in-flight run from .atlas/current-run + tasks.md.
         Validates state consistency before returning the RunContext.
         """
-        triple = self._state.read_current_run_with_worktree()
-        if triple is None:
+        quad = self._state.read_current_run_with_worktree()
+        if quad is None:
             raise NoActiveRunError("No active atlas run in this repo.")
-        run_id, slug, worktree_path = triple
+        run_id, slug, worktree_path, code_gen_span_id = quad
         tasks_path = self._repo_root / "dev" / "active" / slug / "tasks.md"
         task = _parse_task_from_tasks_md(tasks_path)
         ctx = RunContext(
@@ -144,6 +153,10 @@ class Pipeline:
             worktree_path=worktree_path,
         )
         self._state.assert_consistent(ctx)
+        # Rehydrate span_id so flush_pending_scores can attribute hook scores correctly.
+        if code_gen_span_id:
+            self._last_code_gen_span_id = code_gen_span_id
+        self._plumb.reopen_run(run_id)
         return ctx
 
     def step(self, ctx: RunContext) -> StageOutcome | None:
@@ -241,6 +254,9 @@ class Pipeline:
             # a separate, asynchronous concern.
             self._state.check_box(ctx, stage.name)
             self._last_code_gen_span_id = span_id
+            self._state.write_current_run(
+                ctx.run_id, ctx.slug, ctx.worktree_path, code_gen_span_id=span_id
+            )
             return StageOutcome(
                 stage=stage,
                 span_id=span_id,
@@ -303,10 +319,13 @@ class Pipeline:
         """
         Loop: step() until all 7 stages done OR a gate rejects OR a stage fails.
 
-        ``awaiting_hook`` (code_gen gate) continues the loop; the pending-scores
-        file is flushed at the start of the next step() call, keeping the plumb
-        run open for the full pipeline duration.
+        On ``awaiting_hook`` (code_gen gate): block until pending-scores.jsonl
+        contains a record for this run, then continue.  On timeout, return the
+        ctx so the user can ``atlas resume`` later.  Raises
+        ``AwaitingHookExceededError`` if awaiting_hook repeats more than
+        ``_AWAITING_HOOK_MAX_ATTEMPTS`` times (indicates a loop in the plugin).
         """
+        awaiting_attempts = 0
         while True:
             outcome = self.step(ctx)
             if outcome is None:
@@ -317,12 +336,50 @@ class Pipeline:
                 self._plumb.close_run(run_id=ctx.run_id, status="failure")
                 self._state.delete_current_run()
                 return ctx
-            # awaiting_hook: the post-commit hook fires and writes pending-scores.jsonl;
-            # continue the loop so the next step() flushes those scores before code_review.
+            if outcome.status == "awaiting_hook":
+                awaiting_attempts += 1
+                if awaiting_attempts > _AWAITING_HOOK_MAX_ATTEMPTS:
+                    raise AwaitingHookExceededError(
+                        f"awaiting_hook repeated {awaiting_attempts} times; "
+                        "possible plugin loop or missing commit. Aborting."
+                    )
+                if not self._wait_for_commit_score(
+                    run_id=ctx.run_id,
+                    timeout_s=self._commit_wait_timeout_s,
+                ):
+                    # Timed out waiting for the commit; leave the run open for resume.
+                    return ctx
+            # success: continue to next stage
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _wait_for_commit_score(
+        self,
+        *,
+        run_id: str,
+        timeout_s: int,
+        poll_interval_s: float = 2.0,
+    ) -> bool:
+        """Block until pending-scores.jsonl contains a record for run_id, or timeout.
+
+        Returns True if a matching record arrived, False on timeout.
+        """
+        pending = self._repo_root / ".atlas" / "pending-scores.jsonl"
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if pending.exists():
+                for line in pending.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            if json.loads(line).get("run_id") == run_id:
+                                return True
+                        except json.JSONDecodeError:
+                            continue
+            time.sleep(poll_interval_s)
+        return False
 
     def _validate_routing_fixture(self) -> None:
         if not _ROUTING_FIXTURE_PATH.exists():
@@ -502,14 +559,19 @@ def _find_atlas_root() -> Path:
     Handles the case where the module is loaded from a git worktree
     (.claude/worktrees/<branch>/src/atlas/orchestrator.py) by walking up
     until we find a real .git *directory* (not a worktree .git file).
+
+    Raises RuntimeError if no git checkout is found; wheel installs are not
+    supported in v1.
     """
     candidate = Path(__file__).resolve()
     for parent in candidate.parents:
         git = parent / ".git"
         if git.is_dir():
             return parent
-    # Fallback: three levels up from src/atlas/orchestrator.py → repo root
-    return Path(__file__).resolve().parent.parent.parent
+    raise RuntimeError(
+        f"atlas must be installed in a git checkout; ran from {candidate}. "
+        "Wheel installs (outside a git repo) are not supported in v1."
+    )
 
 
 def _clamp_reason(reason: str) -> str:

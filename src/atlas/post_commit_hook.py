@@ -91,21 +91,43 @@ def run() -> None:
     sys.exit(0)
 
 
-def _hook_script() -> str:
-    """Return hook script using the same Python that installed atlas."""
-    import sys
-    python = sys.executable
+def _hook_script(python: str) -> str:
+    """Return hook script that falls back to python3 if the baked path disappears."""
     return f"""\
 #!/bin/sh
 # Installed by atlas hook install
-{python} -m atlas.post_commit_hook
+# Primary interpreter baked at install time; falls back to python3 on PATH.
+if command -v '{python}' > /dev/null 2>&1; then
+    '{python}' -m atlas.post_commit_hook
+elif command -v python3 > /dev/null 2>&1; then
+    python3 -m atlas.post_commit_hook
+else
+    echo "atlas post-commit hook: Python not found. Re-run 'atlas hook install'." >&2
+fi
 """
 
 
 def install(repo_root: Path) -> None:
     """Write the post-commit hook script and make it executable."""
+    import sys
+
+    python = sys.executable
+    python_path = Path(python).resolve()
+
+    # Warn when the interpreter lives outside the repo's .venv so the user knows
+    # the hook will break if they recreate the venv at a different path.
+    repo_venv = repo_root / ".venv"
+    try:
+        python_path.relative_to(repo_venv)
+    except ValueError:
+        print(
+            f"Warning: baking interpreter path {python!r} which is outside "
+            f"{repo_venv}. If you recreate the venv, re-run 'atlas hook install'.",
+            file=sys.stderr,
+        )
+
     hook_path = repo_root / ".git" / "hooks" / "post-commit"
-    hook_path.write_text(_hook_script())
+    hook_path.write_text(_hook_script(python))
     hook_path.chmod(0o755)
     print(f"Installed atlas post-commit hook at {hook_path}")
 

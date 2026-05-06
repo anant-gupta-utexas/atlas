@@ -68,21 +68,31 @@ class StateStore:
 
         _atomic_write(path, content)
 
-    def write_current_run(self, run_id: str, slug: str, worktree_path: Path | None = None) -> None:
+    def write_current_run(
+        self,
+        run_id: str,
+        slug: str,
+        worktree_path: Path | None = None,
+        code_gen_span_id: str | None = None,
+    ) -> None:
         self._atlas_dir.mkdir(parents=True, exist_ok=True)
         body = f"{run_id}\n{slug}\n"
-        if worktree_path is not None:
-            body += f"{worktree_path}\n"
+        if worktree_path is not None or code_gen_span_id is not None:
+            body += f"{worktree_path or ''}\n"
+        if code_gen_span_id is not None:
+            body += f"{code_gen_span_id}\n"
         _atomic_write(self._current_run_path, body)
 
     def read_current_run(self) -> tuple[str, str] | None:
-        pair_with_wt = self.read_current_run_with_worktree()
-        if pair_with_wt is None:
+        result = self.read_current_run_with_worktree()
+        if result is None:
             return None
-        run_id, slug, _ = pair_with_wt
+        run_id, slug, _, _ = result
         return run_id, slug
 
-    def read_current_run_with_worktree(self) -> tuple[str, str, Path | None] | None:
+    def read_current_run_with_worktree(
+        self,
+    ) -> tuple[str, str, Path | None, str | None] | None:
         if not self._current_run_path.exists():
             return None
         lines = self._current_run_path.read_text().splitlines()
@@ -93,7 +103,10 @@ class StateStore:
         worktree_path: Path | None = None
         if len(lines) >= 3 and lines[2].strip():
             worktree_path = Path(lines[2].strip())
-        return run_id, slug, worktree_path
+        code_gen_span_id: str | None = None
+        if len(lines) >= 4 and lines[3].strip():
+            code_gen_span_id = lines[3].strip()
+        return run_id, slug, worktree_path, code_gen_span_id
 
     def delete_current_run(self) -> None:
         if self._current_run_path.exists():
@@ -139,12 +152,12 @@ class StateStore:
         return None
 
     def assert_consistent(self, ctx: RunContext) -> None:
-        pair = self.read_current_run()
-        if pair is None:
+        result = self.read_current_run()
+        if result is None:
             raise StateInconsistencyError(
                 f"No .atlas/current-run found; expected run_id={ctx.run_id}"
             )
-        file_run_id, _ = pair
+        file_run_id, _ = result
 
         path = self._tasks_md_path(ctx.slug)
         content = path.read_text()

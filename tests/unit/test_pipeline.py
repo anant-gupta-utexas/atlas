@@ -64,6 +64,7 @@ def _make_pipeline(
     *,
     runner: _FakeRunner | None = None,
     prompter: _FakePrompter | None = None,
+    commit_wait_timeout_s: int = 0,
 ) -> tuple[Pipeline, PlumbIO, StateStore]:
     plumb = PlumbIO(real=False)
     state = StateStore(tmp_path)
@@ -73,6 +74,7 @@ def _make_pipeline(
         plumb=plumb,
         runner=runner or _FakeRunner(),
         prompter=prompter or _FakePrompter(),
+        commit_wait_timeout_s=commit_wait_timeout_s,
     )
     return pipeline, plumb, state
 

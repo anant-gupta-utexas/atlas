@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+_logger = logging.getLogger("atlas.plumb")
 
 try:
     from plumb import run as plumb_run  # type: ignore[import-not-found]
@@ -67,17 +70,39 @@ class PlumbIO:
         self._closed = True
         if not self._real or self._run_ctx is None:
             return
-        if status != "success":
-            exc: BaseException = RuntimeError(status)
-            try:
-                self._run_ctx.__exit__(type(exc), exc, None)
-            except Exception:
-                pass
-        else:
-            try:
-                self._run_ctx.__exit__(None, None, None)
-            except Exception:
-                pass
+        try:
+            self._run_ctx.__exit__(None, None, None)
+        except Exception:
+            _logger.warning("close_run: __exit__ raised for run_id=%s status=%s", run_id, status)
+
+    def reopen_run(self, run_id: str) -> str:
+        """Reattach to an existing pending run (Option B: open a child run).
+
+        plumb has no first-class reopen primitive, so we open a new child run
+        whose parent_run_id points at the original.  Subsequent record_span /
+        record_user_signal calls write into this child.  The original pending
+        run stays open; both rows are linked via parent_run_id in the plumb DB.
+
+        In stub mode (real=False) we simply re-use the supplied run_id so that
+        unit tests see a single coherent run_id throughout.
+        """
+        if not self._real:
+            self._run_id = run_id
+            self._closed = False
+            return run_id
+
+        # Reset closed flag so subsequent writes go through.
+        self._closed = False
+        try:
+            self._run_ctx = plumb_run(task_id=run_id, kind="online")  # type: ignore[possibly-undefined]
+            self._run_handle = self._run_ctx.__enter__()
+            child_run_id: str = self._run_handle.run_id
+            self._run_id = child_run_id
+            return child_run_id
+        except Exception:
+            _logger.warning("reopen_run: failed to open child run for run_id=%s", run_id)
+            self._run_id = run_id
+            return run_id
 
     # ------------------------------------------------------------------
     # Span / score / example writes
@@ -173,6 +198,11 @@ class PlumbIO:
                 kept.append(line)
                 continue
             if rec.get("run_id") != run_id:
+                _logger.info(
+                    "flush_pending_scores: keeping record for different run_id=%s (active=%s)",
+                    rec.get("run_id"),
+                    run_id,
+                )
                 kept.append(line)
                 continue
             decision = GateDecision(
