@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ _TASKS_MD_HEADER = """\
 # tasks — {slug}
 
 <!-- run_id: {run_id} -->
+<!-- task: {task_b64} -->
 
 ## current
 
@@ -33,6 +35,7 @@ _STAGE_LINE = "- [ ] {name}\n"
 _CHECKED_LINE = "- [x] {name}\n"
 
 _RUN_ID_RE = re.compile(r"<!-- run_id:\s*(\S+)\s*-->")
+_TASK_RE = re.compile(r"<!-- task:\s*(\S+)\s*-->")
 _CHECKBOX_RE = re.compile(r"^- \[( |x)\] (.+)$", re.MULTILINE)
 _CURRENT_BLOCK_RE = re.compile(r"```\nphase: (.+)\ngate:  (.+)\nnext:  (.+)\n```", re.DOTALL)
 
@@ -55,10 +58,14 @@ class StateStore:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         stage_lines = "".join(_STAGE_LINE.format(name=s.name.value) for s in STAGES)
+        # Base64-encode the task text so embedded newlines / markdown survive
+        # round-trip through the HTML comment.
+        task_b64 = base64.b64encode(ctx.task.encode("utf-8")).decode("ascii")
         content = (
             _TASKS_MD_HEADER.format(
                 slug=ctx.slug,
                 run_id=ctx.run_id,
+                task_b64=task_b64,
                 phase=STAGES[0].name.value,
                 gate="none",
                 next_action="run stage 0 (research)",
@@ -67,6 +74,27 @@ class StateStore:
         )
 
         _atomic_write(path, content)
+
+    def read_task_text(self, slug: str) -> str | None:
+        """Return the original task text written to tasks.md, or None if absent."""
+        path = self._tasks_md_path(slug)
+        if not path.exists():
+            return None
+        content = path.read_text()
+        m = _TASK_RE.search(content)
+        if m is None:
+            return None
+        try:
+            return base64.b64decode(m.group(1).encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def update_run_id(self, slug: str, new_run_id: str) -> None:
+        """Rewrite the tasks.md run_id comment in place (used during resume handoff)."""
+        path = self._tasks_md_path(slug)
+        content = path.read_text()
+        updated = _RUN_ID_RE.sub(f"<!-- run_id: {new_run_id} -->", content, count=1)
+        _atomic_write(path, updated)
 
     def write_current_run(
         self,

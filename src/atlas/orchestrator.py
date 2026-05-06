@@ -117,6 +117,10 @@ class Pipeline:
         self._worktree = worktree
         self._commit_wait_timeout_s = commit_wait_timeout_s
         self._last_code_gen_span_id: str = ""
+        # Latest RunContext as mutated inside step() (e.g. with worktree_path
+        # after stage 5).  run_to_completion() reads this back so caller-owned
+        # ctx in same-process flow does not drift from in-flight ctx.
+        self._latest_ctx: RunContext | None = None
         self._validate_routing_fixture()
 
     # ------------------------------------------------------------------
@@ -137,27 +141,57 @@ class Pipeline:
     def resume(self) -> RunContext:
         """
         Resume an in-flight run from .atlas/current-run + tasks.md.
-        Validates state consistency before returning the RunContext.
+
+        Hands off to plumb via the documented child-run pattern: ``reopen_run``
+        spawns a new run linked to the original by ``parent_run_id``, and the
+        returned id becomes the active run id for all subsequent writes.  We
+        persist the new active id back to ``.atlas/current-run`` and rewrite
+        the tasks.md run_id comment so post-commit hook records also attribute
+        to the active child run.
         """
         quad = self._state.read_current_run_with_worktree()
         if quad is None:
             raise NoActiveRunError("No active atlas run in this repo.")
         run_id, slug, worktree_path, code_gen_span_id = quad
         tasks_path = self._repo_root / "dev" / "active" / slug / "tasks.md"
-        task = _parse_task_from_tasks_md(tasks_path)
-        ctx = RunContext(
+        task = self._state.read_task_text(slug) or _parse_task_from_tasks_md(tasks_path)
+
+        # Validate state under the *original* run_id before any handoff.
+        original_ctx = RunContext(
             run_id=run_id,
             slug=slug,
             task=task,
             repo_root=self._repo_root,
             worktree_path=worktree_path,
         )
-        self._state.assert_consistent(ctx)
+        self._state.assert_consistent(original_ctx)
+
         # Rehydrate span_id so flush_pending_scores can attribute hook scores correctly.
         if code_gen_span_id:
             self._last_code_gen_span_id = code_gen_span_id
-        self._plumb.reopen_run(run_id)
-        return ctx
+
+        # Child-run handoff. In stub mode this returns the same id; in real
+        # mode it opens a child run whose parent_run_id links to the original.
+        active_run_id = self._plumb.reopen_run(run_id)
+
+        # If the handoff produced a new run id, propagate it into atlas state
+        # so all subsequent reads/writes use the active id.
+        if active_run_id != run_id:
+            self._state.update_run_id(slug, active_run_id)
+            self._state.write_current_run(
+                active_run_id,
+                slug,
+                worktree_path,
+                code_gen_span_id=code_gen_span_id,
+            )
+
+        return RunContext(
+            run_id=active_run_id,
+            slug=slug,
+            task=task,
+            repo_root=self._repo_root,
+            worktree_path=worktree_path,
+        )
 
     def step(self, ctx: RunContext) -> StageOutcome | None:
         """
@@ -202,14 +236,21 @@ class Pipeline:
             )
             self._state.write_current_run(ctx.run_id, ctx.slug, worktree_path)
 
+        # Cache the (possibly-mutated) ctx so run_to_completion() can use the
+        # post-worktree-creation context for stage 6 in same-process flow.
+        self._latest_ctx = ctx
+
+        # Measure runner runtime for real latency_ms telemetry.
+        t0 = time.monotonic()
         outcome = self._runner.run(ctx=ctx, stage=stage)
+        latency_ms = (time.monotonic() - t0) * 1000.0
 
         span_id = self._plumb.record_span(
             run_id=ctx.run_id,
             kind=stage.span_kind,
             name=stage.name.value,
             status=outcome.status if outcome.status != "rejected" else "failure",
-            latency_ms=0.0,
+            latency_ms=latency_ms,
             error_type=outcome.error_type,
         )
         outcome = StageOutcome(
@@ -324,10 +365,17 @@ class Pipeline:
         ctx so the user can ``atlas resume`` later.  Raises
         ``AwaitingHookExceededError`` if awaiting_hook repeats more than
         ``_AWAITING_HOOK_MAX_ATTEMPTS`` times (indicates a loop in the plugin).
+
+        Reads ``self._latest_ctx`` after each step so updates made inside
+        step() (notably worktree_path after stage 5) propagate to subsequent
+        stages in the same process.
         """
         awaiting_attempts = 0
         while True:
             outcome = self.step(ctx)
+            # Pick up any mutated ctx (e.g. worktree_path) that step() set.
+            if self._latest_ctx is not None:
+                ctx = self._latest_ctx
             if outcome is None:
                 self._plumb.close_run(run_id=ctx.run_id, status="success")
                 self._state.delete_current_run()

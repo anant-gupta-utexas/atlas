@@ -73,15 +73,24 @@ def run() -> None:
 
     run_id = lines[0].strip()
     sha = _head_sha(Path.cwd())
+    metric = "gate_commit"
 
     pending_path = repo / ".atlas" / "pending-scores.jsonl"
     pending_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Idempotency: if a record for this exact (run_id, commit_sha, metric)
+    # triple already sits in pending-scores.jsonl, do not append a duplicate.
+    # Plumb tracks idempotent score ingestion as v2 deferred work, so atlas
+    # enforces local dedupe in the meantime.
+    if sha and _already_recorded(pending_path, run_id=run_id, sha=sha, metric=metric):
+        sys.exit(0)
+
     record = {
         "run_id": run_id,
-        "metric": "gate_commit",
+        "metric": metric,
         "value_label": "approved",
         "rationale": f"commit {sha[:8]}" if sha else None,
+        "commit_sha": sha or None,
         "ts": time.time(),
     }
     # Append-only; safe under concurrent commits in worktrees.
@@ -89,6 +98,32 @@ def run() -> None:
         f.write(json.dumps(record) + "\n")
 
     sys.exit(0)
+
+
+def _already_recorded(
+    pending_path: Path, *, run_id: str, sha: str, metric: str
+) -> bool:
+    """Return True if pending-scores.jsonl already has a record for this triple."""
+    if not pending_path.exists():
+        return False
+    try:
+        for line in pending_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                rec.get("run_id") == run_id
+                and rec.get("commit_sha") == sha
+                and rec.get("metric") == metric
+            ):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def _hook_script(python: str) -> str:
