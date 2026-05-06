@@ -1,8 +1,8 @@
 ---
 project: atlas
-status: v1.0 implementation complete — pending real-plugin E2E run
-phase: v1 — all 5 implementation phases done
-last_updated: 2026-05-01
+status: v1.0 implementation complete + T5.1 closure fixes — pending real-plugin E2E run
+phase: v1 — all 5 implementation phases done + all P0/P1/P2 findings closed
+last_updated: 2026-05-06
 next_gate: T5.1 manual E2E run on Flask cache-middleware target (gated on real plugin install)
 blocked_on: null
 ---
@@ -12,14 +12,26 @@ blocked_on: null
 ## Current
 
 All five implementation phases of the `atlas.pipeline` TRS are complete.
-The codebase is feature-complete for v1.0. 82 tests (34 unit Phase 1 + 11
-unit Phase 2 + 13 unit Phase 3 + 19 unit Phase 4 + 5 config/state + 3 E2E)
-pass at 91% coverage. CI gates are configured in `.github/workflows/ci.yml`.
+The codebase is feature-complete for v1.0. All P0/P1/P2 findings from the
+T5.1 pipeline review are closed. 119 tests pass at 92.13% coverage. CI gates
+are configured in `.github/workflows/ci.yml`.
 
-The only remaining step before the v1.0 tag is **T5.1**: a manual E2E run
-on a throwaway Flask repo with real agent plugins installed.
+The only remaining step before the v1.0 tag is **T5.1 manual E2E**: a real run
+on a throwaway Flask repo with real agent plugins installed, to validate
+the full 7-stage pipeline end-to-end.
 
 ## Recent (last 7 days)
+
+- **T5.1 closure fixes complete** (2026-05-06):
+  - P0: Resume child-run handoff with parent_run_id tracking and active run id propagation
+  - P1: Original task text persistence (base64 in tasks.md) and rehydration on resume
+  - P1: Durable rejection example persistence via plumb._storage_writer.write_example()
+  - P2: Hook idempotency dedupe on (run_id, commit_sha, metric)
+  - P2: Real latency_ms measurement (time.monotonic) in Pipeline.step()
+  - P2: Same-process context drift fix via Pipeline._latest_ctx and run_to_completion() update
+  - P2: Rationale threading to plumb add_score(rationale=...)
+  - Added 8 comprehensive unit tests (test_t51_closure.py); 119 total tests pass at 92.13% coverage.
+  - Commit: 0546620
 
 - **Phase 5 complete** (2026-05-01):
   - `src/atlas/config.py` — TOML loader with user/repo merge.
