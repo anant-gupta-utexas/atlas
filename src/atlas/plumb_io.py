@@ -14,7 +14,7 @@ _logger = logging.getLogger("atlas.plumb")
 
 try:
     import plumb as _plumb_module  # type: ignore[import-not-found]
-    from plumb import run as plumb_run  # type: ignore[import-not-found]
+    from plumb import run as plumb_run
     from plumb.core.entities import Example, ExampleSource  # type: ignore[import-not-found]
 
     _PLUMB_AVAILABLE = True
@@ -103,7 +103,7 @@ class PlumbIO:
             # original task identifier (we re-use the parent run id here as a
             # stable task identifier so the child clearly belongs to the same
             # task lineage).
-            self._run_ctx = plumb_run(  # type: ignore[possibly-undefined]
+            self._run_ctx = plumb_run(
                 task_id=self._task_id or run_id,
                 kind="online",
                 parent_run_id=run_id,
@@ -275,7 +275,7 @@ class PlumbIO:
                 # Interim path: write through plumb's storage writer directly.
                 # When v2 add_example lands on RunHandle, swap this for
                 # self._run_handle.add_example(...).
-                _plumb_module._storage_writer.write_example(example)  # type: ignore[attr-defined]
+                _plumb_module._storage_writer.write_example(example)
             except Exception:
                 _logger.warning(
                     "write_example: durable persistence failed for run_id=%s span_id=%s",

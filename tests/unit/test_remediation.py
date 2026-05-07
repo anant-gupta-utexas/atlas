@@ -12,16 +12,14 @@ import pytest
 from atlas.orchestrator import (
     AwaitingHookExceededError,
     GateDecision,
-    NoActiveRunError,
     Pipeline,
     RunContext,
     StageOutcome,
     _find_atlas_root,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, StageName, StageSpec
+from atlas.stages import STAGES, StageSpec
 from atlas.state import StateStore
-
 
 # ---------------------------------------------------------------------------
 # Shared fakes (mirror test_pipeline.py)
@@ -292,8 +290,6 @@ def test_run_to_completion_awaiting_hook_timeout_returns_ctx(tmp_path):
 
 def test_awaiting_hook_attempt_cap_raises(tmp_path):
     """If awaiting_hook repeats more than _AWAITING_HOOK_MAX_ATTEMPTS times, raise."""
-    from atlas.orchestrator import _AWAITING_HOOK_MAX_ATTEMPTS
-
     pipeline, plumb, _ = _make_pipeline(tmp_path, commit_wait_timeout_s=0)
     ctx = pipeline.start(task="test", slug="slug")
 

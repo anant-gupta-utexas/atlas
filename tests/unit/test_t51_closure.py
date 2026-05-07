@@ -33,7 +33,6 @@ from atlas.plumb_io import PlumbIO
 from atlas.stages import STAGES, StageName, StageSpec
 from atlas.state import StateStore
 
-
 # ---------------------------------------------------------------------------
 # Shared fakes
 # ---------------------------------------------------------------------------
@@ -123,7 +122,7 @@ def test_resume_propagates_new_active_run_id_into_state(tmp_path: Path) -> None:
         worktree=_StubWorktree(tmp_path),  # type: ignore[arg-type]
     )
 
-    ctx = pipeline.start(task="my real task", slug="t1")
+    _ = pipeline.start(task="my real task", slug="t1")
 
     # Simulate the handoff by stubbing reopen_run to return a different id.
     new_id = "newchild" + "0" * 24
