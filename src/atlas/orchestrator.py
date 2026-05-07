@@ -472,9 +472,11 @@ class SubprocessStageRunner:
         *,
         timeout_overrides: dict[str, int] | None = None,
         command_overrides: dict[str, str] | None = None,
+        model: str = "haiku",
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
+        self._model = model
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
         from atlas.plugin_resolver import build_prompt, resolve  # local import to avoid cycles
@@ -512,6 +514,8 @@ class SubprocessStageRunner:
                     "-p",
                     prompt,
                     "--no-session-persistence",
+                    "--model",
+                    self._model,
                     *[arg for d in add_dirs for arg in ("--add-dir", d)],
                 ],
                 cwd=str(atlas_root),

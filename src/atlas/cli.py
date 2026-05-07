@@ -45,6 +45,7 @@ def _make_pipeline(repo_root: Path, cfg: Config, *, auto_approve: bool = False) 
     runner = SubprocessStageRunner(
         timeout_overrides=cfg.timeout_overrides,
         command_overrides=cfg.plugin_commands,
+        model=cfg.model,
     )
     prompter: ClickPrompter | AutoPrompter = AutoPrompter() if auto_approve else ClickPrompter()
     return Pipeline(
