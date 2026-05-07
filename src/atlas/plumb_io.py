@@ -39,7 +39,7 @@ class PlumbIO:
     def __init__(self, *, real: bool = True, task_id: str = "") -> None:
         self._real = real and _PLUMB_AVAILABLE
         self._task_id = task_id
-        self._run_ctx: Any = None   # the _RunFactory context manager (holds __exit__)
+        self._run_ctx: Any = None  # the _RunFactory context manager (holds __exit__)
         self._run_handle: Any = None  # the RunHandle (returned by __enter__)
         self._run_id: str | None = None
         self._parent_run_id: str | None = None

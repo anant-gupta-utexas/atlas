@@ -100,9 +100,7 @@ def run() -> None:
     sys.exit(0)
 
 
-def _already_recorded(
-    pending_path: Path, *, run_id: str, sha: str, metric: str
-) -> bool:
+def _already_recorded(pending_path: Path, *, run_id: str, sha: str, metric: str) -> bool:
     """Return True if pending-scores.jsonl already has a record for this triple."""
     if not pending_path.exists():
         return False
