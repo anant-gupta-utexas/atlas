@@ -33,7 +33,7 @@ atlas run "add response-cache middleware to this Flask repo"
 ```
 atlas/
 ├── src/atlas/               # Main package
-│   ├── cli.py              # Entry point (@click commands)
+│   ├── cli.py              # Entry point (@typer commands)
 │   ├── orchestrator.py      # 7-stage state machine
 │   ├── plumb_adapter.py     # plumb integration (span/score writes)
 │   ├── worktree_manager.py  # git worktree lifecycle (stage 5)
@@ -73,7 +73,7 @@ atlas/
 
 - Functions < 50 lines; files < 400 lines (800 max for complex logic).
 - No deep nesting (> 4 levels); use early returns.
-- `click` for CLI, `pydantic` for validation, `pathlib` for filesystem operations.
+- `typer` for CLI, `pydantic` for validation, `pathlib` for filesystem operations.
 - Sync-only in v1 (no async/await).
 - Never mutate `tasks.md` after run close; append to git history instead.
 
