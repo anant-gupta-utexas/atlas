@@ -1,113 +1,137 @@
 # Getting Started
 
 ## Prerequisites
-- Python 3.13 or higher
-- uv (recommended) or pip
-- Docker (for local development with docker-compose)
-- Git
+
+- Python 3.11+
+- git 2.5+ (required for `git worktree`)
+- [uv](https://astral.sh/uv) (recommended) or pip
+- [plumb](https://github.com/anant-gupta-utexas/plumb) installed as a
+  sibling path dependency (see `pyproject.toml`)
+- Agent plugins installed in your Claude Code environment:
+  `DEV-ESSENTIALS`, `DEV-BE-PYTHON`
 
 ## Installation
 
-### 1. Clone the Repository
+### 1. Clone the repository
+
 ```bash
-git clone <repository-url>
-cd python-scaffolding
+git clone https://github.com/anant-gupta-utexas/atlas.git
+cd atlas
 ```
 
-### 2. Set Up Python Environment
+### 2. Set up the Python environment
 
-#### Using uv (recommended)
 ```bash
-# Install uv if you haven't already
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create virtual environment and install dependencies
+# Using uv (recommended)
 uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 uv sync
 ```
 
-#### Using pip
+Or with pip:
+
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -e .
 ```
 
-### 3. Set Up Local Environment
-```bash
-# Copy environment template (if exists)
-cp .env.example .env
+### 3. Verify the install
 
-# Edit .env with your local configuration
+```bash
+atlas --help
 ```
 
-### 4. Run the Application
-```bash
-# Run locally
-python main.py
+You should see the three subcommands: `run`, `status`, `hook`.
 
-# Or with Docker
-docker-compose up --build
+### 4. Optional — install the post-commit hook
+
+```bash
+# Run from the root of the repo you want atlas to track
+atlas hook install
 ```
 
-### 5. Run Tests
+This writes `.git/hooks/post-commit`. It is idempotent and removable
+via `atlas hook uninstall`.
+
+## Running atlas
+
+### Start a new run
+
 ```bash
-pytest
+atlas run "add response-cache middleware to this Flask repo"
 ```
 
-## Development Workflow
+Atlas creates `dev/active/<task-slug>/tasks.md`, opens Stage 0
+(research), and pauses at the first gate. From there you work through
+each gate interactively.
 
-### Before Starting a New Feature
-1. Create a feature branch: `git checkout -b feature/my-feature`
-2. Create planning documents in `dev/active/my-feature/`
-3. Get your Technical Design Specification (TDS) reviewed
+### Check pipeline state
 
-### During Development
-1. Write tests first (TDD approach)
-2. Implement the feature following Clean Architecture
-3. Ensure all tests pass
-4. Update documentation in `docs/` as needed
-
-### Before Merging
-1. Run full test suite: `pytest`
-2. Check code quality: `ruff check .`
-3. Format code: `ruff format .`
-4. Update CHANGELOG (if applicable)
-5. Move feature docs from `dev/active/` to `dev/archive/`
-
-## Project Structure
-See [CLAUDE.md](../../CLAUDE.md) for detailed project structure documentation.
-
-## Common Commands
-
-### Testing
 ```bash
-pytest                          # Run all tests
-pytest tests/unit              # Run unit tests only
-pytest tests/integration       # Run integration tests only
-pytest --cov                   # Run with coverage report
+atlas status
 ```
 
-### Code Quality
-```bash
-ruff check .                   # Lint code
-ruff format .                  # Format code
-mypy src/                      # Type checking
+Prints the `## current` block from the active `tasks.md` — phase,
+gate index, and next unchecked item. Exits non-zero if no active run.
+
+### Resume after a session compaction
+
+Atlas's state is entirely in `dev/active/<task>/tasks.md`. When a
+Claude Code session ends (compaction, restart), the `CLAUDE.md`
+instruction paragraph in this repo tells a fresh session to read
+`tasks.md` and find the first unchecked box. No human re-briefing
+needed.
+
+## Configuration
+
+Create `.atlas.toml` in your project root (or use `~/.atlas/config.toml`
+for user-wide defaults):
+
+```toml
+[models]
+plan_model   = "claude-opus-4-7@https://api.anthropic.com/v1"
+code_model   = "claude-sonnet-4-6@https://api.anthropic.com/v1"
+review_model = "claude-sonnet-4-6@https://api.anthropic.com/v1"
+
+[pipeline]
+worktree_stage = 5
+state_file     = "dev/active/{task}/tasks.md"
+
+[plumb]
+db_path = "~/.plumb/plumb.db"
 ```
 
-### Database (if applicable)
+The `<model>@<base_url>` shape is intentional — model swaps are config
+edits, not code changes.
+
+## Running tests
+
 ```bash
-# Add migration commands here when database is set up
+pytest                          # all tests
+pytest tests/unit               # unit tests only
+pytest --cov=src --cov-report=term-missing  # with coverage
+```
+
+CI gates: `ruff check`, `ruff format`, `mypy src`. All three must pass
+before merging to `main`.
+
+```bash
+ruff check .
+ruff format .
+mypy src/
 ```
 
 ## Troubleshooting
 
-### Common Issues
+### `atlas` command not found
 
-#### Virtual Environment Issues
+Ensure the virtual environment is active (`source .venv/bin/activate`)
+and the package was installed with `uv sync` or `pip install -e .`.
+
+### Virtual environment issues
+
 ```bash
-# Deactivate and recreate virtual environment
 deactivate
 rm -rf .venv
 uv venv
@@ -115,14 +139,26 @@ source .venv/bin/activate
 uv sync
 ```
 
-#### Dependency Conflicts
-```bash
-# Clear cache and reinstall
-uv cache clean
-uv sync --reinstall
-```
+### `.atlas/current-run` mismatch error
+
+Atlas detected that the `run_id` in `.atlas/current-run` does not match
+the `run_id` in `tasks.md`. This happens when a file is manually edited
+out of sync. The error message names both values — reconcile them by
+editing one file to match the other, then re-run `atlas status` to
+confirm.
+
+### Post-commit hook not writing scores
+
+Check that `atlas hook install` completed without error and that
+`.git/hooks/post-commit` exists and is executable (`chmod +x`). The
+hook reads `.atlas/current-run`; if no active run is present, it exits
+silently.
 
 ## Next Steps
-- Read [Core Concepts](core_concepts.md)
-- Review [System Design](../2_architecture/system_design.md)
-- Check [Testing Guide](../4_testing/index.md)
+
+- Read [Core Concepts](core_concepts.md) for how the 7-stage pipeline
+  and gate system work.
+- Read [System Design](../2_architecture/system_design.md) for the full
+  component breakdown and data flow.
+- Read [Testing Guide](../4_testing/index.md) for test organization and
+  the routing ground-truth fixture.

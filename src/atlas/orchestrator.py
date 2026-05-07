@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -32,6 +33,8 @@ _DEFAULT_TIMEOUT_S: dict[str, int] = {
 
 _GATE_MAX_REASON_BYTES = 4096
 _GATE_MAX_RETRIES = 3
+_AWAITING_HOOK_MAX_ATTEMPTS = 3
+_DEFAULT_COMMIT_WAIT_TIMEOUT_S = 1800  # 30 minutes
 
 
 class RoutingDriftError(Exception):
@@ -40,6 +43,10 @@ class RoutingDriftError(Exception):
 
 class NoActiveRunError(Exception):
     """Raised by resume() when .atlas/current-run is absent."""
+
+
+class AwaitingHookExceededError(Exception):
+    """Raised when awaiting_hook repeats more than _AWAITING_HOOK_MAX_ATTEMPTS times."""
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +107,7 @@ class Pipeline:
         runner: StageRunner,
         prompter: GatePrompter,
         worktree: WorktreeManager | None = None,
+        commit_wait_timeout_s: int = _DEFAULT_COMMIT_WAIT_TIMEOUT_S,
     ) -> None:
         self._repo_root = repo_root
         self._state = state
@@ -107,7 +115,12 @@ class Pipeline:
         self._runner = runner
         self._prompter = prompter
         self._worktree = worktree
+        self._commit_wait_timeout_s = commit_wait_timeout_s
         self._last_code_gen_span_id: str = ""
+        # Latest RunContext as mutated inside step() (e.g. with worktree_path
+        # after stage 5).  run_to_completion() reads this back so caller-owned
+        # ctx in same-process flow does not drift from in-flight ctx.
+        self._latest_ctx: RunContext | None = None
         self._validate_routing_fixture()
 
     # ------------------------------------------------------------------
@@ -128,23 +141,57 @@ class Pipeline:
     def resume(self) -> RunContext:
         """
         Resume an in-flight run from .atlas/current-run + tasks.md.
-        Validates state consistency before returning the RunContext.
+
+        Hands off to plumb via the documented child-run pattern: ``reopen_run``
+        spawns a new run linked to the original by ``parent_run_id``, and the
+        returned id becomes the active run id for all subsequent writes.  We
+        persist the new active id back to ``.atlas/current-run`` and rewrite
+        the tasks.md run_id comment so post-commit hook records also attribute
+        to the active child run.
         """
-        triple = self._state.read_current_run_with_worktree()
-        if triple is None:
+        quad = self._state.read_current_run_with_worktree()
+        if quad is None:
             raise NoActiveRunError("No active atlas run in this repo.")
-        run_id, slug, worktree_path = triple
+        run_id, slug, worktree_path, code_gen_span_id = quad
         tasks_path = self._repo_root / "dev" / "active" / slug / "tasks.md"
-        task = _parse_task_from_tasks_md(tasks_path)
-        ctx = RunContext(
+        task = self._state.read_task_text(slug) or _parse_task_from_tasks_md(tasks_path)
+
+        # Validate state under the *original* run_id before any handoff.
+        original_ctx = RunContext(
             run_id=run_id,
             slug=slug,
             task=task,
             repo_root=self._repo_root,
             worktree_path=worktree_path,
         )
-        self._state.assert_consistent(ctx)
-        return ctx
+        self._state.assert_consistent(original_ctx)
+
+        # Rehydrate span_id so flush_pending_scores can attribute hook scores correctly.
+        if code_gen_span_id:
+            self._last_code_gen_span_id = code_gen_span_id
+
+        # Child-run handoff. In stub mode this returns the same id; in real
+        # mode it opens a child run whose parent_run_id links to the original.
+        active_run_id = self._plumb.reopen_run(run_id)
+
+        # If the handoff produced a new run id, propagate it into atlas state
+        # so all subsequent reads/writes use the active id.
+        if active_run_id != run_id:
+            self._state.update_run_id(slug, active_run_id)
+            self._state.write_current_run(
+                active_run_id,
+                slug,
+                worktree_path,
+                code_gen_span_id=code_gen_span_id,
+            )
+
+        return RunContext(
+            run_id=active_run_id,
+            slug=slug,
+            task=task,
+            repo_root=self._repo_root,
+            worktree_path=worktree_path,
+        )
 
     def step(self, ctx: RunContext) -> StageOutcome | None:
         """
@@ -189,14 +236,21 @@ class Pipeline:
             )
             self._state.write_current_run(ctx.run_id, ctx.slug, worktree_path)
 
+        # Cache the (possibly-mutated) ctx so run_to_completion() can use the
+        # post-worktree-creation context for stage 6 in same-process flow.
+        self._latest_ctx = ctx
+
+        # Measure runner runtime for real latency_ms telemetry.
+        t0 = time.monotonic()
         outcome = self._runner.run(ctx=ctx, stage=stage)
+        latency_ms = (time.monotonic() - t0) * 1000.0
 
         span_id = self._plumb.record_span(
             run_id=ctx.run_id,
             kind=stage.span_kind,
             name=stage.name.value,
             status=outcome.status if outcome.status != "rejected" else "failure",
-            latency_ms=0.0,
+            latency_ms=latency_ms,
             error_type=outcome.error_type,
         )
         outcome = StageOutcome(
@@ -241,6 +295,9 @@ class Pipeline:
             # a separate, asynchronous concern.
             self._state.check_box(ctx, stage.name)
             self._last_code_gen_span_id = span_id
+            self._state.write_current_run(
+                ctx.run_id, ctx.slug, ctx.worktree_path, code_gen_span_id=span_id
+            )
             return StageOutcome(
                 stage=stage,
                 span_id=span_id,
@@ -302,9 +359,23 @@ class Pipeline:
     def run_to_completion(self, ctx: RunContext) -> RunContext:
         """
         Loop: step() until all 7 stages done OR a gate rejects OR a stage fails.
+
+        On ``awaiting_hook`` (code_gen gate): block until pending-scores.jsonl
+        contains a record for this run, then continue.  On timeout, return the
+        ctx so the user can ``atlas resume`` later.  Raises
+        ``AwaitingHookExceededError`` if awaiting_hook repeats more than
+        ``_AWAITING_HOOK_MAX_ATTEMPTS`` times (indicates a loop in the plugin).
+
+        Reads ``self._latest_ctx`` after each step so updates made inside
+        step() (notably worktree_path after stage 5) propagate to subsequent
+        stages in the same process.
         """
+        awaiting_attempts = 0
         while True:
             outcome = self.step(ctx)
+            # Pick up any mutated ctx (e.g. worktree_path) that step() set.
+            if self._latest_ctx is not None:
+                ctx = self._latest_ctx
             if outcome is None:
                 self._plumb.close_run(run_id=ctx.run_id, status="success")
                 self._state.delete_current_run()
@@ -314,11 +385,49 @@ class Pipeline:
                 self._state.delete_current_run()
                 return ctx
             if outcome.status == "awaiting_hook":
-                return ctx
+                awaiting_attempts += 1
+                if awaiting_attempts > _AWAITING_HOOK_MAX_ATTEMPTS:
+                    raise AwaitingHookExceededError(
+                        f"awaiting_hook repeated {awaiting_attempts} times; "
+                        "possible plugin loop or missing commit. Aborting."
+                    )
+                if not self._wait_for_commit_score(
+                    run_id=ctx.run_id,
+                    timeout_s=self._commit_wait_timeout_s,
+                ):
+                    # Timed out waiting for the commit; leave the run open for resume.
+                    return ctx
+            # success: continue to next stage
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _wait_for_commit_score(
+        self,
+        *,
+        run_id: str,
+        timeout_s: int,
+        poll_interval_s: float = 2.0,
+    ) -> bool:
+        """Block until pending-scores.jsonl contains a record for run_id, or timeout.
+
+        Returns True if a matching record arrived, False on timeout.
+        """
+        pending = self._repo_root / ".atlas" / "pending-scores.jsonl"
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if pending.exists():
+                for line in pending.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            if json.loads(line).get("run_id") == run_id:
+                                return True
+                        except json.JSONDecodeError:
+                            continue
+            time.sleep(poll_interval_s)
+        return False
 
     def _validate_routing_fixture(self) -> None:
         if not _ROUTING_FIXTURE_PATH.exists():
@@ -351,7 +460,7 @@ def _parse_task_from_tasks_md(path: Path) -> str:
 
 class SubprocessStageRunner:
     """
-    Invokes plugins via ``claude --slash <plugin> --context <ctx_file>``.
+    Invokes plugins via ``claude -p "/<plugin> <task>" --no-session-persistence``.
 
     All subprocess calls are list-form (no ``shell=True``).  Plugin names are
     validated against the allow-list in ``plugin_resolver`` before any
@@ -363,12 +472,14 @@ class SubprocessStageRunner:
         *,
         timeout_overrides: dict[str, int] | None = None,
         command_overrides: dict[str, str] | None = None,
+        model: str = "haiku",
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
+        self._model = model
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
-        from atlas.plugin_resolver import resolve  # local import to avoid cycles
+        from atlas.plugin_resolver import build_prompt, resolve  # local import to avoid cycles
 
         # T4.3 — allow-list check before any subprocess call
         plugin_cmd = resolve(stage.tool, overrides=self._command_overrides)
@@ -376,25 +487,38 @@ class SubprocessStageRunner:
         timeout_s = self._timeout_overrides.get(
             stage.name.value, _DEFAULT_TIMEOUT_S[stage.name.value]
         )
-        cwd = ctx.worktree_path if ctx.worktree_path is not None else ctx.repo_root
+
+        # Plugin slash-commands are workspace-scoped; run claude from the atlas
+        # install root so local plugins resolve. Traverse up from __file__ to
+        # find the repo root (the directory containing .git), skipping any
+        # .claude/worktrees/<branch> intermediate directory in case this module
+        # is loaded from a git worktree.
+        atlas_root = _find_atlas_root()
+        target_dir = ctx.worktree_path if ctx.worktree_path is not None else ctx.repo_root
 
         # tasks.md is the canonical state file the plugin should read for prior
-        # stage outputs and the current phase/gate. Always reference the main-
-        # repo copy (it is not duplicated into the worktree).
+        # stage outputs and the current phase/gate.
         tasks_md = ctx.repo_root / "dev" / "active" / ctx.slug / "tasks.md"
+        context_hint = f"Context file: {tasks_md}\nWorking directory: {target_dir}"
+
+        prompt = build_prompt(plugin_cmd, ctx.task, context_hint)
+
+        add_dirs = [str(ctx.repo_root)]
+        if ctx.worktree_path is not None:
+            add_dirs.append(str(ctx.worktree_path))
 
         try:
             result = subprocess.run(
                 [
                     "claude",
-                    "--slash",
-                    plugin_cmd,
-                    "--context",
-                    str(tasks_md),
-                    "--task",
-                    ctx.task,
+                    "-p",
+                    prompt,
+                    "--no-session-persistence",
+                    "--model",
+                    self._model,
+                    *[arg for d in add_dirs for arg in ("--add-dir", d)],
                 ],
-                cwd=cwd,
+                cwd=str(atlas_root),
                 capture_output=True,
                 check=False,
                 timeout=timeout_s,
@@ -480,6 +604,28 @@ class ClickPrompter:
         )
 
 
+def _find_atlas_root() -> Path:
+    """
+    Find the main atlas repo root from the location of this module file.
+
+    Handles the case where the module is loaded from a git worktree
+    (.claude/worktrees/<branch>/src/atlas/orchestrator.py) by walking up
+    until we find a real .git *directory* (not a worktree .git file).
+
+    Raises RuntimeError if no git checkout is found; wheel installs are not
+    supported in v1.
+    """
+    candidate = Path(__file__).resolve()
+    for parent in candidate.parents:
+        git = parent / ".git"
+        if git.is_dir():
+            return parent
+    raise RuntimeError(
+        f"atlas must be installed in a git checkout; ran from {candidate}. "
+        "Wheel installs (outside a git repo) are not supported in v1."
+    )
+
+
 def _clamp_reason(reason: str) -> str:
     """Truncate reason to _GATE_MAX_REASON_BYTES bytes; append a note if truncated."""
     encoded = reason.encode()
@@ -487,3 +633,11 @@ def _clamp_reason(reason: str) -> str:
         return reason
     truncated = encoded[:_GATE_MAX_REASON_BYTES].decode(errors="ignore")
     return truncated + " … [truncated]"
+
+
+class AutoPrompter:
+    """Non-interactive prompter that auto-approves all gates (for testing)."""
+
+    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+        print(f"\nGate {gate_index} — {stage.name.value} [AUTO-APPROVED]")
+        return GateDecision(label="approved", turn_count=1, reason=None)

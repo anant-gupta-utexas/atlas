@@ -13,6 +13,7 @@ class Config:
     plumb_db_path: Path
     plugin_commands: dict[str, str] = field(default_factory=dict)
     timeout_overrides: dict[str, int] = field(default_factory=dict)
+    model: str = "haiku"  # default to haiku for cost efficiency
 
     @classmethod
     def load(cls, repo_root: Path) -> Config:
@@ -26,6 +27,7 @@ class Config:
             "plumb_db_path": str(Path.home() / ".plumb" / "plumb.db"),
             "plugin_commands": {},
             "timeout_overrides": {},
+            "model": "haiku",
         }
 
         user_cfg = Path.home() / ".atlas" / "config.toml"
@@ -51,6 +53,7 @@ class Config:
             plumb_db_path=Path(str(merged["plumb_db_path"])),
             plugin_commands=plugin_commands,
             timeout_overrides=timeout_overrides,
+            model=str(merged.get("model", "haiku")),
         )
 
 

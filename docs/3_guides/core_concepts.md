@@ -1,233 +1,114 @@
 # Core Concepts
 
-## Clean Architecture
+## The 7-stage pipeline
 
-### What is Clean Architecture?
-Clean Architecture is a software design philosophy that separates concerns into layers, with dependencies flowing inward toward the core business logic. This makes the codebase:
-- **Testable**: Business logic can be tested without UI, database, or external services
-- **Independent**: UI, database, and frameworks can be changed without affecting business rules
-- **Maintainable**: Clear separation makes code easier to understand and modify
+Atlas walks a fixed, deterministic pipeline in order. No dynamic routing
+in v1 — stages cannot be skipped or reordered.
 
-### The Three Layers
+| Stage | Name | Tool | Span kind |
+|-------|------|------|-----------|
+| 0 | research | Claude Code + web search | plan |
+| 1 | prd_draft | consult-experts → PM persona | plan |
+| 2 | trd_draft | consult-experts → Tech Lead persona | plan |
+| 3 | tds_gen | /dev-docs-be | plan |
+| 4 | plan_review | plan-reviewer agent | verify |
+| 5 | code_gen | Claude Code (inside git worktree) | subagent |
+| 6 | code_review | /code-review + /verify | verify |
 
-#### 1. Domain Layer (`src/domain/`)
-**Purpose**: Pure business logic with zero external dependencies
+Each stage opens a plumb span on entry, invokes its tool (or surfaces a
+prompt for research), closes the span, then pauses at a gate.
 
-**Contains**:
-- **Entities**: Core business objects that represent domain concepts
-- **Value Objects**: Immutable objects that represent domain values
-- **Domain Services**: Business logic that doesn't naturally fit in entities
-- **Repository Interfaces**: Abstract contracts for data access
-- **Domain Events**: Events that represent something significant in the domain
+## Six human gates
 
-**Example Entity**:
-```python
-# src/domain/entities/user.py
-from dataclasses import dataclass
-from uuid import UUID
+Every stage transition requires an explicit human approval. These are
+hard stops — not suggestions.
 
-@dataclass
-class User:
-    id: UUID
-    email: str
-    name: str
+| # | Gate label | Span attached | Score metric |
+|---|------------|---------------|--------------|
+| 0 | Research reviewed | plan:research | gate_research |
+| 1 | PRD finalized | plan:prd_draft | gate_prd |
+| 2 | SDD + TRD finalized | plan:trd_draft | gate_trd |
+| 3 | TDS approved | verify:plan_review | gate_tds |
+| 4 | Per-feature commit | subagent:code_gen | gate_commit |
+| 5 | Phase complete | run-level | gate_phase_complete |
 
-    def change_email(self, new_email: str) -> None:
-        """Business rule: email must contain @"""
-        if '@' not in new_email:
-            raise ValueError("Invalid email format")
-        self.email = new_email
+At each gate, you approve or reject. Both outcomes write a
+`scorer='user_signal'` row in plumb. A rejection also creates an
+`examples` row — a regression-set entry at zero authoring cost.
+
+## The state file
+
+`dev/active/<task>/tasks.md` is the sole source of pipeline state.
+Atlas creates it on `atlas run`; every gate transition updates it.
+
+```markdown
+## current
+phase: tds_gen
+gate: 3
+next: <first unchecked item below>
+
+## stage 0 — research
+- [x] Research complete
+
+## stage 3 — tds_gen
+- [ ] TDS approved
 ```
 
-**Rules**:
-- NO imports from Application or Infrastructure layers
-- NO framework dependencies (FastAPI, SQLAlchemy, etc.)
-- Only pure Python and domain logic
+`atlas status` prints the `## current` block. A fresh Claude Code
+session reads this file to resume from the first unchecked box — no
+human re-briefing.
 
-#### 2. Application Layer (`src/application/`)
-**Purpose**: Orchestrate domain logic to fulfill use cases
+## The git worktree boundary
 
-**Contains**:
-- **Use Cases**: Application-specific business rules (e.g., CreateUser, UpdateProfile)
-- **DTOs**: Data Transfer Objects for input/output
-- **Service Interfaces**: Contracts for external services (email, payments, etc.)
+Stage 5 (`code_gen`) runs inside a `git worktree add` directory. The
+code-generation agent cannot touch `main` directly. The generated diff
+lives entirely in the worktree branch until you make the explicit merge
+at gate 4. A failed run can be abandoned by removing the worktree.
 
-**Example Use Case**:
-```python
-# src/application/use_cases/create_user.py
-from dataclasses import dataclass
-from uuid import UUID, uuid4
+## Plumb integration
 
-from src.domain.entities.user import User
-from src.domain.repositories.user_repository import UserRepository
+Atlas writes all measurement data into
+[plumb](https://github.com/anant-gupta-utexas/plumb) via direct
+in-process Python calls. It never touches plumb's SQLite file directly.
 
-@dataclass
-class CreateUserInput:
-    email: str
-    name: str
+Per run, atlas writes:
 
-@dataclass
-class CreateUserOutput:
-    user_id: UUID
-    email: str
-    name: str
+- One `runs` row on start; closed with `status` on run end.
+- Seven typed `spans` rows — one per stage, with the span kind from the
+  table above.
+- Six `scores` rows — one per gate, `scorer='user_signal'`.
+- One `examples` row per gate rejection (input = rejected artifact,
+  expected = corrected artifact after re-approval).
 
-class CreateUserUseCase:
-    def __init__(self, user_repository: UserRepository):
-        self.user_repository = user_repository
+`plumb run stats` shows atlas run history. `plumb example promote`
+turns gate rejections into regression test cases.
 
-    def execute(self, input_data: CreateUserInput) -> CreateUserOutput:
-        # Orchestrate domain logic
-        user = User(
-            id=uuid4(),
-            email=input_data.email,
-            name=input_data.name
-        )
+## Model routing
 
-        # Use repository (defined in domain, implemented in infrastructure)
-        self.user_repository.save(user)
+`.atlas.toml` maps pipeline roles to model strings:
 
-        return CreateUserOutput(
-            user_id=user.id,
-            email=user.email,
-            name=user.name
-        )
+```toml
+[models]
+plan_model   = "claude-opus-4-7@https://api.anthropic.com/v1"
+code_model   = "claude-sonnet-4-6@https://api.anthropic.com/v1"
+review_model = "claude-sonnet-4-6@https://api.anthropic.com/v1"
 ```
 
-**Rules**:
-- Can import from Domain layer
-- NO imports from Infrastructure layer
-- Uses interfaces (defined in Domain) instead of concrete implementations
+The `<model>@<base_url>` shape means a model swap is a config edit.
+Atlas does not make LLM calls directly — it invokes agent plugins that
+pick up the model from config.
 
-#### 3. Infrastructure Layer (`src/infrastructure/`)
-**Purpose**: Handle external concerns and framework-specific code
+## Resume after compaction
 
-**Contains**:
-- **API**: FastAPI routes, request/response models
-- **Database**: SQLAlchemy models, repository implementations
-- **External Services**: Third-party API clients, email services, etc.
+Atlas is compaction-safe by design. When a Claude Code session ends
+mid-run, a project-root `CLAUDE.md` instruction tells the next fresh
+session to read `dev/active/*/tasks.md`, find the first unchecked box,
+and confirm before resuming. No state lives in the chat window.
 
-**Example API Route**:
-```python
-# src/infrastructure/api/routes/users.py
-from fastapi import APIRouter, Depends
-from src.application.use_cases.create_user import CreateUserUseCase, CreateUserInput
-from src.infrastructure.dependencies import get_create_user_use_case
+## Size target
 
-router = APIRouter()
-
-@router.post("/users")
-def create_user(
-    email: str,
-    name: str,
-    use_case: CreateUserUseCase = Depends(get_create_user_use_case)
-):
-    input_data = CreateUserInput(email=email, name=name)
-    output = use_case.execute(input_data)
-    return output
-```
-
-**Example Repository Implementation**:
-```python
-# src/infrastructure/database/repositories/user_repository_impl.py
-from src.domain.entities.user import User
-from src.domain.repositories.user_repository import UserRepository
-from src.infrastructure.database.models import UserModel
-
-class UserRepositoryImpl(UserRepository):
-    def __init__(self, session):
-        self.session = session
-
-    def save(self, user: User) -> None:
-        user_model = UserModel(
-            id=user.id,
-            email=user.email,
-            name=user.name
-        )
-        self.session.add(user_model)
-        self.session.commit()
-```
-
-**Rules**:
-- Can import from both Domain and Application layers
-- Contains all framework-specific code
-- Implements interfaces defined in Domain layer
-
-## Key Principles
-
-### 1. Dependency Inversion
-- High-level modules should not depend on low-level modules
-- Both should depend on abstractions (interfaces)
-- Infrastructure implements interfaces defined in Domain
-
-### 2. Single Responsibility
-- Each class/module has one reason to change
-- Separate business logic from technical concerns
-
-### 3. Testability
-- Domain logic can be tested without any infrastructure
-- Use cases can be tested with mock repositories
-- Infrastructure can be tested separately
-
-## Testing Strategy
-
-### Unit Tests (Domain Layer)
-```python
-def test_user_change_email():
-    user = User(id=uuid4(), email="old@example.com", name="Test")
-    user.change_email("new@example.com")
-    assert user.email == "new@example.com"
-
-def test_user_change_email_invalid():
-    user = User(id=uuid4(), email="old@example.com", name="Test")
-    with pytest.raises(ValueError):
-        user.change_email("invalid-email")
-```
-
-### Integration Tests (Use Cases)
-```python
-def test_create_user_use_case():
-    # Use in-memory repository for testing
-    repo = InMemoryUserRepository()
-    use_case = CreateUserUseCase(repo)
-
-    result = use_case.execute(
-        CreateUserInput(email="test@example.com", name="Test User")
-    )
-
-    assert result.email == "test@example.com"
-    assert repo.count() == 1
-```
-
-### E2E Tests (API)
-```python
-def test_create_user_endpoint(client):
-    response = client.post("/users", json={
-        "email": "test@example.com",
-        "name": "Test User"
-    })
-    assert response.status_code == 200
-    assert response.json()["email"] == "test@example.com"
-```
-
-## Common Patterns
-
-### Repository Pattern
-Abstract data access behind interfaces defined in Domain layer.
-
-### Use Case Pattern
-Each use case represents a single business operation.
-
-### DTO Pattern
-Transfer data between layers without coupling to domain entities.
-
-### Dependency Injection
-Inject dependencies (repositories, services) instead of creating them.
-
-## Best Practices
-
-1. **Keep Domain Pure**: No framework dependencies in domain layer
-2. **Use Type Hints**: All functions should have type annotations
-3. **Write Tests First**: TDD approach ensures testability
-4. **Follow SOLID**: Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion
-5. **Document Decisions**: Use `dev/` folder for planning and context
+Atlas targets ≤ ~300 lines of Python — "a state machine, not a
+framework." Stages invoke external tools; atlas owns only ordering,
+gate prompts, state file writes, span/score writes, and the worktree
+boundary. If a feature requires a new file type (router module, agent
+registry), it is an automatic design-review trigger.

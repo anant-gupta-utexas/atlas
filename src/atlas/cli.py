@@ -14,6 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover
 from atlas.config import Config
 from atlas.orchestrator import (
     AbortedError,
+    AutoPrompter,
     ClickPrompter,
     NoActiveRunError,
     Pipeline,
@@ -37,15 +38,16 @@ def _find_repo_root() -> Path:
     raise typer.Exit(1)
 
 
-def _make_pipeline(repo_root: Path, cfg: Config) -> Pipeline:
+def _make_pipeline(repo_root: Path, cfg: Config, *, auto_approve: bool = False) -> Pipeline:
     plumb = PlumbIO(real=True)
     state = StateStore(repo_root)
     worktree = WorktreeManager(repo_root)
     runner = SubprocessStageRunner(
         timeout_overrides=cfg.timeout_overrides,
         command_overrides=cfg.plugin_commands,
+        model=cfg.model,
     )
-    prompter = ClickPrompter()
+    prompter: ClickPrompter | AutoPrompter = AutoPrompter() if auto_approve else ClickPrompter()
     return Pipeline(
         repo_root=repo_root,
         state=state,
@@ -62,6 +64,9 @@ def run(
     slug: str = typer.Option(
         "", "--slug", "-s", help="Short name for the tasks.md directory (auto-derived if omitted)"
     ),
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", "-y", help="Auto-approve all gates (for testing)"
+    ),
 ) -> None:
     """Start a new atlas pipeline run."""
     repo_root = _find_repo_root()
@@ -71,7 +76,7 @@ def run(
         slug = _slugify(task)
 
     try:
-        pipeline = _make_pipeline(repo_root, cfg)
+        pipeline = _make_pipeline(repo_root, cfg, auto_approve=auto_approve)
     except RoutingDriftError as exc:
         typer.echo(f"Routing fixture mismatch: {exc}", err=True)
         raise typer.Exit(1)
@@ -90,13 +95,17 @@ def run(
 
 
 @app.command()
-def resume() -> None:
+def resume(
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", "-y", help="Auto-approve all gates (for testing)"
+    ),
+) -> None:
     """Resume an in-flight atlas run in this repo."""
     repo_root = _find_repo_root()
     cfg = Config.load(repo_root)
 
     try:
-        pipeline = _make_pipeline(repo_root, cfg)
+        pipeline = _make_pipeline(repo_root, cfg, auto_approve=auto_approve)
         ctx = pipeline.resume()
     except NoActiveRunError as exc:
         typer.echo(f"No active run: {exc}", err=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ _TASKS_MD_HEADER = """\
 # tasks — {slug}
 
 <!-- run_id: {run_id} -->
+<!-- task: {task_b64} -->
 
 ## current
 
@@ -33,6 +35,7 @@ _STAGE_LINE = "- [ ] {name}\n"
 _CHECKED_LINE = "- [x] {name}\n"
 
 _RUN_ID_RE = re.compile(r"<!-- run_id:\s*(\S+)\s*-->")
+_TASK_RE = re.compile(r"<!-- task:\s*(\S+)\s*-->")
 _CHECKBOX_RE = re.compile(r"^- \[( |x)\] (.+)$", re.MULTILINE)
 _CURRENT_BLOCK_RE = re.compile(r"```\nphase: (.+)\ngate:  (.+)\nnext:  (.+)\n```", re.DOTALL)
 
@@ -55,10 +58,14 @@ class StateStore:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         stage_lines = "".join(_STAGE_LINE.format(name=s.name.value) for s in STAGES)
+        # Base64-encode the task text so embedded newlines / markdown survive
+        # round-trip through the HTML comment.
+        task_b64 = base64.b64encode(ctx.task.encode("utf-8")).decode("ascii")
         content = (
             _TASKS_MD_HEADER.format(
                 slug=ctx.slug,
                 run_id=ctx.run_id,
+                task_b64=task_b64,
                 phase=STAGES[0].name.value,
                 gate="none",
                 next_action="run stage 0 (research)",
@@ -68,21 +75,52 @@ class StateStore:
 
         _atomic_write(path, content)
 
-    def write_current_run(self, run_id: str, slug: str, worktree_path: Path | None = None) -> None:
+    def read_task_text(self, slug: str) -> str | None:
+        """Return the original task text written to tasks.md, or None if absent."""
+        path = self._tasks_md_path(slug)
+        if not path.exists():
+            return None
+        content = path.read_text()
+        m = _TASK_RE.search(content)
+        if m is None:
+            return None
+        try:
+            return base64.b64decode(m.group(1).encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def update_run_id(self, slug: str, new_run_id: str) -> None:
+        """Rewrite the tasks.md run_id comment in place (used during resume handoff)."""
+        path = self._tasks_md_path(slug)
+        content = path.read_text()
+        updated = _RUN_ID_RE.sub(f"<!-- run_id: {new_run_id} -->", content, count=1)
+        _atomic_write(path, updated)
+
+    def write_current_run(
+        self,
+        run_id: str,
+        slug: str,
+        worktree_path: Path | None = None,
+        code_gen_span_id: str | None = None,
+    ) -> None:
         self._atlas_dir.mkdir(parents=True, exist_ok=True)
         body = f"{run_id}\n{slug}\n"
-        if worktree_path is not None:
-            body += f"{worktree_path}\n"
+        if worktree_path is not None or code_gen_span_id is not None:
+            body += f"{worktree_path or ''}\n"
+        if code_gen_span_id is not None:
+            body += f"{code_gen_span_id}\n"
         _atomic_write(self._current_run_path, body)
 
     def read_current_run(self) -> tuple[str, str] | None:
-        pair_with_wt = self.read_current_run_with_worktree()
-        if pair_with_wt is None:
+        result = self.read_current_run_with_worktree()
+        if result is None:
             return None
-        run_id, slug, _ = pair_with_wt
+        run_id, slug, _, _ = result
         return run_id, slug
 
-    def read_current_run_with_worktree(self) -> tuple[str, str, Path | None] | None:
+    def read_current_run_with_worktree(
+        self,
+    ) -> tuple[str, str, Path | None, str | None] | None:
         if not self._current_run_path.exists():
             return None
         lines = self._current_run_path.read_text().splitlines()
@@ -93,7 +131,10 @@ class StateStore:
         worktree_path: Path | None = None
         if len(lines) >= 3 and lines[2].strip():
             worktree_path = Path(lines[2].strip())
-        return run_id, slug, worktree_path
+        code_gen_span_id: str | None = None
+        if len(lines) >= 4 and lines[3].strip():
+            code_gen_span_id = lines[3].strip()
+        return run_id, slug, worktree_path, code_gen_span_id
 
     def delete_current_run(self) -> None:
         if self._current_run_path.exists():
@@ -139,12 +180,12 @@ class StateStore:
         return None
 
     def assert_consistent(self, ctx: RunContext) -> None:
-        pair = self.read_current_run()
-        if pair is None:
+        result = self.read_current_run()
+        if result is None:
             raise StateInconsistencyError(
                 f"No .atlas/current-run found; expected run_id={ctx.run_id}"
             )
-        file_run_id, _ = pair
+        file_run_id, _ = result
 
         path = self._tasks_md_path(ctx.slug)
         content = path.read_text()

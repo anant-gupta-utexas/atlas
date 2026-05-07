@@ -1,25 +1,40 @@
-"""Plugin name → agent CLI command mapping (D1 resolution)."""
+"""Plugin name → agent slash-command mapping (D1 resolution).
+
+Values are passed to ``claude -p`` as the prompt prefix.
+- Slash-command form: ``"/PLUGIN:cmd"`` or ``"/skill-name"`` — prepended with "/"
+- Raw prompt form: ``"RAW:<text>"`` — the text after "RAW:" is used verbatim as the prompt prefix
+
+Commands from installed plugins use their namespaced form ``PLUGIN:command-name``
+where required; skills use their bare name.
+Override individual entries via .atlas.toml [plugin_commands] table.
+"""
 
 from __future__ import annotations
 
 from atlas.orchestrator import RoutingDriftError
 
-# Maps StageSpec.tool strings to the agent CLI command to invoke.
-# Override individual entries via .atlas.toml [plugin_commands] table.
+# Maps StageSpec.tool strings to the command to invoke.
+# Prefix with "RAW:" for stages that use a plain prompt instead of a slash command.
 PLUGIN_COMMANDS: dict[str, str] = {
+    # consult-experts is a DEV-ESSENTIALS skill (bare name, no namespace)
     "consult-experts:research": "consult-experts",
     "consult-experts:pm": "consult-experts",
     "consult-experts:tech-lead": "consult-experts",
-    "dev-docs-be": "dev-docs-be",
-    "plan-reviewer": "plan-reviewer",
-    "code-gen-agent": "code-gen-agent",
-    "code-review": "code-review",
+    # dev-docs-be is a DEV-ESSENTIALS plugin command (namespaced)
+    "dev-docs-be": "DEV-ESSENTIALS:dev-docs-be",
+    # plan-reviewer is a DEV-ESSENTIALS agent — invoked via Agent tool inside claude,
+    # so we use consult-experts with a plan-review role framing
+    "plan-reviewer": "consult-experts",
+    # code-gen-agent: no dedicated plugin — raw prompt instructs claude to implement
+    "code-gen-agent": "RAW:Implement the following task by writing and committing code:",
+    # code-review is a DEV-ESSENTIALS plugin command (namespaced)
+    "code-review": "DEV-ESSENTIALS:code-review",
 }
 
 
 def resolve(tool: str, *, overrides: dict[str, str] | None = None) -> str:
     """
-    Return the agent CLI command for *tool*.
+    Return the command string for *tool*.
 
     Checks the optional *overrides* dict first (from .atlas.toml), then
     falls back to ``PLUGIN_COMMANDS``.  Raises ``RoutingDriftError`` if
@@ -34,3 +49,11 @@ def resolve(tool: str, *, overrides: dict[str, str] | None = None) -> str:
             "Add it to PLUGIN_COMMANDS or .atlas.toml [plugin_commands]."
         )
     return mapping[tool]
+
+
+def build_prompt(cmd: str, task: str, context_hint: str) -> str:
+    """Build the full prompt string for ``claude -p``."""
+    if cmd.startswith("RAW:"):
+        raw_prefix = cmd[4:]
+        return f"{raw_prefix}\n\n{task}\n\n{context_hint}"
+    return f"/{cmd} {task}\n\n{context_hint}"
