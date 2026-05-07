@@ -205,9 +205,7 @@ def test_wait_for_commit_score_returns_true_when_record_present(tmp_path):
     record = {"run_id": ctx.run_id, "metric": "gate_commit", "value_label": "approved"}
     pending.write_text(json.dumps(record) + "\n")
 
-    result = pipeline._wait_for_commit_score(
-        run_id=ctx.run_id, timeout_s=5, poll_interval_s=0.05
-    )
+    result = pipeline._wait_for_commit_score(run_id=ctx.run_id, timeout_s=5, poll_interval_s=0.05)
     assert result is True
 
 
@@ -215,9 +213,7 @@ def test_wait_for_commit_score_returns_false_on_timeout(tmp_path):
     pipeline, _, _ = _make_pipeline(tmp_path)
     ctx = pipeline.start(task="test", slug="slug")
 
-    result = pipeline._wait_for_commit_score(
-        run_id=ctx.run_id, timeout_s=0, poll_interval_s=0.05
-    )
+    result = pipeline._wait_for_commit_score(run_id=ctx.run_id, timeout_s=0, poll_interval_s=0.05)
     assert result is False
 
 
@@ -231,9 +227,7 @@ def test_wait_for_commit_score_ignores_different_run_id(tmp_path):
     record = {"run_id": "some-other-run-id", "metric": "gate_commit", "value_label": "approved"}
     pending.write_text(json.dumps(record) + "\n")
 
-    result = pipeline._wait_for_commit_score(
-        run_id=ctx.run_id, timeout_s=0, poll_interval_s=0.05
-    )
+    result = pipeline._wait_for_commit_score(run_id=ctx.run_id, timeout_s=0, poll_interval_s=0.05)
     assert result is False
 
 
@@ -304,8 +298,9 @@ def test_awaiting_hook_attempt_cap_raises(tmp_path):
     # Patch both step (always returns awaiting_hook) and _wait_for_commit_score
     # (always returns True, so the loop doesn't exit on timeout — it keeps going
     # until the attempt cap is hit).
-    with patch.object(pipeline, "step", return_value=fake_outcome), patch.object(
-        pipeline, "_wait_for_commit_score", return_value=True
+    with (
+        patch.object(pipeline, "step", return_value=fake_outcome),
+        patch.object(pipeline, "_wait_for_commit_score", return_value=True),
     ):
         with pytest.raises(AwaitingHookExceededError):
             pipeline.run_to_completion(ctx)

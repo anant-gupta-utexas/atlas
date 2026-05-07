@@ -173,9 +173,7 @@ def test_resume_rehydrates_original_task_not_slug(tmp_path: Path) -> None:
 
     resumed = pipeline.resume()
 
-    assert resumed.task == original_task, (
-        "resume must restore the original task text, not the slug"
-    )
+    assert resumed.task == original_task, "resume must restore the original task text, not the slug"
     assert resumed.task != "my-slug"
 
 
@@ -251,9 +249,7 @@ def test_hook_replay_does_not_duplicate_score(
 
     pending = main / ".atlas" / "pending-scores.jsonl"
     lines = [ln for ln in pending.read_text().splitlines() if ln.strip()]
-    assert len(lines) == 1, (
-        f"hook replay for the same commit must dedupe; got {len(lines)} records"
-    )
+    assert len(lines) == 1, f"hook replay for the same commit must dedupe; got {len(lines)} records"
 
 
 # ---------------------------------------------------------------------------
@@ -350,9 +346,7 @@ def test_record_user_signal_forwards_rationale_in_real_mode() -> None:
     fake_handle.add_score = MagicMock(return_value="score-id")
     plumb._run_handle = fake_handle
 
-    decision = GateDecision(
-        label="approved", turn_count=1, reason="LGTM, looks good to me"
-    )
+    decision = GateDecision(label="approved", turn_count=1, reason="LGTM, looks good to me")
     plumb.record_user_signal(
         run_id="aa" * 16,
         span_id="bb" * 16,
