@@ -3,10 +3,9 @@ name = "atlas"
 version = "1.0.0"
 description = "Local-CLI agent orchestrator + metrics logger for a phase-gated dev workflow."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
-    # plumb — pin commit SHA once available; optional for Phase 1 stubs
-    # "plumb @ git+https://github.com/example/plumb.git@<sha>",
+    "plumb",
     "typer>=0.12",
 ]
 
@@ -20,6 +19,9 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
 ]
+
+[tool.uv.sources]
+plumb = { path = "../plumb", editable = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -49,7 +51,7 @@ show_missing = true
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
+python_version = "3.13"
 files = ["src/atlas"]
 
 [tool.ruff]

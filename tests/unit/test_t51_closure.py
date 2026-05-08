@@ -188,7 +188,7 @@ def test_write_example_real_mode_calls_plumb_storage_writer() -> None:
     if not plumb_io._PLUMB_AVAILABLE:
         pytest.skip("plumb not importable in this env")
 
-    plumb = PlumbIO(real=False)
+    plumb = PlumbIO(real=False, task_id="atlas.test.write_example")
     plumb._real = True
 
     fake_writer = MagicMock()
