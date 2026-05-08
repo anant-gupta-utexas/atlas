@@ -13,9 +13,10 @@ from typing import TYPE_CHECKING, Any
 _logger = logging.getLogger("atlas.plumb")
 
 try:
-    import plumb as _plumb_module  # type: ignore[import-not-found]
+    import plumb as _plumb_module
     from plumb import run as plumb_run
-    from plumb.core.entities import Example, ExampleSource  # type: ignore[import-not-found]
+    from plumb.api import _storage_writer as _plumb_storage_writer
+    from plumb.core.entities import Example, ExampleSource
 
     _PLUMB_AVAILABLE = True
 except ModuleNotFoundError:  # pragma: no cover — only absent in CI without plumb
@@ -275,7 +276,7 @@ class PlumbIO:
                 # Interim path: write through plumb's storage writer directly.
                 # When v2 add_example lands on RunHandle, swap this for
                 # self._run_handle.add_example(...).
-                _plumb_module._storage_writer.write_example(example)
+                _plumb_storage_writer.write_example(example)
             except Exception:
                 _logger.warning(
                     "write_example: durable persistence failed for run_id=%s span_id=%s",

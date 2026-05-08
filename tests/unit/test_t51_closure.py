@@ -192,11 +192,9 @@ def test_write_example_real_mode_calls_plumb_storage_writer() -> None:
     plumb._real = True
 
     fake_writer = MagicMock()
-    fake_module = MagicMock()
-    fake_module._storage_writer = fake_writer
-    original = plumb_io._plumb_module
+    original = plumb_io._plumb_storage_writer
     try:
-        plumb_io._plumb_module = fake_module
+        plumb_io._plumb_storage_writer = fake_writer
         plumb.write_example(
             run_id="aa" * 16,
             span_id="bb" * 16,
@@ -204,7 +202,7 @@ def test_write_example_real_mode_calls_plumb_storage_writer() -> None:
             expected=None,
         )
     finally:
-        plumb_io._plumb_module = original
+        plumb_io._plumb_storage_writer = original
 
     assert fake_writer.write_example.called, (
         "real-mode write_example must invoke plumb's storage writer"
