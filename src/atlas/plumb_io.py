@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 _logger = logging.getLogger("atlas.plumb")
 
 try:
-    import plumb as _plumb_module
     from plumb import run as plumb_run
     from plumb.api import _storage_writer as _plumb_storage_writer
     from plumb.core.entities import Example, ExampleSource
