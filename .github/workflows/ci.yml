@@ -17,16 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out plumb alongside atlas
+        uses: actions/checkout@v4
+        with:
+          repository: anant-gupta-utexas/plumb
+          ref: v1.0.0
+          path: ../plumb
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install plumb from git
-        run: uv pip install "plumb @ git+https://github.com/anant-gupta-utexas/plumb.git@v1.0.0" --system
-
-      - name: Install atlas + dev deps
-        run: uv sync --extra dev --no-sources-package plumb
+      - name: Install dependencies
+        run: uv sync --extra dev
 
       - name: Run unit + integration tests with coverage
         run: |
@@ -65,16 +69,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out plumb alongside atlas
+        uses: actions/checkout@v4
+        with:
+          repository: anant-gupta-utexas/plumb
+          ref: v1.0.0
+          path: ../plumb
+
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
           python-version: "3.13"
 
-      - name: Install plumb from git
-        run: uv pip install "plumb @ git+https://github.com/anant-gupta-utexas/plumb.git@v1.0.0" --system
-
-      - name: Install atlas + dev deps
-        run: uv sync --extra dev --no-sources-package plumb
+      - name: Install dependencies
+        run: uv sync --extra dev
 
       - name: mypy
         run: uv run mypy src
@@ -87,6 +95,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out plumb alongside atlas
+        uses: actions/checkout@v4
+        with:
+          repository: anant-gupta-utexas/plumb
+          ref: v1.0.0
+          path: ../plumb
+
       - name: Configure git identity
         run: |
           git config --global user.email "ci@atlas.local"
@@ -97,11 +112,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install plumb from git
-        run: uv pip install "plumb @ git+https://github.com/anant-gupta-utexas/plumb.git@v1.0.0" --system
-
-      - name: Install atlas + dev deps
-        run: uv sync --extra dev --no-sources-package plumb
+      - name: Install dependencies
+        run: uv sync --extra dev
 
       - name: Run E2E tests
         run: uv run pytest tests/e2e -m e2e -v
