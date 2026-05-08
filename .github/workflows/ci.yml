@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: anant-gupta-utexas/plumb
-          ref: v1.0.0
+          ref: v1.0.1
           path: plumb
 
       - name: Symlink plumb to ../plumb
@@ -76,7 +76,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: anant-gupta-utexas/plumb
-          ref: v1.0.0
+          ref: v1.0.1
           path: plumb
 
       - name: Symlink plumb to ../plumb
@@ -105,7 +105,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: anant-gupta-utexas/plumb
-          ref: v1.0.0
+          ref: v1.0.1
           path: plumb
 
       - name: Symlink plumb to ../plumb
