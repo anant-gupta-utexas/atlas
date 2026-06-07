@@ -95,6 +95,26 @@ writes — no atlas code changes needed.
 - **Install plumb** as a path dependency to unlock durable span/score writes in real mode.
 - **v1.1 backlog**: log rotation, HTTP shell boundary, plumb v2 `add_example` on RunHandle.
 
+### Phase 2 — YAML-driven workflows (analysis, deferred)
+
+See [`docs/1_product_and_research/yaml-driven-workflows-analysis.md`](docs/1_product_and_research/yaml-driven-workflows-analysis.md)
+§7 (added 2026-06-07) for the full prioritization. Net ordering:
+
+1. **Support near-term library-consumers with no atlas code change.** atlas is
+   reused as a library (`SubprocessStageRunner`, `WorktreeManager`, `Pipeline`,
+   `write_example`-on-rejection at `orchestrator.py:319`); the workflow engine
+   is not on the critical path.
+2. **Then author one worked-example non-dev workflow YAML** (analysis §3.5) —
+   the cheap go/no-go test before any refactor.
+3. **Only if that feels natural**, commit YAML-driven workflows to atlas v2 as
+   one deliberate scope decision (enum-loosening + loader + per-stage `isolate`
+   + the "300 LoC / no registry" vow relaxation, taken together).
+
+The measurement-layer dependency is settled: the closed `spans.kind` set needs
+**no** measurement-layer change (validate/map at the atlas loader); per-workflow
+provenance should ride a proposed `spans.attributes` JSON column rather than a
+dedicated `runs.workflow` add.
+
 ## Pointers
 
 - PRD: `docs/1_product_and_research/PRD.md`
