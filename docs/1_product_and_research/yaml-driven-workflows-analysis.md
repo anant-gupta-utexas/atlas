@@ -5,7 +5,7 @@ created: 2026-06-07
 related:
   - dynamic-workflows (Claude Code feature, blog 2026-06-02)
   - plumb (measurement spine — sibling repo)
-  - measured-orchestrator consumer (reuses atlas as a library)
+  - symphony-measured (hackathon plan)
 ---
 
 # atlas as a YAML-driven gated-workflow engine
@@ -307,12 +307,11 @@ A plumb schema migration is *avoidable* for v1 of YAML workflows.
 
 ---
 
-## 5. Strategic note for atlas positioning
+## 5. Strategic note for Symphony / atlas positioning
 
-For a measured, self-healing orchestrator built on plumb + atlas (a consumer
-that reuses atlas as a library): the existence of dynamic workflows means atlas
-should *not* position itself as a hand-rolled orchestrator competing on
-plumbing. Its
+Given the **Measured Symphony** hackathon (measured + self-healing orchestrator
+on plumb + atlas): the existence of dynamic workflows means atlas should *not*
+position itself as a hand-rolled orchestrator competing on plumbing. Its
 defensible core is **gates + durable state + plumb measurement**. YAML-driven
 workflows extend that moat to *any* domain (writing, research, finance, ops),
 not just dev — which is a stronger product story than "another way to chain
@@ -332,49 +331,61 @@ fly; the measurement-and-gate discipline is not.
 
 ---
 
-## 7. Phase-2 prioritization
+## 7. Phase-2 prioritization (against the symphony-measured hackathon)
 
-> Added 2026-06-07. Sequences this YAML-workflow analysis against near-term
-> work that consumes atlas as a *library* (its `SubprocessStageRunner`,
-> `WorktreeManager`, `Pipeline`, and the `write_example`-on-gate-rejection
-> shape at `orchestrator.py:319`) rather than as a workflow engine.
+> Added 2026-06-07. Sequences this YAML-workflow analysis against the
+> [`symphony-measured`](../symphony-measured/README.md) hackathon, which is the
+> primary near-term focus and consumes atlas as a *library*, not as a workflow
+> engine.
 
-### 7.1 The framing the near-term work forces
+### 7.1 The framing the hackathon forces
 
-When atlas is reused as a library — a caller wraps the stage runner and worktree
-manager to drive its own per-task workers — it does **not** need the workflow
-topology generalized. A per-task worker is a thin wrapper over the runner, not a
-new YAML-defined pipeline. So **YAML-driven workflows are out of scope for that
-near-term work** and should stay analysis-only until it ships.
+symphony-measured reuses atlas's **machinery** — `SubprocessStageRunner`,
+`WorktreeManager`, `Pipeline`, and the `write_example`-on-gate-rejection shape
+(`orchestrator.py:319`). It does **not** need the workflow topology generalized.
+A per-ticket worker is a thin wrapper over the runner, not a new YAML-defined
+pipeline. So **YAML-driven workflows are out of scope for the hackathon** and
+should stay analysis-only until after it ships.
 
 ### 7.2 Priority call
 
 | Item | Verdict | Why |
 |---|---|---|
-| YAML-driven workflows (this doc, §3) | **Defer** | atlas is consumed as a library; the workflow engine isn't on the critical path. Authoring one worked-example non-dev YAML (§3.5) is the gating step *before* any code — do that first. |
-| `worktree_stage` → per-stage `isolate: true` (§3.4) | **Stretch / back-pocket** | The one atlas generalization a library-consumer might touch, if a task-worker is expressed as a tiny atlas workflow. Bonus only; don't pull it forward. |
+| YAML-driven workflows (this doc, §3) | **Defer past hackathon** | atlas is consumed as a library; the workflow engine isn't on the critical path. Authoring one worked-example non-dev YAML (§3.5) is the gating step *before* any code — do that first, post-hackathon. |
+| `worktree_stage` → per-stage `isolate: true` (§3.4) | **Stretch / back-pocket** | The one atlas generalization the hackathon *might* touch, if a ticket-worker is expressed as a tiny atlas workflow. Already fenced to "bonus only" in the hackathon plan. Don't pull it forward. |
 | Loosen `StageName`/`GateLabel` enums to strings (§3.2) | **Defer** | Mechanical, but pointless until a second workflow shape actually exists. |
-| The "300 LoC / no registry" vow relaxation (§3.4) | **Decide later** | A deliberate v1→v2 philosophy shift, not a tweak. Don't sneak it in under time pressure. |
+| The "300 LoC / no registry" vow relaxation (§3.4) | **Decide post-hackathon** | This is a deliberate v1→v2 philosophy shift, not a tweak. Don't sneak it in under hackathon time pressure. |
 
-### 7.3 Dependency on the measurement layer
+### 7.3 Dependency on plumb
 
-The measurement-layer concerns this doc raised (§4) interact with that layer's
-own roadmap:
+The plumb-side concerns this doc raised (§4) interact with plumb's own Phase 2:
 
-- The closed `spans.kind` set (§4.2) — **no measurement-layer change needed**;
-  validate/map at the atlas loader. Unchanged conclusion.
+- The closed `spans.kind` set (§4.2) — **no plumb change needed**; validate/map
+  at the atlas loader. Unchanged conclusion.
 - Metric-name namespacing (§4.3) and `runs.workflow` provenance (§4.4) — both
-  partly subsumed by a proposed `spans.attributes` JSON column on the
-  measurement layer. If that lands, per-workflow context
-  (`{workflow, stage, gate}`) gets a durable home without a `task_id`-prefix
-  convention or a dedicated provenance column. **Prefer the attributes column
-  over the `runs.workflow` add.**
+  partly subsumed by a **new** plumb proposal: a `spans.attributes` JSON column
+  (recorded in the plumb repo's `deferred-features.md` and
+  `phase-2-prioritization.md`, dated 2026-06-07). If that lands, per-workflow
+  context (`{workflow, stage, gate}`) has a durable home without a
+  `task_id`-prefix convention or a dedicated provenance column. **Note this as a
+  reason to prefer the attributes column over the `runs.workflow` add.**
 
 ### 7.4 Net Phase-2 ordering for atlas
 
-1. Support the near-term library-consumer with no atlas code change required.
-2. Then: author one worked-example non-dev workflow YAML (§3.5) — the cheap
-   go/no-go test for the whole abstraction.
+1. Ship the hackathon reusing atlas-as-library (no atlas code change required).
+2. Post-hackathon: author one worked-example non-dev workflow YAML (§3.5) —
+   the cheap go/no-go test for the whole abstraction.
 3. Only if that feels natural: commit YAML-driven workflows to atlas v2, taking
    the enum-loosening + loader + `isolate` + vow-relaxation together as one
    deliberate scope decision.
+
+### 7.5 First worked-example chosen: the job workflow (2026-06-28)
+
+The §3.5 "author one non-dev workflow YAML first" step now has a concrete
+candidate: a **job-automation workflow** (ingest postings → score fit → tailor
+materials → emit package), which also exercises consuming content-pipeline's
+existing `score_jobs` surface as a library. Full scope, the hub-and-spoke
+trigger model (second-brain → ai-workx skill → atlas → content-pipeline →
+plumb), and a draft `job.yaml` are in
+[`job-workflow-scope.md`](./job-workflow-scope.md). That doc treats Phase 0
+(author `job.yaml`) as the go/no-go this section calls for.
