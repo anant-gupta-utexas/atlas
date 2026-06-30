@@ -6,26 +6,57 @@ Progress checklist. Source-of-truth for design is
 ## Current
 
 ```
-phase: blocked_on_phase_1
+phase: in_progress
 gate:  none
-next:  do not start T2.1 until T2.0 confirms Phase 1 has merged
+next:  T2.5 — wire _make_pipeline() for job.yaml
 ```
 
-## ⚠️ Blocking dependency
+## Note — T2.4 widened `GatePrompter.ask()` (a real, narrow `Pipeline` touch)
 
-Phase 1 ([`dev/active/yaml-workflow-engine-phase-1/`](../yaml-workflow-engine-phase-1/)) has
-**not shipped yet** as of 2026-06-29 (`src/atlas/stages.py` is still the pre-Phase-1
-StrEnum shape). This TRS is written against the Phase-1-complete contract per explicit user
-instruction. **T2.0 is a hard gate — verify Phase 1's exit criteria for real before
-starting T2.1.**
+T2.3 verified zero diff to `Pipeline`'s own source; T2.4 required one. The
+`GatePrompter` Protocol's `ask()` gained `output_text: str = ""`, and
+`Pipeline.step()`'s single call site (`orchestrator.py`, the `self._prompter.ask(...)`
+line) now passes `outcome.output_text` through. `ClickPrompter`/`AutoPrompter`
+updated to match; `ClickPrompter` prints `output_text` (if non-empty) before the
+gate prompt — additive only, dev-pipeline gates with empty/already-seen
+`output_text` are unaffected (verified by
+`test_click_prompter_silent_when_output_text_empty`). This was confirmed with
+the maintainer as in-spirit with FR-7/Resolved-Decision-#1 ("don't restructure
+Pipeline for library-stage dispatch"), not a violation of it — a one-parameter
+addition to an existing call site, not a restructure. All 8 test-fake
+`GatePrompter` implementations across the suite were updated to match the new
+signature.
+
+## ⚠️ Naming correction — `job-cli` → `job_cli` (2026-06-30)
+
+The plan document uses `job-cli`/`job-cli.yaml` throughout, but Phase 1's `_NAME_RE =
+^[a-z][a-z0-9_]*$` (in `stages.py`, enforced by `workflow_loader.py` for both the
+top-level `name:` field and `resolve_workflow()`'s CLI-supplied name) rejects hyphens.
+`job-cli` fails to load and `--workflow job-cli` fails to resolve. Resolved with the
+maintainer (2026-06-30): **rename to `job_cli`** (underscore) everywhere — file is
+`src/atlas/workflows/job_cli.yaml`, workflow `name: job_cli`, invoked as
+`--workflow job_cli`, metrics namespaced `job_cli.gate_*`. Do not loosen `_NAME_RE`
+(Phase-1-delivered code; widening it for one workflow's naming preference isn't
+justified). All forward references in this plan/tasks file to `job-cli` should be
+read as `job_cli`.
+
+## ⚠️ Blocking dependency — RESOLVED 2026-06-30
+
+Phase 1 ([`dev/active/yaml-workflow-engine-phase-1/`](../yaml-workflow-engine-phase-1/)) is
+complete on branch `atlas/yaml-workflow-engine-phase-1` (commits `0515425`, `b5573ff`).
+`src/atlas/stages.py` now has the Phase-1 `StageSpec` shape (no `StrEnum`). T2.0 verified
+for real: 156 tests pass (153 unit/integration + 3 e2e, exceeding the 153+3 claimed in
+Phase 1's tasks file), Phase 1's own tasks file shows `phase: complete` with all exit
+criteria checked. Note: Phase 1 is not yet merged into `main` — this branch is stacked on
+the Phase 1 branch, which is expected for continuing Phase 2 work before Phase 1 ships.
 
 ## Tasks (flat — Phase 2 only, no sub-phases)
 
-- [ ] **T2.0** — Verify Phase 1 exit criteria before starting any Phase 2 work (hard gate, no code)
-- [ ] **T2.1** — Author `job.yaml` + `job-cli.yaml` (matched Mode-A / Mode-B pair, 4 stages each)
-- [ ] **T2.2** — Implement `library_runner.py` (`LibraryStageRunner`) + `library_adapters/` (score_jobs, capture)
-- [ ] **T2.3** — Implement `CompositeStageRunner` (`LIB:`/`RAW:`/plugin-command dispatch; zero `Pipeline` changes)
-- [ ] **T2.4** — Render `score_fit`'s gate content end-to-end (confirm `output_text` reaches the gate prompt)
+- [x] **T2.0** — Verify Phase 1 exit criteria before starting any Phase 2 work (hard gate, no code)
+- [x] **T2.1** — Author `job.yaml` + `job_cli.yaml` (matched Mode-A / Mode-B pair, 4 stages each)
+- [x] **T2.2** — Implement `library_runner.py` (`LibraryStageRunner`) + `library_adapters/` (score_jobs, capture)
+- [x] **T2.3** — Implement `CompositeStageRunner` (`LIB:`/`RAW:`/plugin-command dispatch; zero `Pipeline` changes)
+- [x] **T2.4** — Render `score_fit`'s gate content end-to-end (confirm `output_text` reaches the gate prompt)
 - [ ] **T2.5** — Wire `_make_pipeline()` for `job.yaml` (`CompositeStageRunner` + `content_pipeline_not_installed` error naming `job-cli`)
 - [ ] **T2.6** — Add content-pipeline as an optional dependency (`pyproject.toml` extra)
 - [ ] **T2.7** — Document the two-variant choice (`job` vs `job-cli`)
@@ -57,7 +88,10 @@ starting T2.1.**
 
 No decisions remain open. The five items below were the plan's "Pending Decisions"; all are now resolved and binding.
 
-- [x] #1 — `CompositeStageRunner` placement → keep in `orchestrator.py`; split to a new file only if it exceeds **~500 lines** after Phase 1 (concrete trigger, check at T2.3)
+- [x] #1 — `CompositeStageRunner` placement → keep in `orchestrator.py`; split to a new file only if it exceeds **~500 lines** after Phase 1 (concrete trigger, check at T2.3).
+      **Trigger hit:** `orchestrator.py` was 713 lines at T2.3 (well past 500), so
+      `CompositeStageRunner` landed in new file `src/atlas/composite_runner.py`
+      instead. `Pipeline`'s own diff in `orchestrator.py` is empty — FR-7 holds.
 - [x] #2 — Automatic Mode-A→Mode-B fallback → **NO.** Ship `job-cli.yaml` as a second explicit workflow; error names it. "Explicit > implicit." (binds T2.1/T2.2/T2.5/T2.7)
 - [x] #3 — `ingest_postings` partial-failure strictness → **keep atlas stricter.** Any source failure fails the stage; measured pipeline assumes complete upstream data (binds T2.2)
 - [x] #4 — Real job-board credentials → manual prerequisite; tests mock at the use-case boundary; live runs are manual

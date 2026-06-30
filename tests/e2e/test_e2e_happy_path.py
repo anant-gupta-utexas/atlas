@@ -101,7 +101,7 @@ class _ApproveAllPrompter:
     def __init__(self) -> None:
         self.decisions: list[GateDecision] = []
 
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         d = GateDecision(label="approved", turn_count=1, reason=None)
         self.decisions.append(d)
         return d

@@ -56,6 +56,14 @@ strict = true
 python_version = "3.13"
 files = ["src/atlas"]
 
+[[tool.mypy.overrides]]
+# content-pipeline's own "src.*" namespace — an optional dependency (T2.6).
+# library_adapters/* import it lazily, function-local, so atlas's own code is
+# unaffected whether or not content-pipeline is installed in the environment
+# running mypy; this override just stops mypy treating those imports as errors.
+module = "src.*"
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 

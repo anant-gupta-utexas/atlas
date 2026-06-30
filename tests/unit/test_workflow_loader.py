@@ -17,6 +17,8 @@ from atlas.workflow_loader import (
 )
 
 _DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+_JOB_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "job.yaml"
+_JOB_CLI_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "job_cli.yaml"
 
 _VALID_YAML = """\
 name: test_wf
@@ -321,6 +323,54 @@ def test_dev_pipeline_parity() -> None:
     assert isolate_stages == ["code_gen"]
     async_stages = [s.name for s in loaded.stages if s.gate_is_async]
     assert async_stages == ["code_gen"]
+
+
+def test_load_job_yaml_via_loader() -> None:
+    loaded = load_workflow_file(_JOB_YAML_PATH)
+    assert loaded.name == "job"
+    assert len(loaded.stages) == 4
+
+    by_name = {s.name: s for s in loaded.stages}
+    assert by_name["ingest_postings"].gate_label is None
+    assert by_name["ingest_postings"].gate_index is None
+    assert by_name["ingest_postings"].tool.startswith("LIB:")
+    assert by_name["score_fit"].gate_label == "gate_shortlist"
+    assert by_name["score_fit"].gate_index == 0
+    assert by_name["score_fit"].tool.startswith("LIB:")
+    assert by_name["tailor_materials"].gate_label == "gate_materials"
+    assert by_name["tailor_materials"].gate_index == 1
+    assert by_name["tailor_materials"].tool.startswith("RAW:")
+    assert by_name["tailor_materials"].timeout_s == 1800
+    assert by_name["emit_package"].gate_label == "gate_done"
+    assert by_name["emit_package"].gate_index == 2
+    assert by_name["emit_package"].tool.startswith("RAW:")
+    assert by_name["emit_package"].timeout_s is None
+
+    for name in ("ingest_postings", "score_fit"):
+        assert by_name[name].timeout_s is None
+
+    span_kinds = [s.span_kind for s in loaded.stages]
+    assert span_kinds == ["tool", "verify", "subagent", "tool"]
+
+
+def test_load_job_cli_yaml_via_loader() -> None:
+    loaded = load_workflow_file(_JOB_CLI_YAML_PATH)
+    assert loaded.name == "job_cli"
+    assert len(loaded.stages) == 4
+
+    by_name = {s.name: s for s in loaded.stages}
+    for stage in loaded.stages:
+        assert stage.tool.startswith("RAW:"), f"{stage.name} tool is not RAW:-prefixed"
+
+    assert by_name["ingest_postings"].gate_label is None
+    assert by_name["score_fit"].gate_label == "gate_shortlist"
+    assert by_name["score_fit"].timeout_s == 1800
+    assert by_name["tailor_materials"].gate_label == "gate_materials"
+    assert by_name["tailor_materials"].timeout_s == 1800
+    assert by_name["emit_package"].gate_label == "gate_done"
+
+    gate_labels = [s.gate_label for s in loaded.stages if s.gate_label is not None]
+    assert len(gate_labels) == len(set(gate_labels))
 
 
 # ---------------------------------------------------------------------------

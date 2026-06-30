@@ -55,7 +55,7 @@ class _FakePrompter:
         self._decisions = list(decisions or [])
         self._idx = 0
 
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         if self._decisions and self._idx < len(self._decisions):
             d = self._decisions[self._idx]
             self._idx += 1

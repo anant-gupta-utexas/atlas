@@ -193,6 +193,31 @@ def test_click_prompter_approve(tmp_path: Path) -> None:
     assert decision.reason is None
 
 
+def test_click_prompter_prints_output_text_before_prompt(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompter = ClickPrompter()
+    stage = _RESEARCH_STAGE
+    report = "## Shortlist\nGREEN: acme-swe (score=9)\nYELLOW: foo-corp (score=5)"
+
+    with patch("builtins.input", return_value="a"):
+        prompter.ask(stage=stage, gate_index=0, output_text=report)
+
+    captured = capsys.readouterr()
+    assert report in captured.out
+
+
+def test_click_prompter_silent_when_output_text_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    prompter = ClickPrompter()
+    stage = _RESEARCH_STAGE
+
+    with patch("builtins.input", return_value="a"):
+        prompter.ask(stage=stage, gate_index=0)
+
+    captured = capsys.readouterr()
+    assert "## Shortlist" not in captured.out
+
+
 def test_click_prompter_reject_with_inline_reason(tmp_path: Path) -> None:
     prompter = ClickPrompter()
     stage = _RESEARCH_STAGE

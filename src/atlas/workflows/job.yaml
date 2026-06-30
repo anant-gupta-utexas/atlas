@@ -1,0 +1,29 @@
+name: job
+default_backend: claude
+
+stages:
+  - name: ingest_postings
+    span_kind: tool
+    tool: "LIB:content_pipeline.capture"
+    gate: null
+    isolate: false
+
+  - name: score_fit
+    span_kind: verify
+    tool: "LIB:content_pipeline.score_jobs"
+    gate: gate_shortlist
+    isolate: false
+
+  - name: tailor_materials
+    span_kind: subagent
+    tool: "RAW:Tailor application materials for each shortlisted role. Read the shortlist report from the previous stage's output and draft a tailored CV + cover letter per role marked APPLY-STRONG or MONITOR."
+    gate: gate_materials
+    isolate: false
+    backend: claude
+    timeout_s: 1800
+
+  - name: emit_package
+    span_kind: tool
+    tool: "RAW:Assemble the application package from the tailored materials and write it to docs/01_professional/job_applications/<role-slug>/."
+    gate: gate_done
+    isolate: false

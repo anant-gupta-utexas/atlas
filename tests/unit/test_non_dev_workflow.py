@@ -58,7 +58,7 @@ class _FakeRunner:
 
 
 class _FakePrompter:
-    def ask(self, *, stage: StageSpec, gate_index: int):
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = ""):
         from atlas.orchestrator import GateDecision
 
         return GateDecision(label="approved", turn_count=1, reason=None)

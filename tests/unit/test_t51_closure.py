@@ -59,7 +59,7 @@ class _CapturingRunner:
 
 
 class _ApprovePrompter:
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         return GateDecision(label="approved", turn_count=1, reason=None)
 
 

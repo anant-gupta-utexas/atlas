@@ -117,7 +117,7 @@ class StageOutcome:
 
 
 class GatePrompter(Protocol):
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision: ...
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision: ...
 
 
 class StageRunner(Protocol):
@@ -374,7 +374,9 @@ class Pipeline:
             )
 
         assert stage.gate_index is not None
-        decision = self._prompter.ask(stage=stage, gate_index=stage.gate_index)
+        decision = self._prompter.ask(
+            stage=stage, gate_index=stage.gate_index, output_text=outcome.output_text
+        )
         self._plumb.record_user_signal(
             run_id=ctx.run_id,
             span_id=span_id,
@@ -639,7 +641,10 @@ class ClickPrompter:
     length-clamped to ``_GATE_MAX_REASON_BYTES`` bytes.
     """
 
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
+        if output_text:
+            print(f"\n{output_text}")
+
         prompt = (
             f"\nGate {gate_index} — {stage.name}\n"
             "Output reviewed. [a]pprove / [r]eject reason / q to quit: "
@@ -708,6 +713,6 @@ def _clamp_reason(reason: str) -> str:
 class AutoPrompter:
     """Non-interactive prompter that auto-approves all gates (for testing)."""
 
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         print(f"\nGate {gate_index} — {stage.name} [AUTO-APPROVED]")
         return GateDecision(label="approved", turn_count=1, reason=None)

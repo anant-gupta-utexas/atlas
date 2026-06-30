@@ -64,7 +64,7 @@ class _CapturingRunner:
 
 
 class _ApprovePrompter:
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         return GateDecision(label="approved", turn_count=1, reason=None)
 
 
@@ -365,7 +365,7 @@ def test_rejected_gate_leaves_box_unchecked(tmp_path: Path) -> None:
     state = StateStore(tmp_path)
 
     class _RejectPrompter:
-        def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+        def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
             return GateDecision(label="rejected", turn_count=1, reason="no")
 
     pipeline = Pipeline(
