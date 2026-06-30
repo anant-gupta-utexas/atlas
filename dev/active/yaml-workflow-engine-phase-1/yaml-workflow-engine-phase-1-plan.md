@@ -94,7 +94,7 @@ src/atlas/
     └── dev.yaml             # NEW — in-package default, extracted from old STAGES
 ```
 
-`workflow_loader.py` is the only new module with logic; `workflows/dev.yaml` is a new data file (packaged via `[tool.hatch.build.targets.wheel] packages = ["src/atlas"]`, which already includes non-`.py` files under the package directory — confirm `MANIFEST`/hatchling include rules during T1.1, see Pending Decisions #1).
+`workflow_loader.py` is the only new module with logic; `workflows/dev.yaml` is a new data file (packaged via `[tool.hatch.build.targets.wheel] packages = ["src/atlas"]`, which already includes non-`.py` files under the package directory — confirm `MANIFEST`/hatchling include rules during T1.1, see Resolved Decision #1).
 
 ### 3.2 Data structures
 
@@ -122,6 +122,7 @@ class StageSpec:
     isolate: bool = False         # NEW — replaces `if stage.name == StageName.CODE_GEN`
     gate_is_async: bool = False   # NEW — replaces `if stage.gate_label == GateLabel.GATE_COMMIT`
     backend: str | None = None    # NEW — threaded through; unused until Phase 3
+    timeout_s: int | None = None  # NEW — per-stage subprocess timeout; None → orchestrator default (Decision #5)
 
 
 # StageName / GateLabel StrEnums are DELETED in this phase (TRD-v2 §3.3).
@@ -140,7 +141,7 @@ from atlas.stages import SPAN_KINDS, StageSpec
 
 _ALLOWED_TOP_LEVEL_KEYS = {"name", "default_backend", "stages"}
 _ALLOWED_STAGE_KEYS = {
-    "name", "span_kind", "tool", "gate", "isolate", "backend",
+    "name", "span_kind", "tool", "gate", "isolate", "gate_is_async", "backend", "timeout_s",
 }
 
 
@@ -241,7 +242,7 @@ atlas status                     # unchanged signature; output gains a `workflow
 | `--workflow` | `str` | unset | 2 |
 | (neither) | — | `"dev"` | 3 |
 
-Mutually exclusive: if both `--workflow` and `--workflow-file` are passed, `--workflow-file` wins silently per §3.2's stated order (no error — TRD-v2 doesn't ask for one, and "highest priority" already disambiguates). Confirmed with maintainer assumption; flag this in Pending Decisions if a hard error is preferred instead.
+Mutually exclusive: if both `--workflow` and `--workflow-file` are passed, `--workflow-file` wins silently per §3.2's stated order (no error — TRD-v2 doesn't ask for one, and "highest priority" already disambiguates). Settled as Resolved Decision #3 (silent priority for Phase 1; promote to a hard usage error only if it causes real confusion).
 
 ### 4.2 Error surface (TRD-v2 §4 Usability)
 
@@ -321,26 +322,34 @@ function load_workflow_file(path) -> LoadedWorkflow:
             gate_idx += 1
 
         isolate = bool(raw_stage.get("isolate", False))
-        backend = raw_stage.get("backend")  # str | None; unvalidated in Phase 1
+        backend = raw_stage.get("backend")  # str | None; unvalidated in Phase 1 (Resolved Decision #4)
 
-        # gate_is_async is NOT a YAML field (TRD-v2 §3.1 lists it only as a
-        # StageSpec field, not a YAML key). It is derived: true only for the
-        # stage whose gate_label corresponds to the workflow's async-hook
-        # convention. For dev.yaml this is the stage previously tagged
-        # GateLabel.GATE_COMMIT. See Pending Decisions #2 for how a non-dev
-        # workflow opts a stage into gate_is_async.
+        # gate_is_async IS an allowed YAML stage key, defaulting to false
+        # (Resolved Decision #2 — confirmed by the TRD-v2 author: §3.1's example
+        # YAML is illustrative, not exhaustive). A stage sets it true to declare
+        # its gate is written asynchronously by the post-commit hook, not the
+        # orchestrator. dev.yaml's gate-4 (gate_commit) stage sets it true.
         gate_is_async = bool(raw_stage.get("gate_is_async", False))
+
+        # timeout_s: optional per-stage subprocess timeout (Resolved Decision #5).
+        # None → the orchestrator falls back to _DEFAULT_TIMEOUT_S for this stage.
+        timeout_s = raw_stage.get("timeout_s")
+        if timeout_s is not None and (not isinstance(timeout_s, int) or timeout_s <= 0):
+            raise WorkflowValidationError(
+                f"{path}: stage[{i}] {stage_name!r} timeout_s must be a positive int, got {timeout_s!r}"
+            )
 
         stages.append(StageSpec(
             index=i, name=stage_name, span_kind=span_kind, tool=tool,
             gate_label=gate_label, gate_index=gate_index,
             isolate=isolate, gate_is_async=gate_is_async, backend=backend,
+            timeout_s=timeout_s,
         ))
 
     return LoadedWorkflow(name=name, default_backend=default_backend, stages=tuple(stages))
 ```
 
-> **Resolved while detailing this TRS:** TRD-v2's YAML shape in §3.1 does *not* list `gate_is_async` as a stage-level YAML key (only `isolate` and `backend` are listed as new YAML-exposed fields). But §3.3's mapping table requires `StageSpec.gate_is_async` to exist and drive behavior. The only consistent reading is that `gate_is_async` **is** a YAML field too — §3.1's YAML block is illustrative, not exhaustive (it doesn't show `default_backend` either, which §3.4 requires). This TRS adds `gate_is_async: true | false` as an allowed stage key, defaulting to `false`. Flagged in Pending Decisions #2 for explicit confirmation since it's a small inference beyond the TRD's literal YAML block.
+> **Resolved with the TRD-v2 author (2026-06-29):** §3.1's example YAML omits both `gate_is_async` and `default_backend`, yet §3.3/§3.4 require both — the author confirmed the example block is illustrative, not exhaustive. `gate_is_async: true | false` is an allowed stage key (default `false`). The same TRS pass added `timeout_s` per Resolved Decision #5 (pulling the Appendix A `_DEFAULT_TIMEOUT_S` generalization into Phase 1). See the "Resolved Decisions" section for both.
 
 ### 6.2 `resolve_workflow` (pseudocode)
 
@@ -410,6 +419,28 @@ metric = lines[4].strip() if len(lines) >= 5 and lines[4].strip() else "gate_com
 
 This keeps the hook dependency-free (no YAML parsing in the hook subprocess — consistent with v1's design philosophy that the hook is a thin, best-effort parser, not a full atlas runtime).
 
+### 6.7 Per-stage timeout resolution (Resolved Decision #5 — Appendix A `_DEFAULT_TIMEOUT_S` generalization)
+
+TRD-v2 Appendix A lists `orchestrator.py::_DEFAULT_TIMEOUT_S` (7 stage-name string keys) as a v2 seam to generalize: "move into `dev.yaml` or config; loader merges." Decision #5 pulls this into Phase 1. The timeout for a stage now resolves in priority order:
+
+```
+function resolve_timeout(stage: StageSpec, timeout_overrides: dict[str, int]) -> int:
+    # 1. .atlas.toml per-stage override (existing mechanism, highest priority)
+    if stage.name in timeout_overrides:
+        return timeout_overrides[stage.name]
+    # 2. workflow YAML `timeout_s` field on the stage (NEW)
+    if stage.timeout_s is not None:
+        return stage.timeout_s
+    # 3. orchestrator hard default by stage name (existing _DEFAULT_TIMEOUT_S)
+    return _DEFAULT_TIMEOUT_S.get(stage.name, _GLOBAL_FALLBACK_TIMEOUT_S)
+```
+
+**Why `_DEFAULT_TIMEOUT_S` is retained, not deleted.** It moves from "the only source of timeouts" to "the final fallback when neither config nor YAML specifies one." This preserves v1 behavior exactly for any stage that omits `timeout_s` — including all of `dev.yaml`'s stages, which **do not** set `timeout_s` (they inherit the v1 defaults via fallback, keeping FR-8 parity intact). The one robustness improvement over v1: `_DEFAULT_TIMEOUT_S` is keyed by hardcoded dev-stage names, so a non-dev workflow whose stage names aren't in the dict previously had no defined behavior — `resolve_timeout` now uses `_GLOBAL_FALLBACK_TIMEOUT_S` (a new module constant, e.g. 600s) for any stage name absent from `_DEFAULT_TIMEOUT_S`, so non-dev workflows that omit `timeout_s` get a sane default instead of a `KeyError`.
+
+**Call-site change.** `SubprocessStageRunner.run()` currently does `self._timeout_overrides.get(stage.name.value, _DEFAULT_TIMEOUT_S[stage.name.value])` (orchestrator.py:487-489). It becomes a call to `resolve_timeout(stage, self._timeout_overrides)` — folding the YAML field into the existing two-level (override → default) lookup as a new middle tier. `stage.name` is already a plain `str` post-T1.5, so the `.value` accesses drop out.
+
+**Dev-pipeline parity note.** `dev.yaml` deliberately ships with **no** `timeout_s` fields. This is intentional: it proves the fallback path (tier 3) reproduces v1 timeouts exactly, and keeps the parity test (T1.4) asserting `timeout_s is None` on all 7 dev stages. A separate loader test (`test_load_stage_timeout_s`) covers the tier-2 path with a synthetic workflow that *does* set `timeout_s`.
+
 ---
 
 ## 7. Error Handling & Edge Cases
@@ -425,6 +456,8 @@ This keeps the hook dependency-free (no YAML parsing in the hook subprocess — 
 | `--workflow <name>` resolves to nothing on any search path | `WorkflowNotFoundError`, lists all 3 candidate paths. |
 | `--workflow-file <path>` doesn't exist | `WorkflowNotFoundError`, names the literal path. |
 | `isolate: true` but `git` not on PATH | `WorkflowValidationError` at load time (cheap static check, §6.3). |
+| `timeout_s` present but not a positive int (e.g. `0`, `-5`, `"600"`, `1.5`) | `WorkflowValidationError` at load time, names stage + offending value (§6.1). |
+| Stage name absent from `_DEFAULT_TIMEOUT_S` and no `timeout_s`/override given (a non-dev workflow stage) | Not an error — `resolve_timeout` returns `_GLOBAL_FALLBACK_TIMEOUT_S` (§6.7). v1 would have raised `KeyError`; this is a robustness improvement. |
 | Resume: `tasks.md` names a workflow whose YAML has since been edited/removed | `first_unchecked()` already skips unknown stage names via try/except (NFR-6); extend the except clause to also catch `WorkflowNotFoundError` at the `resolve_workflow()` call inside `resume()`, log a warning, and surface a clear CLI error rather than crash mid-resume. Resume does **not** silently fall back to `dev`. |
 | Resume: workflow YAML edited between two `step()` calls in the same process | NFR-5 — loaded once at `Pipeline` construction, frozen. Mid-run file edits are inert until the next fresh `Pipeline` construction (i.e., next CLI invocation). |
 | `dev.yaml` missing from the installed package (corrupted install) | Same `WorkflowNotFoundError` path as any other missing workflow — no special-cased fallback to the old hardcoded tuple (TRD-v2 §14 says the hardcoded tuple is deleted only after YAML-loaded parity is proven, i.e., it's gone by Phase 1 exit, not kept as a runtime fallback). |
@@ -442,7 +475,7 @@ This keeps the hook dependency-free (no YAML parsing in the hook subprocess — 
 | `orchestrator.py` → `workflow_loader.py` | internal | `Pipeline` no longer imports `STAGES`/`STAGE_BY_NAME` from `stages.py`; receives `stages: tuple[StageSpec, ...]` at construction (resolved upstream by `cli.py`). |
 | `cli.py` → `workflow_loader.py` | internal | `_make_pipeline()` calls `resolve_workflow(...)` before constructing `Pipeline`. |
 | `state.py` → `workflow_loader.py` | internal | `resume()` reads `workflow:` from `tasks.md`, calls `resolve_workflow(workflow_name=..., ...)` to reconstruct the `StageSpec` tuple. |
-| `plugin_resolver.py` → workflow YAML `tool` field | internal | `resolve()` signature gains the per-stage `tool` value already embedded in `StageSpec.tool` (no separate lookup — the YAML `tool` field *is* `StageSpec.tool`, already the primary source per §3.5 resolution order item 2; `PLUGIN_COMMANDS` becomes the item-3 fallback, used only when a workflow's `tool` string isn't itself a directly-invokable command — see Pending Decisions #3 for how this dovetails with `RAW:` prefix handling, which already bypasses resolution entirely). |
+| `plugin_resolver.py` → workflow YAML `tool` field | internal | `resolve()` signature gains the per-stage `tool` value already embedded in `StageSpec.tool` (no separate lookup — the YAML `tool` field *is* `StageSpec.tool`, already the primary source per §3.5 resolution order item 2; `PLUGIN_COMMANDS` becomes the item-3 fallback, used only when a workflow's `tool` string isn't itself a directly-invokable command — `RAW:`-prefixed tools bypass resolution entirely, unchanged from v1). |
 
 ---
 
@@ -475,7 +508,10 @@ Per TRD-v2 §10 coverage targets: `workflow_loader.py` ≥ 90%, existing modules
 | `test_load_rejects_unknown_stage_key` | `retries: 3` on a stage → rejected. |
 | `test_loader_rejects_unsafe_yaml_tags` | A YAML doc using `!!python/object:os.system` → rejected (proves `safe_load` is actually used, not `load`). |
 | `test_load_isolate_requires_git_on_path` | `isolate: true` with `git` missing from `PATH` (mocked) → `WorkflowValidationError`. |
-| `test_dev_pipeline_parity` | `dev.yaml` loaded via `load_workflow_file` produces a `StageSpec` tuple equal to a hand-written expected tuple matching v1's old `STAGES` (7 stages, same tool/span_kind/gate_label/gate_index values, `isolate=True` only on `code_gen`, `gate_is_async=True` only on the gate-4 stage). |
+| `test_load_stage_timeout_s` | A stage with `timeout_s: 900` parses to `StageSpec.timeout_s == 900`; a stage omitting it parses to `timeout_s is None`. |
+| `test_load_rejects_bad_timeout_s` | `timeout_s: 0`, `-5`, `"600"`, and `1.5` each → `WorkflowValidationError` (positive int required). |
+| `test_resolve_timeout_priority` | `.atlas.toml` override > YAML `timeout_s` > `_DEFAULT_TIMEOUT_S` > `_GLOBAL_FALLBACK_TIMEOUT_S` for an unknown stage name (§6.7). |
+| `test_dev_pipeline_parity` | `dev.yaml` loaded via `load_workflow_file` produces a `StageSpec` tuple equal to a hand-written expected tuple matching v1's old `STAGES` (7 stages, same tool/span_kind/gate_label/gate_index values, `isolate=True` only on `code_gen`, `gate_is_async=True` only on the gate-4 stage, **`timeout_s is None` on all 7 stages** — dev pipeline inherits v1 timeouts via the §6.7 tier-3 fallback). |
 | `test_resolve_workflow_priority_order` | `--workflow-file` beats `--workflow`; `.atlas/workflows/` beats `~/.atlas/workflows/` beats built-in. |
 | `test_resolve_workflow_not_found_lists_all_paths` | Error message contains all 3 checked paths. |
 | `test_resolve_workflow_rejects_path_traversal_name` | `workflow_name="../../etc/passwd"` → rejected before any filesystem path join. |
@@ -515,13 +551,14 @@ Per TRD-v2 §10 coverage targets: `workflow_loader.py` ≥ 90%, existing modules
 Flat list, ordered by execution sequence. Cross-task dependencies captured via `Dependencies`.
 
 * **[T1.1] Extract `dev.yaml` and define `StageSpec` v2 shape** [Effort: M]
-  - **Description**: Add `isolate`, `gate_is_async`, `backend` fields to `StageSpec` in `stages.py`; delete `StageName`/`GateLabel` `StrEnum`s and replace with `SPAN_KINDS` frozenset + `_NAME_RE` pattern. Hand-author `src/atlas/workflows/dev.yaml` encoding the exact v1 `STAGES` tuple (7 stages, same tool strings, gate labels, `isolate: true` on `code_gen` only, `gate_is_async: true` on the `gate_commit`-equivalent stage). Confirm hatchling packages the new `workflows/` data directory (add to `[tool.hatch.build.targets.wheel]` include rules if needed).
+  - **Description**: Add `isolate`, `gate_is_async`, `backend`, `timeout_s` fields to `StageSpec` in `stages.py`; delete `StageName`/`GateLabel` `StrEnum`s and replace with `SPAN_KINDS` frozenset + `_NAME_RE` pattern. Hand-author `src/atlas/workflows/dev.yaml` encoding the exact v1 `STAGES` tuple (7 stages, same tool strings, gate labels, `isolate: true` on `code_gen` only, `gate_is_async: true` on the `gate_commit`-equivalent stage, **no `timeout_s` on any stage** — dev inherits v1 timeouts via the §6.7 fallback). Confirm hatchling packages the new `workflows/` data directory (add to `[tool.hatch.build.targets.wheel]` include rules if needed).
   - **Acceptance Criteria**:
-    - [ ] `StageSpec` has 9 fields total (6 original + 3 new), all with correct types/defaults.
+    - [ ] `StageSpec` has 10 fields total (6 original + 4 new: `isolate`, `gate_is_async`, `backend`, `timeout_s`), all with correct types/defaults.
     - [ ] `StageName`/`GateLabel` no longer exist in `stages.py`.
     - [ ] `src/atlas/workflows/dev.yaml` exists, parses as valid YAML, contains exactly 7 stages.
     - [ ] `dev.yaml`'s `code_gen` stage has `isolate: true`; no other stage does.
     - [ ] `dev.yaml`'s gate-4 stage has `gate_is_async: true`; no other stage does.
+    - [ ] No `dev.yaml` stage sets `timeout_s` (parity via §6.7 tier-3 fallback).
     - [ ] `uv run python -c "import importlib.resources; ..."` (or equivalent) confirms `dev.yaml` is readable from an installed wheel, not just from source checkout.
   - **Files to Create/Modify**:
     - `src/atlas/stages.py` - StageSpec v2 shape; delete StrEnums
@@ -531,11 +568,12 @@ Flat list, ordered by execution sequence. Cross-task dependencies captured via `
   - **Testing Requirements**: Unit (covered by T1.4's parity test, written against this output)
 
 * **[T1.2] Implement `workflow_loader.py` — parsing + validation** [Effort: L]
-  - **Description**: Implement `load_workflow_file()` per §6.1 pseudocode: `yaml.safe_load()` only, validate top-level keys, per-stage keys, `span_kind` membership, name format/uniqueness, gate-label uniqueness, `isolate` → git-on-PATH check. Raise `WorkflowValidationError` with a message naming the file path + offending field/value for every failure mode in §7's table.
+  - **Description**: Implement `load_workflow_file()` per §6.1 pseudocode: `yaml.safe_load()` only, validate top-level keys, per-stage keys (including `gate_is_async` and `timeout_s` in `_ALLOWED_STAGE_KEYS`), `span_kind` membership, name format/uniqueness, gate-label uniqueness, `isolate` → git-on-PATH check, `timeout_s` → positive-int check. Raise `WorkflowValidationError` with a message naming the file path + offending field/value for every failure mode in §7's table.
   - **Acceptance Criteria**:
-    - [ ] All 12 unit tests in §10's "Unit tests" table for `load_workflow_file` pass.
+    - [ ] All unit tests in §10's "Unit tests" table for `load_workflow_file` pass (including `test_load_stage_timeout_s` and `test_load_rejects_bad_timeout_s`).
     - [ ] No raw traceback reaches a caller for any malformed-input case — every failure path raises `WorkflowValidationError` with a descriptive `str()`.
     - [ ] `yaml.load()` (unsafe) does not appear anywhere in the module — grep-verified.
+    - [ ] `_ALLOWED_STAGE_KEYS` includes `gate_is_async` and `timeout_s` (a workflow setting either is not rejected as an unknown key).
   - **Files to Create/Modify**:
     - `src/atlas/workflow_loader.py` - new module
     - `tests/unit/test_workflow_loader.py` - new test file (parsing/validation tests only; resolution tests in T1.3)
@@ -558,7 +596,7 @@ Flat list, ordered by execution sequence. Cross-task dependencies captured via `
 * **[T1.4] Dev-pipeline parity test** [Effort: S]
   - **Description**: Write `test_dev_pipeline_parity` asserting `load_workflow_file(dev_yaml_path)` produces a `StageSpec` tuple equal (field-by-field) to a hand-written expected tuple matching v1's old hardcoded `STAGES`. This is the single test that proves T1.1 + T1.2 together satisfy FR-8.
   - **Acceptance Criteria**:
-    - [ ] Test compares all 9 `StageSpec` fields per stage, for all 7 stages.
+    - [ ] Test compares all 10 `StageSpec` fields per stage, for all 7 stages (asserts `timeout_s is None` on every dev stage — §6.7 parity).
     - [ ] Test fails if `dev.yaml` is edited to drift from the original `STAGES` shape (regression guard).
   - **Files to Create/Modify**:
     - `tests/unit/test_workflow_loader.py` - add `test_dev_pipeline_parity`
@@ -566,17 +604,19 @@ Flat list, ordered by execution sequence. Cross-task dependencies captured via `
   - **Testing Requirements**: Unit
 
 * **[T1.5] Refactor `orchestrator.py` — data-driven conditionals + stages-as-constructor-arg** [Effort: L]
-  - **Description**: Remove the `from atlas.stages import STAGE_BY_NAME, STAGES, GateLabel, StageName` import. Add `stages: tuple[StageSpec, ...]` and `workflow_name: str = "dev"` to `Pipeline.__init__`; build `self._stages`/`self._stage_by_name` from the constructor arg. Replace `if stage.name == StageName.CODE_GEN` with `if stage.isolate`; replace `if stage.gate_label == GateLabel.GATE_COMMIT` with `if stage.gate_is_async`. Replace all `STAGES[...]` indexing with `self._stages[...]`. Make `_validate_routing_fixture()` a no-op when `self._workflow_name != "dev"` (§6.4). Apply metric namespacing (§6.5) at the `record_user_signal` call site.
+  - **Description**: Remove the `from atlas.stages import STAGE_BY_NAME, STAGES, GateLabel, StageName` import. Add `stages: tuple[StageSpec, ...]` and `workflow_name: str = "dev"` to `Pipeline.__init__`; build `self._stages`/`self._stage_by_name` from the constructor arg. Replace `if stage.name == StageName.CODE_GEN` with `if stage.isolate`; replace `if stage.gate_label == GateLabel.GATE_COMMIT` with `if stage.gate_is_async`. Replace all `STAGES[...]` indexing with `self._stages[...]`. Make `_validate_routing_fixture()` a no-op when `self._workflow_name != "dev"` (§6.4). Apply metric namespacing (§6.5) at the `record_user_signal` call site. **Add per-stage timeout resolution (§6.7, Resolved Decision #5):** introduce a `_GLOBAL_FALLBACK_TIMEOUT_S` module constant and a `resolve_timeout(stage, timeout_overrides)` helper implementing the `.atlas.toml` override > `stage.timeout_s` > `_DEFAULT_TIMEOUT_S` > global-fallback priority; replace `SubprocessStageRunner.run()`'s current `self._timeout_overrides.get(stage.name.value, _DEFAULT_TIMEOUT_S[stage.name.value])` (orchestrator.py:487-489) with a call to it. Retain `_DEFAULT_TIMEOUT_S` as the tier-3 fallback — do not delete it.
   - **Acceptance Criteria**:
     - [ ] No reference to module-level `STAGES`/`STAGE_BY_NAME`/`StageName`/`GateLabel` remains in `orchestrator.py` (grep-verified).
     - [ ] `if stage.isolate` and `if stage.gate_is_async` replace the two hardcoded equality checks.
     - [ ] `_validate_routing_fixture()` is skipped for any `workflow_name != "dev"`.
     - [ ] Gate scores for `workflow_name == "dev"` write bare metric names (`gate_research`, etc. — unchanged from v1); a synthetic non-dev workflow in a test writes `<name>.<gate_label>`.
-    - [ ] All existing `test_pipeline.py` tests pass after updating their `Pipeline(...)` construction call sites to pass `stages=` (T1.6 handles the test-file updates themselves, but this task must not regress them).
+    - [ ] `resolve_timeout` honors the 4-tier priority; `test_resolve_timeout_priority` passes. A non-dev stage name absent from `_DEFAULT_TIMEOUT_S` returns `_GLOBAL_FALLBACK_TIMEOUT_S`, not a `KeyError`.
+    - [ ] `dev.yaml` stages (no `timeout_s`) resolve to the exact v1 `_DEFAULT_TIMEOUT_S` values (parity — verified against the v1 dict).
+    - [ ] All existing `test_pipeline.py` / `test_phase4.py` timeout-related tests pass (or are updated) with no behavioral change for the dev pipeline.
   - **Files to Create/Modify**:
-    - `src/atlas/orchestrator.py` - constructor + 3 conditionals + routing-fixture guard + metric namespacing
+    - `src/atlas/orchestrator.py` - constructor + 3 conditionals + routing-fixture guard + metric namespacing + `resolve_timeout` helper + `_GLOBAL_FALLBACK_TIMEOUT_S`
   - **Dependencies**: T1.1, T1.2
-  - **Testing Requirements**: Unit (existing `test_pipeline.py` suite, updated)
+  - **Testing Requirements**: Unit (existing `test_pipeline.py` + `test_phase4.py` suites, updated; new `test_resolve_timeout_priority`)
 
 * **[T1.6] Update `state.py` — workflow-aware `tasks.md`** [Effort: M]
   - **Description**: `create_tasks_md()` accepts a `stages: tuple[StageSpec, ...]` parameter instead of importing `STAGES`; generates checkboxes from it. `## current` block template gains a `workflow: <name>` line. `first_unchecked()` returns `str` instead of `StageName(name)`; the existing try/except around enum construction is removed (plain string return needs no validation against a closed set — any non-empty checkbox label is valid by construction, since it only ever reads back what `create_tasks_md` wrote). `write_current_run()` gains the optional `async_gate_metric` parameter and writes it as line 5 (§6.6).
@@ -692,7 +732,7 @@ Flat list, ordered by execution sequence. Cross-task dependencies captured via `
 
 ## Resolved Decisions
 
-All four open questions from the initial draft were resolved with the maintainer (also the TRD-v2 author) on 2026-06-29. Each is now a settled constraint on implementation, not an open assumption.
+All five open questions were resolved with the maintainer (also the TRD-v2 author) on 2026-06-29. Each is now a settled constraint on implementation, not an open assumption.
 
 1. **Hatchling packaging of `src/atlas/workflows/dev.yaml` → (a) trust default, verify post-hoc.** `[tool.hatch.build.targets.wheel] packages = ["src/atlas"]` should include non-`.py` files under that tree by hatchling's default behavior. T1.1 builds a wheel and inspects its contents to confirm; only if the default *doesn't* ship `dev.yaml` does an explicit `[tool.hatch.build.targets.wheel.force-include]` entry get added. No `pyproject.toml` churn until proven necessary. **Rationale:** this is a verifiable fact, not a judgment call — the build either includes it or it doesn't, and T1.1's acceptance criterion already gates on reading `dev.yaml` from an installed wheel.
 
@@ -702,6 +742,4 @@ All four open questions from the initial draft were resolved with the maintainer
 
 4. **`default_backend` validation in Phase 1 → (a) parse but don't validate.** Phase 1 stores `LoadedWorkflow.default_backend` (and per-stage `StageSpec.backend`) as an opaque `str | None`, threading it through untouched; no allow-list check. **Rationale:** validation belongs where the authority lives — Phase 3 defines which backends exist (`CliBackend`, `ClaudeCodeBackend`, `AntigravityBackend`), so Phase 3 validates them in one place. Hardcoding `{"claude", "agy"}` in the Phase 1 loader would spread that knowledge across two phases for no benefit, since nothing consumes the field until Phase 3. A typo like `backend: claud` is harmless until Phase 3's dispatch path, where Phase 3's validation will catch it at the moment it first matters.
 
-### Still-open: Appendix A `_DEFAULT_TIMEOUT_S` gap (not blocking)
-
-One item from `context.md` remains genuinely unresolved (distinct from the four above): TRD-v2 Appendix A lists `_DEFAULT_TIMEOUT_S` (7 stage-name string keys in `orchestrator.py`) as a v2 seam to generalize ("move into `dev.yaml` or config; loader merges"), but §14 Phase 1's engineering-scope bullets never mention it, and none of §13's Phase 1 exit criteria depend on it. This TRS leaves `_DEFAULT_TIMEOUT_S` as v1 behavior (stage-name string keys, unchanged) and does **not** include a task for it. It is non-blocking for Phase 1 exit. Flag for the next TRD/TRS pass to confirm whether timeout-table generalization belongs in Phase 2, Phase 3, or a later cleanup — see `context.md` "Where this TRS's task list maps to TRD-v2 Appendix A" for the full note.
+5. **Appendix A `_DEFAULT_TIMEOUT_S` generalization → pull into Phase 1.** TRD-v2 Appendix A lists `orchestrator.py::_DEFAULT_TIMEOUT_S` (7 stage-name string keys) as a v2 seam to generalize: "move into `dev.yaml` or config; loader merges." Originally this TRS deferred it (no §14 Phase 1 bullet mentions it, no §13 exit criterion depends on it). The maintainer chose on 2026-06-29 to **pull it into Phase 1** rather than leave a v2 seam un-generalized after the engine phase. Implementation: add an optional per-stage `timeout_s: int | None` field to `StageSpec` and as an allowed YAML key; the orchestrator resolves a stage's timeout in priority order `.atlas.toml override` > `stage.timeout_s` > `_DEFAULT_TIMEOUT_S` > `_GLOBAL_FALLBACK_TIMEOUT_S` (§6.7). **Rationale:** Appendix A explicitly names this seam, and generalizing it now (while the loader and `StageSpec` are already being touched) is cheaper than a later pass that re-opens the same files. `_DEFAULT_TIMEOUT_S` is **retained** as the tier-3 fallback, not deleted, so dev-pipeline parity (FR-8) is exact — `dev.yaml` ships with no `timeout_s` fields and inherits v1 timeouts via fallback. A bonus robustness fix falls out: non-dev workflows whose stage names aren't in `_DEFAULT_TIMEOUT_S` now get `_GLOBAL_FALLBACK_TIMEOUT_S` instead of the `KeyError` v1 would have raised. Binding on T1.1 (`StageSpec` field + `dev.yaml` omits it), T1.2 (loader parses/validates `timeout_s`), T1.4 (parity asserts `timeout_s is None`), and T1.5 (`resolve_timeout` helper + call-site).

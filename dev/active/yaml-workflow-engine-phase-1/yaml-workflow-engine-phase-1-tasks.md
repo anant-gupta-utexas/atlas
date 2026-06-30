@@ -8,12 +8,12 @@ Progress checklist. Source-of-truth for design is
 ```
 phase: not_started
 gate:  none
-next:  start T1.1 + T1.12 (all 4 decisions resolved 2026-06-29)
+next:  start T1.1 + T1.12 (all 5 decisions resolved 2026-06-29)
 ```
 
 ## Tasks (flat — Phase 1 only, no sub-phases)
 
-- [ ] **T1.1** — Extract `dev.yaml` + define `StageSpec` v2 shape (`stages.py`, `workflows/dev.yaml`)
+- [ ] **T1.1** — Extract `dev.yaml` + define `StageSpec` v2 shape (4 new fields incl. `timeout_s`) (`stages.py`, `workflows/dev.yaml`)
 - [ ] **T1.2** — Implement `workflow_loader.py` parsing + validation (`load_workflow_file`)
 - [ ] **T1.3** — Implement `resolve_workflow()` search-path resolution
 - [ ] **T1.4** — Dev-pipeline parity test (`test_dev_pipeline_parity`)
@@ -43,7 +43,6 @@ next:  start T1.1 + T1.12 (all 4 decisions resolved 2026-06-29)
 - [x] #2 — `gate_is_async` as explicit YAML stage key → (a) CONFIRMED by TRD-v2 author (example YAML is illustrative, not exhaustive)
 - [x] #3 — Both `--workflow` and `--workflow-file` → (a) silent priority for Phase 1
 - [x] #4 — `default_backend` validation → (a) parse but don't validate; Phase 3 owns the allow-list
+- [x] #5 — `_DEFAULT_TIMEOUT_S` generalization → PULL INTO Phase 1: per-stage `timeout_s` YAML field, 4-tier resolution, `_DEFAULT_TIMEOUT_S` retained as fallback (T1.1/T1.2/T1.4/T1.5; plan §6.7)
 
-## Still open (non-blocking for Phase 1 exit)
-
-- [ ] Appendix A gap — `_DEFAULT_TIMEOUT_S` YAML-driven generalization not in this Phase 1 task list; flag for next TRD/TRS pass to confirm Phase 2 / Phase 3 / later cleanup (see context.md)
+_No open items remain — the Appendix A inventory is fully accounted for in Phase 1._
