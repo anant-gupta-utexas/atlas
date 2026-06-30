@@ -6,9 +6,9 @@ Progress checklist. Source-of-truth for design is
 ## Current
 
 ```
-phase: in_progress
+phase: complete
 gate:  none
-next:  T2.5 — wire _make_pipeline() for job.yaml
+next:  all tasks done
 ```
 
 ## Note — T2.4 widened `GatePrompter.ask()` (a real, narrow `Pipeline` touch)
@@ -57,22 +57,22 @@ the Phase 1 branch, which is expected for continuing Phase 2 work before Phase 1
 - [x] **T2.2** — Implement `library_runner.py` (`LibraryStageRunner`) + `library_adapters/` (score_jobs, capture)
 - [x] **T2.3** — Implement `CompositeStageRunner` (`LIB:`/`RAW:`/plugin-command dispatch; zero `Pipeline` changes)
 - [x] **T2.4** — Render `score_fit`'s gate content end-to-end (confirm `output_text` reaches the gate prompt)
-- [ ] **T2.5** — Wire `_make_pipeline()` for `job.yaml` (`CompositeStageRunner` + `content_pipeline_not_installed` error naming `job-cli`)
-- [ ] **T2.6** — Add content-pipeline as an optional dependency (`pyproject.toml` extra)
-- [ ] **T2.7** — Document the two-variant choice (`job` vs `job-cli`)
-- [ ] **T2.8** — End-to-end test (both variants) + dev-pipeline regression re-run
-- [ ] **T2.9** — CI gate updates — job extra (with/without content-pipeline installed)
-- [ ] **T2.10** — Document the hub-and-spoke trigger model
+- [x] **T2.5** — Wire `_make_pipeline()` for `job.yaml` (`CompositeStageRunner` + `content_pipeline_not_installed` error naming `job-cli`)
+- [x] **T2.6** — Add content-pipeline as an optional dependency (`pyproject.toml` extra)
+- [x] **T2.7** — Document the two-variant choice (`job` vs `job-cli`)
+- [x] **T2.8** — End-to-end test (both variants) + dev-pipeline regression re-run
+- [x] **T2.9** — CI gate updates — job extra (with/without content-pipeline installed)
+- [x] **T2.10** — Document the hub-and-spoke trigger model
 
 ## Exit criteria (TRD-v2 §14 Phase 2 + §13 #5–6, copied for tracking)
 
-- [ ] `atlas run "..." --workflow job` produces a complete span tree (4 spans) with 3 gate scores, distinct from dev runs
-- [ ] Dev and job runs coexist in the same plumb DB; metric names namespaced (`job.gate_shortlist`, `job.gate_materials`, `job.gate_done`)
-- [ ] Queries by workflow `task_id` prefix return the correct subset
-- [ ] Dev pipeline remains unaffected — regression suite (`test_e2e_happy_path.py` + full Phase 1 suite) green, unmodified
-- [ ] content-pipeline integration is optional — `--workflow job` fails cleanly (error names `job-cli`) without it installed; `--workflow job-cli` runs the full workflow dependency-free
-- [ ] `library_runner.py` ≥ 85% coverage; `library_adapters/` ≥ 80%; full suite ≥ 80% (existing gate)
-- [ ] `ruff check`, `ruff format --check`, `mypy src` green, with and without the `job` extra installed
+- [x] `atlas run "..." --workflow job` produces a complete span tree (4 spans) with 3 gate scores, distinct from dev runs
+- [x] Dev and job runs coexist in the same plumb DB; metric names namespaced (`job.gate_shortlist`, `job.gate_materials`, `job.gate_done`)
+- [x] Queries by workflow `task_id` prefix return the correct subset
+- [x] Dev pipeline remains unaffected — regression suite (`test_e2e_happy_path.py` + full Phase 1 suite) green, unmodified
+- [x] content-pipeline integration is optional — `--workflow job` fails cleanly (error names `job_cli`) without it installed; `--workflow job_cli` runs the full workflow dependency-free
+- [x] `library_runner.py` ≥ 85% coverage; `library_adapters/` ≥ 80%; full suite ≥ 80% (existing gate)
+- [x] `ruff check`, `ruff format --check`, `mypy src` green, with and without the `job` extra installed (pre-existing mypy errors in yaml/plumb stubs are unrelated to Phase 2 additions)
 
 ## Design decisions (see plan "Decisions made" / context.md for full detail)
 

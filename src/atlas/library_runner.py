@@ -65,7 +65,11 @@ class LibraryStageRunner:
                 stage=stage,
                 span_id="",
                 status="failure",
-                output_text="",
+                output_text=(
+                    "content-pipeline is not installed.\n"
+                    "  Install it:  uv sync --extra job  OR  pip install -e ../content-pipeline\n"
+                    "  Dependency-free alternative: atlas run \"<task>\" --workflow job_cli"
+                ),
                 error_type="content_pipeline_not_installed",
             )
 

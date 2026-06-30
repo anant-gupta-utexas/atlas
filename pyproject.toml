@@ -21,9 +21,14 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML",
 ]
+# Install content-pipeline in-process integration (Mode A, LIB: stages).
+# Requires content-pipeline checked out as a sibling at ../content-pipeline.
+# Without this extra, --workflow job fails cleanly and names --workflow job_cli.
+job = ["content-pipeline"]
 
 [tool.uv.sources]
 plumb = { path = "../plumb", editable = true }
+content-pipeline = { path = "../content-pipeline", editable = true }
 
 [build-system]
 requires = ["hatchling"]

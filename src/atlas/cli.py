@@ -11,7 +11,9 @@ except ModuleNotFoundError:  # pragma: no cover
     print("typer is required: pip install typer", file=sys.stderr)
     sys.exit(1)
 
+from atlas.composite_runner import CompositeStageRunner
 from atlas.config import Config
+from atlas.library_runner import LibraryStageRunner
 from atlas.orchestrator import (
     AbortedError,
     AutoPrompter,
@@ -19,9 +21,12 @@ from atlas.orchestrator import (
     NoActiveRunError,
     Pipeline,
     RoutingDriftError,
+    RunContext,
+    StageOutcome,
     SubprocessStageRunner,
 )
 from atlas.plumb_io import PlumbIO
+from atlas.stages import StageSpec
 from atlas.state import StateStore
 from atlas.workflow_loader import (
     WorkflowNotFoundError,
@@ -29,6 +34,24 @@ from atlas.workflow_loader import (
     resolve_workflow,
 )
 from atlas.worktree import WorktreeManager
+
+
+class _LastOutcomeRunner:
+    """Records the last StageOutcome from each step so the CLI can inspect it.
+
+    Wraps CompositeStageRunner without touching Pipeline — the pipeline
+    only sees the StageRunner Protocol.  After run_to_completion() the CLI
+    checks ``last.error_type`` to surface actionable error messages.
+    """
+
+    def __init__(self, inner: CompositeStageRunner) -> None:
+        self._inner = inner
+        self.last: StageOutcome | None = None
+
+    def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        outcome = self._inner.run(ctx=ctx, stage=stage)
+        self.last = outcome
+        return outcome
 
 
 def _available_workflows() -> list[str]:
@@ -65,29 +88,52 @@ def _make_pipeline(
     auto_approve: bool = False,
     workflow: str | None = None,
     workflow_file: Path | None = None,
-) -> Pipeline:
+) -> tuple[Pipeline, _LastOutcomeRunner]:
     loaded = resolve_workflow(
         workflow_file=workflow_file, workflow_name=workflow, repo_root=repo_root
     )
     plumb = PlumbIO(real=True)
     state = StateStore(repo_root)
     worktree = WorktreeManager(repo_root)
-    runner = SubprocessStageRunner(
+    default_runner = SubprocessStageRunner(
         timeout_overrides=cfg.timeout_overrides,
         command_overrides=cfg.plugin_commands,
         model=cfg.model,
     )
+    # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
+    # CompositeStageRunner is always used so dev.yaml's plain plugin-command
+    # stages (no LIB:/RAW: prefix) still fall through to SubprocessStageRunner.
+    library: LibraryStageRunner | None = None
+    if any(s.tool.startswith("LIB:") for s in loaded.stages):
+        library = LibraryStageRunner()
+    composite = CompositeStageRunner(default=default_runner, library=library)
+    recorder = _LastOutcomeRunner(composite)
     prompter: ClickPrompter | AutoPrompter = AutoPrompter() if auto_approve else ClickPrompter()
-    return Pipeline(
+    pipeline = Pipeline(
         repo_root=repo_root,
         state=state,
         plumb=plumb,
-        runner=runner,
+        runner=recorder,
         prompter=prompter,
         stages=loaded.stages,
         workflow_name=loaded.name,
         worktree=worktree,
     )
+    return pipeline, recorder
+
+
+def _emit_content_pipeline_hint(recorder: _LastOutcomeRunner) -> None:
+    """If the last stage failed with content_pipeline_not_installed, echo the fix hint."""
+    if (
+        recorder.last is not None
+        and recorder.last.error_type == "content_pipeline_not_installed"
+    ):
+        typer.echo(
+            "\ncontent-pipeline is not installed.\n"
+            "  Install it:  uv sync --extra job  OR  pip install -e ../content-pipeline\n"
+            "  Dependency-free alternative: atlas run \"<task>\" --workflow job_cli",
+            err=True,
+        )
 
 
 @app.command()
@@ -120,7 +166,7 @@ def run(
         slug = _slugify(task)
 
     try:
-        pipeline = _make_pipeline(
+        pipeline, recorder = _make_pipeline(
             repo_root,
             cfg,
             auto_approve=auto_approve,
@@ -145,6 +191,7 @@ def run(
     except KeyboardInterrupt:
         typer.echo("\nInterrupted. Resume with: atlas resume", err=True)
         raise typer.Exit(1)
+    _emit_content_pipeline_hint(recorder)
 
 
 @app.command()
@@ -157,8 +204,19 @@ def resume(
     repo_root = _find_repo_root()
     cfg = Config.load(repo_root)
 
+    # Peek at the active workflow name so _make_pipeline creates the right runner
+    # (LibraryStageRunner is only added for LIB:-prefixed workflows like job.yaml).
+    state = StateStore(repo_root)
+    active_workflow: str | None = None
+    pair = state.read_current_run()
+    if pair is not None:
+        _, slug = pair
+        active_workflow = state.read_workflow_name(slug)
+
     try:
-        pipeline = _make_pipeline(repo_root, cfg, auto_approve=auto_approve)
+        pipeline, recorder = _make_pipeline(
+            repo_root, cfg, auto_approve=auto_approve, workflow=active_workflow
+        )
         ctx = pipeline.resume()
     except NoActiveRunError as exc:
         typer.echo(f"No active run: {exc}", err=True)
@@ -180,6 +238,7 @@ def resume(
     except KeyboardInterrupt:
         typer.echo("\nInterrupted. Resume with: atlas resume", err=True)
         raise typer.Exit(1)
+    _emit_content_pipeline_hint(recorder)
 
 
 @app.command()
