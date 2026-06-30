@@ -18,8 +18,12 @@ from atlas.orchestrator import (
     _find_atlas_root,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateStore
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Shared fakes (mirror test_pipeline.py)
@@ -40,7 +44,7 @@ class _FakeRunner:
             stage=stage,
             span_id="",
             status="success",
-            output_text=f"output of {stage.name.value}",
+            output_text=f"output of {stage.name}",
             error_type=None,
         )
 

@@ -23,9 +23,29 @@ from atlas.orchestrator import (
 )
 from atlas.plumb_io import PlumbIO
 from atlas.state import StateStore
+from atlas.workflow_loader import (
+    WorkflowNotFoundError,
+    WorkflowValidationError,
+    resolve_workflow,
+)
 from atlas.worktree import WorktreeManager
 
-app = typer.Typer(name="atlas", help="Phase-gated agent pipeline.")
+
+def _available_workflows() -> list[str]:
+    """List built-in workflow names discovered from the packaged workflows/ dir."""
+    workflows_dir = Path(__file__).parent / "workflows"
+    if not workflows_dir.is_dir():
+        return []
+    return sorted(p.stem for p in workflows_dir.glob("*.yaml"))
+
+
+app = typer.Typer(
+    name="atlas",
+    help=(
+        "Phase-gated agent pipeline.\n\n"
+        f"Available workflows (built-in): {', '.join(_available_workflows()) or 'none'}"
+    ),
+)
 
 
 def _find_repo_root() -> Path:
@@ -38,7 +58,17 @@ def _find_repo_root() -> Path:
     raise typer.Exit(1)
 
 
-def _make_pipeline(repo_root: Path, cfg: Config, *, auto_approve: bool = False) -> Pipeline:
+def _make_pipeline(
+    repo_root: Path,
+    cfg: Config,
+    *,
+    auto_approve: bool = False,
+    workflow: str | None = None,
+    workflow_file: Path | None = None,
+) -> Pipeline:
+    loaded = resolve_workflow(
+        workflow_file=workflow_file, workflow_name=workflow, repo_root=repo_root
+    )
     plumb = PlumbIO(real=True)
     state = StateStore(repo_root)
     worktree = WorktreeManager(repo_root)
@@ -54,6 +84,8 @@ def _make_pipeline(repo_root: Path, cfg: Config, *, auto_approve: bool = False) 
         plumb=plumb,
         runner=runner,
         prompter=prompter,
+        stages=loaded.stages,
+        workflow_name=loaded.name,
         worktree=worktree,
     )
 
@@ -67,6 +99,18 @@ def run(
     auto_approve: bool = typer.Option(
         False, "--auto-approve", "-y", help="Auto-approve all gates (for testing)"
     ),
+    workflow: str = typer.Option(
+        "",
+        "--workflow",
+        "-w",
+        help="Workflow name to load (searches .atlas/workflows/, "
+        "~/.atlas/workflows/, then built-in). Defaults to 'dev'.",
+    ),
+    workflow_file: str = typer.Option(
+        "",
+        "--workflow-file",
+        help="Literal path to a workflow YAML file. Takes priority over --workflow.",
+    ),
 ) -> None:
     """Start a new atlas pipeline run."""
     repo_root = _find_repo_root()
@@ -76,9 +120,18 @@ def run(
         slug = _slugify(task)
 
     try:
-        pipeline = _make_pipeline(repo_root, cfg, auto_approve=auto_approve)
+        pipeline = _make_pipeline(
+            repo_root,
+            cfg,
+            auto_approve=auto_approve,
+            workflow=workflow or None,
+            workflow_file=Path(workflow_file) if workflow_file else None,
+        )
     except RoutingDriftError as exc:
         typer.echo(f"Routing fixture mismatch: {exc}", err=True)
+        raise typer.Exit(1)
+    except (WorkflowNotFoundError, WorkflowValidationError) as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
     ctx = pipeline.start(task=task, slug=slug)
@@ -112,6 +165,9 @@ def resume(
         raise typer.Exit(1)
     except RoutingDriftError as exc:
         typer.echo(f"Routing fixture mismatch: {exc}", err=True)
+        raise typer.Exit(1)
+    except (WorkflowNotFoundError, WorkflowValidationError) as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
     typer.echo(f"Resuming run {ctx.run_id[:8]} — {ctx.slug}")

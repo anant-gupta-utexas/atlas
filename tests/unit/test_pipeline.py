@@ -14,8 +14,12 @@ from atlas.orchestrator import (
     StageOutcome,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, GateLabel, StageName, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateInconsistencyError, StateStore
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Fakes / stubs
@@ -39,7 +43,7 @@ class _FakeRunner:
             stage=stage,
             span_id="",
             status="success",
-            output_text=f"output of {stage.name.value}",
+            output_text=f"output of {stage.name}",
             error_type=None,
         )
 
@@ -167,7 +171,7 @@ def test_step_advance_on_approve_writes_user_signal_score(tmp_path):
     assert outcome.status == "success"
     assert len(plumb.scores) == 1
     assert plumb.scores[0]["value_label"] == "approved"
-    assert plumb.scores[0]["metric"] == GateLabel.GATE_RESEARCH.value
+    assert plumb.scores[0]["metric"] == "gate_research"
 
 
 def test_step_writes_one_span_per_stage(tmp_path):
@@ -280,7 +284,7 @@ def test_resume_finds_first_unchecked_box(tmp_path):
     assert ctx2.run_id == ctx.run_id
 
     next_unchecked = state.first_unchecked(ctx2)
-    assert next_unchecked == StageName.TRD_DRAFT
+    assert next_unchecked == "trd_draft"
 
 
 def test_resume_raises_when_no_active_run(tmp_path):

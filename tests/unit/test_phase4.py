@@ -16,14 +16,17 @@ from atlas.orchestrator import (
     SubprocessStageRunner,
     _clamp_reason,
 )
-from atlas.stages import STAGES, StageName
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_CODE_GEN_STAGE = next(s for s in STAGES if s.name == StageName.CODE_GEN)
-_RESEARCH_STAGE = next(s for s in STAGES if s.name == StageName.RESEARCH)
+_CODE_GEN_STAGE = next(s for s in STAGES if s.name == "code_gen")
+_RESEARCH_STAGE = next(s for s in STAGES if s.name == "research")
 
 
 def _ctx(tmp_path: Path) -> RunContext:
@@ -152,14 +155,14 @@ def test_runner_timeout_override_respected(tmp_path: Path) -> None:
 
 
 def test_unknown_plugin_raises_routing_drift_error_before_subprocess(tmp_path: Path) -> None:
-    from atlas.stages import GateLabel, StageSpec
+    from atlas.stages import StageSpec
 
     bad_stage = StageSpec(
         index=0,
-        name=StageName.RESEARCH,
+        name="research",
         span_kind="plan",
         tool="not-in-allow-list",
-        gate_label=GateLabel.GATE_RESEARCH,
+        gate_label="gate_research",
         gate_index=0,
     )
     runner = SubprocessStageRunner()

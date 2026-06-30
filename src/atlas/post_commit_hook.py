@@ -73,7 +73,7 @@ def run() -> None:
 
     run_id = lines[0].strip()
     sha = _head_sha(Path.cwd())
-    metric = "gate_commit"
+    metric = lines[4].strip() if len(lines) >= 5 and lines[4].strip() else "gate_commit"
 
     pending_path = repo / ".atlas" / "pending-scores.jsonl"
     pending_path.parent.mkdir(parents=True, exist_ok=True)

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from atlas.stages import STAGE_BY_NAME, STAGES, GateLabel, StageName, StageSpec
+from atlas.stages import StageSpec
 
 if TYPE_CHECKING:
     from atlas.plumb_io import PlumbIO
@@ -20,7 +20,9 @@ _ROUTING_FIXTURE_PATH = (
     Path(__file__).parent.parent.parent / "tests" / "fixtures" / "routing_ground_truth.json"
 )
 
-# Per-stage subprocess timeouts (seconds). code_gen gets extra headroom.
+# Per-stage subprocess timeouts (seconds), dev-pipeline tier-3 fallback.
+# code_gen gets extra headroom. Retained as the final fallback when neither
+# .atlas.toml nor the workflow YAML's timeout_s specifies one (§6.7).
 _DEFAULT_TIMEOUT_S: dict[str, int] = {
     "research": 600,
     "prd_draft": 600,
@@ -30,6 +32,9 @@ _DEFAULT_TIMEOUT_S: dict[str, int] = {
     "code_gen": 1800,
     "code_review": 600,
 }
+
+# Fallback for stage names absent from _DEFAULT_TIMEOUT_S (non-dev workflows).
+_GLOBAL_FALLBACK_TIMEOUT_S = 600
 
 _GATE_MAX_REASON_BYTES = 4096
 _GATE_MAX_RETRIES = 3
@@ -47,6 +52,33 @@ class NoActiveRunError(Exception):
 
 class AwaitingHookExceededError(Exception):
     """Raised when awaiting_hook repeats more than _AWAITING_HOOK_MAX_ATTEMPTS times."""
+
+
+def resolve_timeout(stage: StageSpec, timeout_overrides: dict[str, int]) -> int:
+    """Resolve a stage's subprocess timeout in priority order (§6.7):
+
+    1. ``.atlas.toml`` per-stage override (highest priority).
+    2. The workflow YAML's ``timeout_s`` field on the stage.
+    3. The hardcoded dev-pipeline ``_DEFAULT_TIMEOUT_S`` table.
+    4. ``_GLOBAL_FALLBACK_TIMEOUT_S``, for stage names absent from tier 3
+       (non-dev workflows that omit ``timeout_s``).
+    """
+    if stage.name in timeout_overrides:
+        return timeout_overrides[stage.name]
+    if stage.timeout_s is not None:
+        return stage.timeout_s
+    return _DEFAULT_TIMEOUT_S.get(stage.name, _GLOBAL_FALLBACK_TIMEOUT_S)
+
+
+def namespaced_metric(workflow_name: str, gate_label: str) -> str:
+    """Return the metric name for a gate score, namespaced by workflow.
+
+    The ``dev`` workflow preserves v1-era bare names (e.g. ``gate_research``)
+    for backward compatibility; any other workflow gets ``<name>.<gate_label>``.
+    """
+    if workflow_name == "dev":
+        return gate_label
+    return f"{workflow_name}.{gate_label}"
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +138,8 @@ class Pipeline:
         plumb: PlumbIO,
         runner: StageRunner,
         prompter: GatePrompter,
+        stages: tuple[StageSpec, ...] | None = None,
+        workflow_name: str = "dev",
         worktree: WorktreeManager | None = None,
         commit_wait_timeout_s: int = _DEFAULT_COMMIT_WAIT_TIMEOUT_S,
     ) -> None:
@@ -121,6 +155,15 @@ class Pipeline:
         # after stage 5).  run_to_completion() reads this back so caller-owned
         # ctx in same-process flow does not drift from in-flight ctx.
         self._latest_ctx: RunContext | None = None
+
+        if stages is None:
+            from atlas.workflow_loader import resolve_workflow
+
+            loaded = resolve_workflow(workflow_file=None, workflow_name="dev", repo_root=repo_root)
+            stages = loaded.stages
+        self._stages = stages
+        self._stage_by_name: dict[str, StageSpec] = {s.name: s for s in stages}
+        self._workflow_name = workflow_name
         self._validate_routing_fixture()
 
     # ------------------------------------------------------------------
@@ -134,7 +177,7 @@ class Pipeline:
         """
         run_id = self._plumb.open_run(task=task)
         ctx = RunContext(run_id=run_id, slug=slug, task=task, repo_root=self._repo_root)
-        self._state.create_tasks_md(ctx)
+        self._state.create_tasks_md(ctx, stages=self._stages, workflow_name=self._workflow_name)
         self._state.write_current_run(run_id, slug)
         return ctx
 
@@ -155,6 +198,23 @@ class Pipeline:
         run_id, slug, worktree_path, code_gen_span_id = quad
         tasks_path = self._repo_root / "dev" / "active" / slug / "tasks.md"
         task = self._state.read_task_text(slug) or _parse_task_from_tasks_md(tasks_path)
+
+        # Reload the workflow this run was started with — tasks.md is the
+        # canonical source, not whatever stages this Pipeline was constructed
+        # with (a fresh CLI invocation always constructs with the "dev"
+        # default before resume() corrects it here).
+        workflow_name = self._state.read_workflow_name(slug) or "dev"
+        from atlas.workflow_loader import WorkflowNotFoundError, resolve_workflow
+
+        try:
+            loaded = resolve_workflow(
+                workflow_file=None, workflow_name=workflow_name, repo_root=self._repo_root
+            )
+        except WorkflowNotFoundError as exc:
+            raise WorkflowNotFoundError(f"Cannot resume run {run_id!r}: {exc}") from exc
+        self._stages = loaded.stages
+        self._stage_by_name = {s.name: s for s in loaded.stages}
+        self._workflow_name = loaded.name
 
         # Validate state under the *original* run_id before any handoff.
         original_ctx = RunContext(
@@ -216,16 +276,12 @@ class Pipeline:
         if next_name is None:
             return None
 
-        stage = STAGE_BY_NAME[next_name]
+        stage = self._stage_by_name[next_name]
 
-        # Stage 5 (code_gen) runs inside a git worktree; create it before invoking the runner.
-        # The path must outlive this step() call so stage 6 (code_review) operates on the
+        # An isolate stage runs inside a git worktree; create it before invoking the runner.
+        # The path must outlive this step() call so later stages operate on the
         # generated code, not main. Persist it to .atlas/current-run.
-        if (
-            stage.name == StageName.CODE_GEN
-            and self._worktree is not None
-            and ctx.worktree_path is None
-        ):
+        if stage.isolate and self._worktree is not None and ctx.worktree_path is None:
             worktree_path = self._worktree.create(slug=ctx.slug, run_id=ctx.run_id)
             ctx = RunContext(
                 run_id=ctx.run_id,
@@ -248,7 +304,7 @@ class Pipeline:
         span_id = self._plumb.record_span(
             run_id=ctx.run_id,
             kind=stage.span_kind,
-            name=stage.name.value,
+            name=stage.name,
             status=outcome.status if outcome.status != "rejected" else "failure",
             latency_ms=latency_ms,
             error_type=outcome.error_type,
@@ -270,14 +326,14 @@ class Pipeline:
             return outcome
 
         if stage.gate_label is None:
-            # Stage 3 — no gate; advance directly
+            # No gate; advance directly
             self._state.check_box(ctx, stage.name)
-            next_stage = STAGES[stage.index + 1]
+            next_stage = self._stages[stage.index + 1]
             self._state.update_current_block(
                 ctx,
                 phase=next_stage.name,
-                gate=f"none (entering {next_stage.name.value})",
-                next_action=f"run stage {next_stage.index} ({next_stage.name.value})",
+                gate=f"none (entering {next_stage.name})",
+                next_action=f"run stage {next_stage.index} ({next_stage.name})",
             )
             return StageOutcome(
                 stage=stage,
@@ -287,16 +343,20 @@ class Pipeline:
                 error_type=None,
             )
 
-        if stage.gate_label == GateLabel.GATE_COMMIT:
-            # Gate 4 — written by post-commit hook; orchestrator returns awaiting_hook.
-            # No gate_commit user_signal score is written here. Remember the
-            # span_id so the next step()'s flush can attribute hook scores to it.
-            # The stage's *work* succeeded, so check the box; the hook score is
-            # a separate, asynchronous concern.
+        if stage.gate_is_async:
+            # Written by post-commit hook; orchestrator returns awaiting_hook.
+            # No score is written here. Remember the span_id so the next
+            # step()'s flush can attribute hook scores to it. The stage's
+            # *work* succeeded, so check the box; the hook score is a
+            # separate, asynchronous concern.
             self._state.check_box(ctx, stage.name)
             self._last_code_gen_span_id = span_id
             self._state.write_current_run(
-                ctx.run_id, ctx.slug, ctx.worktree_path, code_gen_span_id=span_id
+                ctx.run_id,
+                ctx.slug,
+                ctx.worktree_path,
+                code_gen_span_id=span_id,
+                async_gate_metric=stage.gate_label,
             )
             return StageOutcome(
                 stage=stage,
@@ -311,7 +371,7 @@ class Pipeline:
         self._plumb.record_user_signal(
             run_id=ctx.run_id,
             span_id=span_id,
-            metric=stage.gate_label.value,
+            metric=namespaced_metric(self._workflow_name, stage.gate_label),
             decision=decision,
         )
 
@@ -332,19 +392,19 @@ class Pipeline:
 
         # Approved — check the box and advance current block
         self._state.check_box(ctx, stage.name)
-        if stage.index < len(STAGES) - 1:
-            next_stage = STAGES[stage.index + 1]
+        if stage.index < len(self._stages) - 1:
+            next_stage = self._stages[stage.index + 1]
             self._state.update_current_block(
                 ctx,
                 phase=next_stage.name,
-                gate=stage.gate_label.value,
-                next_action=f"run stage {next_stage.index} ({next_stage.name.value})",
+                gate=stage.gate_label,
+                next_action=f"run stage {next_stage.index} ({next_stage.name})",
             )
         else:
             self._state.update_current_block(
                 ctx,
                 phase=stage.name,
-                gate=stage.gate_label.value,
+                gate=stage.gate_label,
                 next_action="run complete",
             )
 
@@ -430,16 +490,19 @@ class Pipeline:
         return False
 
     def _validate_routing_fixture(self) -> None:
+        # routing_ground_truth.json only describes the dev pipeline.
+        if self._workflow_name != "dev":
+            return
         if not _ROUTING_FIXTURE_PATH.exists():
             raise RoutingDriftError(f"Routing fixture not found: {_ROUTING_FIXTURE_PATH}")
         rows = json.loads(_ROUTING_FIXTURE_PATH.read_text())
-        if len(rows) != len(STAGES):
-            raise RoutingDriftError(f"Fixture has {len(rows)} rows; STAGES has {len(STAGES)}")
-        for spec, row in zip(STAGES, rows, strict=True):
+        if len(rows) != len(self._stages):
+            raise RoutingDriftError(f"Fixture has {len(rows)} rows; STAGES has {len(self._stages)}")
+        for spec, row in zip(self._stages, rows, strict=True):
             if (
                 spec.tool != row["expected_tool"]
                 or spec.span_kind != row["expected_span_kind"]
-                or spec.name.value != row["stage_name"]
+                or spec.name != row["stage_name"]
             ):
                 raise RoutingDriftError(f"Stage {spec.index} drifted from fixture: {spec} vs {row}")
 
@@ -484,9 +547,7 @@ class SubprocessStageRunner:
         # T4.3 — allow-list check before any subprocess call
         plugin_cmd = resolve(stage.tool, overrides=self._command_overrides)
 
-        timeout_s = self._timeout_overrides.get(
-            stage.name.value, _DEFAULT_TIMEOUT_S[stage.name.value]
-        )
+        timeout_s = resolve_timeout(stage, self._timeout_overrides)
 
         # Plugin slash-commands are workspace-scoped; run claude from the atlas
         # install root so local plugins resolve. Traverse up from __file__ to
@@ -571,7 +632,7 @@ class ClickPrompter:
 
     def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
         prompt = (
-            f"\nGate {gate_index} — {stage.name.value}\n"
+            f"\nGate {gate_index} — {stage.name}\n"
             "Output reviewed. [a]pprove / [r]eject reason / q to quit: "
         )
 
@@ -639,5 +700,5 @@ class AutoPrompter:
     """Non-interactive prompter that auto-approves all gates (for testing)."""
 
     def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
-        print(f"\nGate {gate_index} — {stage.name.value} [AUTO-APPROVED]")
+        print(f"\nGate {gate_index} — {stage.name} [AUTO-APPROVED]")
         return GateDecision(label="approved", turn_count=1, reason=None)

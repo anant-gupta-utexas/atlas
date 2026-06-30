@@ -6,15 +6,23 @@ Values are passed to ``claude -p`` as the prompt prefix.
 
 Commands from installed plugins use their namespaced form ``PLUGIN:command-name``
 where required; skills use their bare name.
-Override individual entries via .atlas.toml [plugin_commands] table.
+
+Resolution order (§3.5): ``.atlas.toml [plugin_commands.<tool>]`` overrides >
+the workflow YAML's ``tool`` field (i.e. ``StageSpec.tool`` itself, already the
+primary source — there's no separate lookup for it) > ``PLUGIN_COMMANDS``.
+``PLUGIN_COMMANDS`` below is the **dev-pipeline-only** fallback table; non-dev
+workflows are expected to either use a ``RAW:``-prefixed ``tool`` string
+(bypassing resolution entirely) or supply a ``.atlas.toml`` override — a tool
+string absent from both raises ``RoutingDriftError``.
 """
 
 from __future__ import annotations
 
 from atlas.orchestrator import RoutingDriftError
 
-# Maps StageSpec.tool strings to the command to invoke.
-# Prefix with "RAW:" for stages that use a plain prompt instead of a slash command.
+# Dev-pipeline-only fallback. Maps StageSpec.tool strings to the command to
+# invoke. Prefix with "RAW:" for stages that use a plain prompt instead of a
+# slash command. Non-dev workflows must not rely on this table.
 PLUGIN_COMMANDS: dict[str, str] = {
     # consult-experts is a DEV-ESSENTIALS skill (bare name, no namespace)
     "consult-experts:research": "consult-experts",

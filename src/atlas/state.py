@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from atlas.stages import STAGES, StageName
+from atlas.stages import StageSpec
 
 if TYPE_CHECKING:
     from atlas.orchestrator import RunContext
@@ -25,6 +25,7 @@ _TASKS_MD_HEADER = """\
 phase: {phase}
 gate:  {gate}
 next:  {next_action}
+workflow: {workflow_name}
 ```
 
 ## stages
@@ -37,7 +38,10 @@ _CHECKED_LINE = "- [x] {name}\n"
 _RUN_ID_RE = re.compile(r"<!-- run_id:\s*(\S+)\s*-->")
 _TASK_RE = re.compile(r"<!-- task:\s*(\S+)\s*-->")
 _CHECKBOX_RE = re.compile(r"^- \[( |x)\] (.+)$", re.MULTILINE)
-_CURRENT_BLOCK_RE = re.compile(r"```\nphase: (.+)\ngate:  (.+)\nnext:  (.+)\n```", re.DOTALL)
+_CURRENT_BLOCK_RE = re.compile(
+    r"```\nphase: (.+)\ngate:  (.+)\nnext:  (.+)\nworkflow: (.+)\n```", re.DOTALL
+)
+_WORKFLOW_RE = re.compile(r"^workflow: (.+)$", re.MULTILINE)
 
 
 class StateInconsistencyError(Exception):
@@ -53,11 +57,17 @@ class StateStore:
     def _tasks_md_path(self, slug: str) -> Path:
         return self._repo_root / "dev" / "active" / slug / "tasks.md"
 
-    def create_tasks_md(self, ctx: RunContext) -> None:
+    def create_tasks_md(
+        self,
+        ctx: RunContext,
+        *,
+        stages: tuple[StageSpec, ...],
+        workflow_name: str = "dev",
+    ) -> None:
         path = self._tasks_md_path(ctx.slug)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        stage_lines = "".join(_STAGE_LINE.format(name=s.name.value) for s in STAGES)
+        stage_lines = "".join(_STAGE_LINE.format(name=s.name) for s in stages)
         # Base64-encode the task text so embedded newlines / markdown survive
         # round-trip through the HTML comment.
         task_b64 = base64.b64encode(ctx.task.encode("utf-8")).decode("ascii")
@@ -66,9 +76,10 @@ class StateStore:
                 slug=ctx.slug,
                 run_id=ctx.run_id,
                 task_b64=task_b64,
-                phase=STAGES[0].name.value,
+                phase=stages[0].name,
                 gate="none",
-                next_action="run stage 0 (research)",
+                next_action=f"run stage 0 ({stages[0].name})",
+                workflow_name=workflow_name,
             )
             + stage_lines
         )
@@ -89,6 +100,17 @@ class StateStore:
         except (ValueError, UnicodeDecodeError):
             return None
 
+    def read_workflow_name(self, slug: str) -> str | None:
+        """Return the workflow name written to tasks.md's `## current` block, or None."""
+        path = self._tasks_md_path(slug)
+        if not path.exists():
+            return None
+        content = path.read_text()
+        m = _WORKFLOW_RE.search(content)
+        if m is None:
+            return None
+        return m.group(1).strip()
+
     def update_run_id(self, slug: str, new_run_id: str) -> None:
         """Rewrite the tasks.md run_id comment in place (used during resume handoff)."""
         path = self._tasks_md_path(slug)
@@ -102,13 +124,16 @@ class StateStore:
         slug: str,
         worktree_path: Path | None = None,
         code_gen_span_id: str | None = None,
+        async_gate_metric: str | None = None,
     ) -> None:
         self._atlas_dir.mkdir(parents=True, exist_ok=True)
         body = f"{run_id}\n{slug}\n"
-        if worktree_path is not None or code_gen_span_id is not None:
+        if worktree_path is not None or code_gen_span_id is not None or async_gate_metric:
             body += f"{worktree_path or ''}\n"
-        if code_gen_span_id is not None:
-            body += f"{code_gen_span_id}\n"
+        if code_gen_span_id is not None or async_gate_metric:
+            body += f"{code_gen_span_id or ''}\n"
+        if async_gate_metric:
+            body += f"{async_gate_metric}\n"
         _atomic_write(self._current_run_path, body)
 
     def read_current_run(self) -> tuple[str, str] | None:
@@ -136,6 +161,15 @@ class StateStore:
             code_gen_span_id = lines[3].strip()
         return run_id, slug, worktree_path, code_gen_span_id
 
+    def read_async_gate_metric(self) -> str | None:
+        """Return line 5 of .atlas/current-run (the async-gate metric name), if present."""
+        if not self._current_run_path.exists():
+            return None
+        lines = self._current_run_path.read_text().splitlines()
+        if len(lines) >= 5 and lines[4].strip():
+            return lines[4].strip()
+        return None
+
     def delete_current_run(self) -> None:
         if self._current_run_path.exists():
             self._current_run_path.unlink()
@@ -144,39 +178,40 @@ class StateStore:
         self,
         ctx: RunContext,
         *,
-        phase: StageName,
+        phase: str,
         gate: str,
         next_action: str,
     ) -> None:
         path = self._tasks_md_path(ctx.slug)
         content = path.read_text()
-        new_block = f"```\nphase: {phase.value}\ngate:  {gate}\nnext:  {next_action}\n```"
+        workflow_name = self.read_workflow_name(ctx.slug) or "dev"
+        new_block = (
+            f"```\nphase: {phase}\ngate:  {gate}\nnext:  {next_action}\n"
+            f"workflow: {workflow_name}\n```"
+        )
         updated = _CURRENT_BLOCK_RE.sub(new_block, content)
         _atomic_write(path, updated)
 
-    def check_box(self, ctx: RunContext, stage: StageName) -> None:
+    def check_box(self, ctx: RunContext, stage_name: str) -> None:
         path = self._tasks_md_path(ctx.slug)
         content = path.read_text()
 
         def replacer(m: re.Match[str]) -> str:
             checked, name = m.group(1), m.group(2)
-            if name == stage.value and checked == " ":
+            if name == stage_name and checked == " ":
                 return f"- [x] {name}"
             return m.group(0)
 
         updated = _CHECKBOX_RE.sub(replacer, content)
         _atomic_write(path, updated)
 
-    def first_unchecked(self, ctx: RunContext) -> StageName | None:
+    def first_unchecked(self, ctx: RunContext) -> str | None:
         path = self._tasks_md_path(ctx.slug)
         content = path.read_text()
         for m in _CHECKBOX_RE.finditer(content):
             checked, name = m.group(1), m.group(2)
             if checked == " ":
-                try:
-                    return StageName(name)
-                except ValueError:
-                    continue
+                return name
         return None
 
     def assert_consistent(self, ctx: RunContext) -> None:

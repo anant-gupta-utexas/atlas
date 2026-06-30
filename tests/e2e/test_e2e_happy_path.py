@@ -24,9 +24,13 @@ from atlas.orchestrator import (
     StageOutcome,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, StageName, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateStore
+from atlas.workflow_loader import load_workflow_file
 from atlas.worktree import WorktreeManager
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 pytestmark = pytest.mark.e2e
 
@@ -83,12 +87,12 @@ class _ApproveAllRunner:
     """Returns success for every stage. code_gen still returns awaiting_hook."""
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
-        status = "awaiting_hook" if stage.name == StageName.CODE_GEN else "success"
+        status = "awaiting_hook" if stage.name == "code_gen" else "success"
         return StageOutcome(
             stage=stage,
             span_id="",
             status=status,
-            output_text=f"stub output — {stage.name.value}",
+            output_text=f"stub output — {stage.name}",
             error_type=None,
         )
 
@@ -165,7 +169,7 @@ def test_e2e_all_trd_success_criteria(tmp_path: Path) -> None:
     # --- Criterion 2: 7 spans in the correct order
     assert len(plumb.spans) == 7, f"Expected 7 spans, got {len(plumb.spans)}"
     span_names = [s["name"] for s in plumb.spans]
-    expected_names = [s.name.value for s in STAGES]
+    expected_names = [s.name for s in STAGES]
     assert span_names == expected_names, f"Span order wrong: {span_names}"
 
     # --- Criterion 3: ≥ 5 user-signal scores (gate_commit may come from hook)
@@ -224,7 +228,7 @@ def test_e2e_resume_protocol_mid_run(tmp_path: Path) -> None:
 
     # First unchecked stage should be stage 3 (tds_gen)
     next_stage = state.first_unchecked(ctx2)
-    assert next_stage == StageName.TDS_GEN, f"Expected tds_gen, got {next_stage}"
+    assert next_stage == "tds_gen", f"Expected tds_gen, got {next_stage}"
 
 
 def test_e2e_routing_fixture_passes() -> None:

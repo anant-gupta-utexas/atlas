@@ -33,8 +33,12 @@ from atlas.orchestrator import (
 )
 from atlas.plumb_io import PlumbIO
 from atlas.post_commit_hook import _main_repo_root
-from atlas.stages import STAGES, StageName, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateStore
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Shared fakes
@@ -49,7 +53,7 @@ class _CapturingRunner:
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
         self.calls.append(ctx)
-        status = "awaiting_hook" if stage.name == StageName.CODE_GEN else "success"
+        status = "awaiting_hook" if stage.name == "code_gen" else "success"
         return StageOutcome(
             stage=stage,
             span_id="",
@@ -273,7 +277,7 @@ def test_orchestrator_flush_drains_pending_into_plumb(tmp_path: Path) -> None:
 
 def test_runner_passes_tasks_md_path_as_context(tmp_path: Path) -> None:
     runner = SubprocessStageRunner()
-    research = next(s for s in STAGES if s.name == StageName.RESEARCH)
+    research = next(s for s in STAGES if s.name == "research")
     ctx = RunContext(
         run_id="a" * 32,
         slug="my-task",
@@ -308,10 +312,10 @@ def test_runner_passes_tasks_md_path_as_context(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _stage_box_checked(state: StateStore, ctx: RunContext, stage_name: StageName) -> bool:
+def _stage_box_checked(state: StateStore, ctx: RunContext, stage_name: str) -> bool:
     path = tmp_path_for(state, ctx)
     content = path.read_text()
-    pattern = re.compile(rf"^- \[(.)\] {re.escape(stage_name.value)}$", re.MULTILINE)
+    pattern = re.compile(rf"^- \[(.)\] {re.escape(stage_name)}$", re.MULTILINE)
     m = pattern.search(content)
     assert m, f"stage {stage_name} not found in tasks.md"
     return m.group(1) == "x"
@@ -350,11 +354,11 @@ def test_failed_stage_leaves_box_unchecked(tmp_path: Path) -> None:
     outcome = pipeline.step(ctx)
     assert outcome is not None and outcome.status == "failure"
 
-    assert not _stage_box_checked(state, ctx, StageName.RESEARCH), (
+    assert not _stage_box_checked(state, ctx, "research"), (
         "failed stage must NOT be marked complete in tasks.md"
     )
     # And resume should pick up the same stage
-    assert state.first_unchecked(ctx) == StageName.RESEARCH
+    assert state.first_unchecked(ctx) == "research"
 
 
 def test_rejected_gate_leaves_box_unchecked(tmp_path: Path) -> None:
@@ -376,10 +380,10 @@ def test_rejected_gate_leaves_box_unchecked(tmp_path: Path) -> None:
     outcome = pipeline.step(ctx)
     assert outcome is not None and outcome.status == "rejected"
 
-    assert not _stage_box_checked(state, ctx, StageName.RESEARCH), (
+    assert not _stage_box_checked(state, ctx, "research"), (
         "rejected stage must NOT be marked complete; user can re-run after fixing"
     )
-    assert state.first_unchecked(ctx) == StageName.RESEARCH
+    assert state.first_unchecked(ctx) == "research"
 
 
 def test_approved_stage_marks_box_checked(tmp_path: Path) -> None:
@@ -393,4 +397,4 @@ def test_approved_stage_marks_box_checked(tmp_path: Path) -> None:
     )
     ctx = pipeline.start(task="t", slug="task")
     pipeline.step(ctx)
-    assert _stage_box_checked(state, ctx, StageName.RESEARCH)
+    assert _stage_box_checked(state, ctx, "research")
