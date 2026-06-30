@@ -159,7 +159,9 @@ class Pipeline:
         if stages is None:
             from atlas.workflow_loader import resolve_workflow
 
-            loaded = resolve_workflow(workflow_file=None, workflow_name="dev", repo_root=repo_root)
+            loaded = resolve_workflow(
+                workflow_file=None, workflow_name=workflow_name, repo_root=repo_root
+            )
             stages = loaded.stages
         self._stages = stages
         self._stage_by_name: dict[str, StageSpec] = {s.name: s for s in stages}
@@ -237,12 +239,17 @@ class Pipeline:
         # If the handoff produced a new run id, propagate it into atlas state
         # so all subsequent reads/writes use the active id.
         if active_run_id != run_id:
+            # Preserve the async-gate metric (line 5) across the rewrite — a
+            # bare rewrite would truncate it, silently reverting non-dev
+            # workflows' commit gate to the literal "gate_commit".
+            async_gate_metric = self._state.read_async_gate_metric()
             self._state.update_run_id(slug, active_run_id)
             self._state.write_current_run(
                 active_run_id,
                 slug,
                 worktree_path,
                 code_gen_span_id=code_gen_span_id,
+                async_gate_metric=async_gate_metric,
             )
 
         return RunContext(
@@ -356,7 +363,7 @@ class Pipeline:
                 ctx.slug,
                 ctx.worktree_path,
                 code_gen_span_id=span_id,
-                async_gate_metric=stage.gate_label,
+                async_gate_metric=namespaced_metric(self._workflow_name, stage.gate_label),
             )
             return StageOutcome(
                 stage=stage,
@@ -497,7 +504,9 @@ class Pipeline:
             raise RoutingDriftError(f"Routing fixture not found: {_ROUTING_FIXTURE_PATH}")
         rows = json.loads(_ROUTING_FIXTURE_PATH.read_text())
         if len(rows) != len(self._stages):
-            raise RoutingDriftError(f"Fixture has {len(rows)} rows; STAGES has {len(self._stages)}")
+            raise RoutingDriftError(
+                f"Fixture has {len(rows)} rows; workflow has {len(self._stages)} stages"
+            )
         for spec, row in zip(self._stages, rows, strict=True):
             if (
                 spec.tool != row["expected_tool"]

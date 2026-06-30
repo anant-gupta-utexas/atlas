@@ -126,6 +126,11 @@ class StateStore:
         code_gen_span_id: str | None = None,
         async_gate_metric: str | None = None,
     ) -> None:
+        # .atlas/current-run is positional: line 1 run_id, 2 slug, 3 worktree,
+        # 4 code_gen_span_id, 5 async_gate_metric. A later line is reachable only
+        # if every earlier line is emitted, so a trailing field forces empty
+        # placeholders for the lines it depends on. Readers index by position
+        # (read_current_run_with_worktree, read_async_gate_metric, the hook).
         self._atlas_dir.mkdir(parents=True, exist_ok=True)
         body = f"{run_id}\n{slug}\n"
         if worktree_path is not None or code_gen_span_id is not None or async_gate_metric:
