@@ -61,7 +61,7 @@ the Phase 1 branch, which is expected for continuing Phase 2 work before Phase 1
 - [x] **T2.6** — Add content-pipeline as an optional dependency (`pyproject.toml` extra)
 - [x] **T2.7** — Document the two-variant choice (`job` vs `job-cli`)
 - [x] **T2.8** — End-to-end test (both variants) + dev-pipeline regression re-run
-- [x] **T2.9** — CI gate updates — job extra (with/without content-pipeline installed)
+- [x] **T2.9** — CI gate updates — job extra (with/without content-pipeline installed) — see "Post-review follow-up" for the `test-job-extra` leg and its `CONTENT_PIPELINE_TOKEN` prerequisite
 - [x] **T2.10** — Document the hub-and-spoke trigger model
 
 ## Exit criteria (TRD-v2 §14 Phase 2 + §13 #5–6, copied for tracking)
@@ -96,3 +96,52 @@ No decisions remain open. The five items below were the plan's "Pending Decision
 - [x] #3 — `ingest_postings` partial-failure strictness → **keep atlas stricter.** Any source failure fails the stage; measured pipeline assumes complete upstream data (binds T2.2)
 - [x] #4 — Real job-board credentials → manual prerequisite; tests mock at the use-case boundary; live runs are manual
 - [x] #5 — `timeout_s` inert on `LIB:` stages → **accept the asymmetry.** In-process calls bounded by content-pipeline's own client timeouts; revisit only if a `LIB:` stage actually hangs (binds T2.1/T2.2)
+
+## Post-review follow-up (resolved 2026-06-30, commit `53359e4`)
+
+The Phase 2 code review (`yaml-workflow-engine-phase-2-code-review.md`) raised
+four findings. All are resolved. Note that review finding #1 ("job Mode A imports
+content-pipeline APIs that are absent") was **stale by the time of the fix**: the
+sibling now ships `ScoreJobsUseCase`, `score_jobs_report`, `AtsBoardScraper`, etc.
+The real remaining blocker was a **content-pipeline packaging issue** (its src-layout
+was internally inconsistent), fixed upstream in content-pipeline `48b63b2`. After
+that, content-pipeline installs its packages as bare top-level names
+(`application` / `infrastructure` / `domain`, no `src.` prefix).
+
+Fixes landed in atlas:
+
+- **Adapter imports** — dropped the `src.` prefix in `library_adapters/*` so Mode A
+  resolves against the installed package. Verified: all 16 imports import cleanly.
+- **`SHELL:` runner** (`src/atlas/shell_runner.py`) — `job_cli.yaml`'s two
+  content-pipeline stages now dispatch the CLI as a real list-form subprocess
+  (`shell=False`, closed allow-list `{content-pipeline}`, honors `timeout_s`,
+  maps `FileNotFoundError`/`TimeoutExpired`/non-zero exit → `StageOutcome`, never
+  raises). Previously `RAW:` routed them through `claude -p` — the `job.*` vs
+  `job_cli.*` metric split now measures "in-process library vs subprocess CLI" as
+  the TRS §3.7 intended, not merely "which prompt string we sent Claude."
+- **Narrowed `ImportError` handling** (`library_runner.py`) — only an ImportError
+  naming a content-pipeline top-level package (`application`/`infrastructure`/
+  `domain`) yields `content_pipeline_not_installed` (with the `job_cli` hint); an
+  atlas-adapter-module or unrelated ImportError surfaces as `library_adapter_error`
+  so a real bug is no longer masked as a missing optional dependency.
+- **Real-boundary tests** (`tests/integration/test_job_adapters_real_import.py`) —
+  run the actual adapter bodies against installed content-pipeline, patching at the
+  use-case *class* boundary (not `_import_adapter`). Skipped when the extra is
+  absent. This is the coverage that would have caught the `src.` mismatch.
+
+### ⚠ Open prerequisite — CI `test-job-extra` needs a repo secret
+
+`.github/workflows/ci.yml` now has an **active** `test-job-extra` job that checks out
+`anant-gupta-utexas/content-pipeline`, installs `uv sync --extra dev --extra job`, and
+runs the real-import suite. Because content-pipeline is **private**, the checkout needs
+a Personal Access Token (read access) stored as the repo secret **`CONTENT_PIPELINE_TOKEN`**.
+
+- The job is **guarded** on that secret: absent it, the job self-skips with a GitHub
+  notice rather than failing on an unauthenticated checkout. So CI stays green today.
+- **Until the secret is added, the real LIB: adapter-import path is NOT exercised in CI** —
+  the very regression class this leg exists to catch stays uncovered in CI.
+- **Action for maintainer:** create a PAT with read access to
+  `anant-gupta-utexas/content-pipeline` and add it as `CONTENT_PIPELINE_TOKEN` in the
+  atlas repo's Actions secrets. Alternative (if a private checkout in CI is undesirable):
+  check in a tiny `content-pipeline` stub package matching the use-case shape and install
+  *that* via the `job` extra in CI — proves the import path without the private repo.
