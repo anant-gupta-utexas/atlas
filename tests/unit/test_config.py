@@ -109,3 +109,29 @@ def test_config_load_user_config_used_when_no_repo_toml(
 
     cfg = Config.load(repo_dir)
     assert cfg.plumb_db_path == Path("/user/plumb.db")
+
+
+# ---------------------------------------------------------------------------
+# T3.5 — Config.default_backend
+# ---------------------------------------------------------------------------
+
+
+def test_config_default_backend_from_toml(tmp_path: Path) -> None:
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text('[backend]\ndefault = "agy"\n')
+    cfg = Config.load(tmp_path)
+    assert cfg.default_backend == "agy"
+
+
+def test_config_default_backend_fallback(tmp_path: Path) -> None:
+    """No [backend] section → falls back to 'claude'."""
+    cfg = Config.load(tmp_path)
+    assert cfg.default_backend == "claude"
+
+
+def test_config_default_backend_malformed_section(tmp_path: Path) -> None:
+    """Malformed backend value (not a table) → defaults safely to 'claude'."""
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text('backend = "claude"\n')
+    cfg = Config.load(tmp_path)
+    assert cfg.default_backend == "claude"

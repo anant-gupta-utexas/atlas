@@ -534,7 +534,8 @@ def _parse_task_from_tasks_md(path: Path) -> str:
 
 class SubprocessStageRunner:
     """
-    Invokes plugins via ``claude -p "/<plugin> <task>" --no-session-persistence``.
+    Thin subprocess dispatcher — delegates argv construction and result parsing
+    to a ``CliBackend`` strategy (ClaudeCodeBackend by default).
 
     All subprocess calls are list-form (no ``shell=True``).  Plugin names are
     validated against the allow-list in ``plugin_resolver`` before any
@@ -547,12 +548,17 @@ class SubprocessStageRunner:
         timeout_overrides: dict[str, int] | None = None,
         command_overrides: dict[str, str] | None = None,
         model: str = "haiku",
+        default_backend: str = "claude",
+        loaded_workflow: object = None,  # LoadedWorkflow | None; typed as object to avoid cycle
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
         self._model = model
+        self._default_backend = default_backend
+        self._workflow = loaded_workflow
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        from atlas.cli_backend import UnknownBackendError, make_backend, resolve_backend
         from atlas.plugin_resolver import build_prompt, resolve  # local import to avoid cycles
 
         # T4.3 — allow-list check before any subprocess call
@@ -575,21 +581,49 @@ class SubprocessStageRunner:
 
         prompt = build_prompt(plugin_cmd, ctx.task, context_hint)
 
-        add_dirs = [str(ctx.repo_root)]
+        # Resolve backend per TRD-v2 §3.4's 4-tier order.
+        backend_name = resolve_backend(
+            stage=stage,
+            workflow=self._workflow,  # type: ignore[arg-type]
+            config_default=self._default_backend,
+        )
+        try:
+            backend = make_backend(backend_name)
+        except UnknownBackendError as exc:
+            return StageOutcome(
+                stage=stage,
+                span_id="",
+                status="failure",
+                output_text=str(exc),
+                error_type="unknown_backend",
+            )
+
+        preflight = backend.preflight()
+        if preflight is not None:
+            msg, error_type = preflight
+            return StageOutcome(
+                stage=stage,
+                span_id="",
+                status="failure",
+                output_text=msg,
+                error_type=error_type,
+            )
+
+        add_dirs = [ctx.repo_root]
         if ctx.worktree_path is not None:
-            add_dirs.append(str(ctx.worktree_path))
+            add_dirs.append(ctx.worktree_path)
+
+        argv = backend.build_argv(
+            prompt=prompt,
+            model=self._model,
+            add_dirs=add_dirs,
+            timeout_s=timeout_s,
+            extra_flags={},
+        )
 
         try:
             result = subprocess.run(
-                [
-                    "claude",
-                    "-p",
-                    prompt,
-                    "--no-session-persistence",
-                    "--model",
-                    self._model,
-                    *[arg for d in add_dirs for arg in ("--add-dir", d)],
-                ],
+                argv,
                 cwd=str(atlas_root),
                 capture_output=True,
                 check=False,
@@ -605,21 +639,15 @@ class SubprocessStageRunner:
                 error_type="plugin_timeout",
             )
 
-        if result.returncode != 0:
-            return StageOutcome(
-                stage=stage,
-                span_id="",
-                status="failure",
-                output_text=result.stdout,
-                error_type="plugin_nonzero_exit",
-            )
-
+        status, output_text, error_type = backend.parse_result(
+            result.stdout, result.stderr, result.returncode
+        )
         return StageOutcome(
             stage=stage,
             span_id="",
-            status="success",
-            output_text=result.stdout,
-            error_type=None,
+            status=status,
+            output_text=output_text,
+            error_type=error_type,
         )
 
 

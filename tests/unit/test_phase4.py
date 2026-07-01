@@ -291,3 +291,103 @@ def test_click_prompter_turn_count_increments_on_retry() -> None:
 
     assert decision.label == "approved"
     assert decision.turn_count == 3
+
+
+# ---------------------------------------------------------------------------
+# T3.4 — Backend wiring in SubprocessStageRunner
+# ---------------------------------------------------------------------------
+
+
+def test_subprocess_runner_uses_claude_by_default(tmp_path: Path) -> None:
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed()
+        runner.run(ctx=_ctx(tmp_path), stage=_RESEARCH_STAGE)
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "claude"
+
+
+def test_subprocess_runner_respects_stage_backend_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from atlas.stages import StageSpec
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    agy_stage = StageSpec(
+        index=0,
+        name="research",
+        span_kind="plan",
+        tool=_RESEARCH_STAGE.tool,
+        gate_label=_RESEARCH_STAGE.gate_label,
+        gate_index=_RESEARCH_STAGE.gate_index,
+        backend="agy",
+    )
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout='{"response": "ok", "stats": {}}')
+        runner.run(ctx=_ctx(tmp_path), stage=agy_stage)
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "agy"
+    assert "--include-directories" in argv
+    assert "--add-dir" not in argv
+
+
+def test_subprocess_runner_respects_workflow_default_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from atlas.workflow_loader import LoadedWorkflow
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    wf = LoadedWorkflow(name="test", default_backend="agy", stages=())
+    runner = SubprocessStageRunner(loaded_workflow=wf)
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout='{"response": "ok", "stats": {}}')
+        runner.run(ctx=_ctx(tmp_path), stage=_RESEARCH_STAGE)
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "agy"
+
+
+def test_subprocess_runner_unknown_backend_returns_failure(tmp_path: Path) -> None:
+    from atlas.stages import StageSpec
+
+    bad_stage = StageSpec(
+        index=0,
+        name="research",
+        span_kind="plan",
+        tool=_RESEARCH_STAGE.tool,
+        gate_label=_RESEARCH_STAGE.gate_label,
+        gate_index=_RESEARCH_STAGE.gate_index,
+        backend="opus",
+    )
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        outcome = runner.run(ctx=_ctx(tmp_path), stage=bad_stage)
+    assert outcome.status == "failure"
+    assert outcome.error_type == "unknown_backend"
+    mock_run.assert_not_called()
+
+
+def test_subprocess_runner_agy_missing_auth_returns_failure_no_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security: subprocess.run MUST NOT be called when agy auth env vars are absent."""
+    from atlas.stages import StageSpec
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    agy_stage = StageSpec(
+        index=0,
+        name="research",
+        span_kind="plan",
+        tool=_RESEARCH_STAGE.tool,
+        gate_label=_RESEARCH_STAGE.gate_label,
+        gate_index=_RESEARCH_STAGE.gate_index,
+        backend="agy",
+    )
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.side_effect = AssertionError("subprocess.run must not be called")
+        outcome = runner.run(ctx=_ctx(tmp_path), stage=agy_stage)
+    assert outcome.status == "failure"
+    assert outcome.error_type == "agy_missing_auth_env"
+    mock_run.assert_not_called()

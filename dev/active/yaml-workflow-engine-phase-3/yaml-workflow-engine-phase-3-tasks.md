@@ -8,9 +8,9 @@ Reference notes live in
 ## Current
 
 ```
-phase: not-started
+phase: complete
 gate:  none
-next:  T3.1 — sanity-check Phase 1 + Phase 2 seams
+next:  T3.8 manual smoke test (off-CI, user-discretionary) + v2.2 tag
 ```
 
 ## Status — prerequisites resolved (2026-06-30), incl. Phase 2 review
@@ -60,28 +60,28 @@ review resolution added a parallel `SHELL:` path Phase 3 must not break:
 
 ## Tasks (flat — Phase 3 only, no sub-phases)
 
-- [ ] **T3.1** — Sanity-check Phase 1 + Phase 2 seams (grep `StageSpec.backend`, `LoadedWorkflow.default_backend`, single `SubprocessStageRunner` for the `claude -p` path; confirm the `ShellStageRunner`/`shell=` wiring from the Phase 2 review is present and left intact; full-suite baseline = **193 passing**)
-- [ ] **T3.2** — Author `src/atlas/cli_backend.py` — `CliBackend` Protocol + `ClaudeCodeBackend` + `AntigravityBackend` + `resolve_backend()` + `make_backend()` + `UnknownBackendError`
-- [ ] **T3.3** — Unit-test `cli_backend.py` (~20 tests; argv parity, parse_result by returncode + JSON shape, preflight env-var paths, resolve priority table); ≥ 85% coverage
-- [ ] **T3.4** — Refactor `SubprocessStageRunner` to delegate to a `CliBackend` strategy (new `default_backend` + `loaded_workflow` kwargs; argv / parse_result calls replace hardcoded block)
-- [ ] **T3.5** — Extend `Config` with `default_backend: str = "claude"` field reading `.atlas.toml [backend] default`; thread it + `loaded` through `_make_pipeline()`
-- [ ] **T3.6** — Integration tests — `agy` dispatch end-to-end (mocked subprocess), mixed-backend workflow, dev-pipeline-unaffected proof, `job.tailor_materials` now dispatches via `ClaudeCodeBackend`
-- [ ] **T3.7** — Document per-CLI auth + `agy` experimental status (`docs/3_guides/cli_backends.md`)
+- [x] **T3.1** — Sanity-check Phase 1 + Phase 2 seams (grep `StageSpec.backend`, `LoadedWorkflow.default_backend`, single `SubprocessStageRunner` for the `claude -p` path; confirm the `ShellStageRunner`/`shell=` wiring from the Phase 2 review is present and left intact; full-suite baseline = **193 passing**)
+- [x] **T3.2** — Author `src/atlas/cli_backend.py` — `CliBackend` Protocol + `ClaudeCodeBackend` + `AntigravityBackend` + `resolve_backend()` + `make_backend()` + `UnknownBackendError`
+- [x] **T3.3** — Unit-test `cli_backend.py` (~20 tests; argv parity, parse_result by returncode + JSON shape, preflight env-var paths, resolve priority table); ≥ 85% coverage
+- [x] **T3.4** — Refactor `SubprocessStageRunner` to delegate to a `CliBackend` strategy (new `default_backend` + `loaded_workflow` kwargs; argv / parse_result calls replace hardcoded block)
+- [x] **T3.5** — Extend `Config` with `default_backend: str = "claude"` field reading `.atlas.toml [backend] default`; thread it + `loaded` through `_make_pipeline()`
+- [x] **T3.6** — Integration tests — `agy` dispatch end-to-end (mocked subprocess), mixed-backend workflow, dev-pipeline-unaffected proof, `job.tailor_materials` now dispatches via `ClaudeCodeBackend`
+- [x] **T3.7** — Document per-CLI auth + `agy` experimental status (`docs/3_guides/cli_backends.md`)
 - [ ] **T3.8** — Manual smoke test against a real `agy` binary (off-CI; document result whether it succeeds or auth blocks)
-- [ ] **T3.9** — CI green: `ruff check` + `ruff format --check` + `mypy --strict src` (both with and without `--extra job`, per the Phase 2 review's dual-leg posture) + coverage gates (≥ 80% repo-wide, ≥ 85% on `cli_backend.py`). No new CI job needed; the `CONTENT_PIPELINE_TOKEN` secret is a Phase-2 open item, not a Phase-3 blocker.
-- [ ] **T3.10** — Update `STATUS.md`; flag `v2.2` tag (user-discretionary)
+- [x] **T3.9** — CI green: `ruff check` + `ruff format --check` + `mypy --strict src` (both with and without `--extra job`, per the Phase 2 review's dual-leg posture) + coverage gates (≥ 80% repo-wide, ≥ 85% on `cli_backend.py`). No new CI job needed; the `CONTENT_PIPELINE_TOKEN` secret is a Phase-2 open item, not a Phase-3 blocker.
+- [x] **T3.10** — Update `STATUS.md`; flag `v2.2` tag (user-discretionary)
 
 ## Exit criteria (TRD-v2 §14 Phase 3 + §13 #7–8, copied for tracking)
 
-- [ ] **§13 #7** — At least one stage dispatches to `AntigravityBackend` and produces a valid `StageOutcome` (mocked in CI; real dispatch in manual testing if auth allows)
-- [ ] **§13 #8** — Backend resolution: per-stage override > workflow default > config default > hard default, verified by test (`test_resolve_backend_priority_order`, T3.3)
-- [ ] **§14 exit #1** — Existing dev pipeline runs unchanged (`ClaudeCodeBackend` is the default; `test_dev_pipeline_unaffected_by_phase_3` asserts byte-identical argv, negative-asserts no `--bare` or `--output-format`)
-- [ ] **§14 exit #2** — A workflow YAML with `backend: agy` on one stage dispatches correctly (mocked) — `test_agy_dispatch_end_to_end_mocked` (T3.6)
-- [ ] **§14 exit #3** — Backend resolution order verified by test
-- [ ] **§14 exit #4** — `agy` auth failure produces a clear error, not a silent hang — `test_subprocess_runner_agy_missing_auth_returns_failure_no_subprocess` (T3.4); CLI surfaces a user-readable `agy_missing_auth_env` message
-- [ ] **NFR-5 / TRD-v2 §10** — `cli_backend.py` ≥ 85% coverage; full suite ≥ 80% (existing gate)
-- [ ] **NFR-7 / TRD-v2 §10** — `ruff check`, `ruff format --check`, `mypy --strict src` green
-- [ ] **FR-8 (regression safety)** — All Phase 1 + Phase 2 tests pass unchanged (post-review baseline **193 passing**, commit `53359e4`); `test_e2e_happy_path.py` passes unmodified; the `SHELL:`/`LIB:` job paths remain untouched
+- [x] **§13 #7** — At least one stage dispatches to `AntigravityBackend` and produces a valid `StageOutcome` (mocked in CI; real dispatch in manual testing if auth allows)
+- [x] **§13 #8** — Backend resolution: per-stage override > workflow default > config default > hard default, verified by test (`test_resolve_backend_priority_order`, T3.3)
+- [x] **§14 exit #1** — Existing dev pipeline runs unchanged (`ClaudeCodeBackend` is the default; `test_dev_pipeline_unaffected_by_phase_3` asserts byte-identical argv, negative-asserts no `--bare` or `--output-format`)
+- [x] **§14 exit #2** — A workflow YAML with `backend: agy` on one stage dispatches correctly (mocked) — `test_agy_dispatch_end_to_end_mocked` (T3.6)
+- [x] **§14 exit #3** — Backend resolution order verified by test
+- [x] **§14 exit #4** — `agy` auth failure produces a clear error, not a silent hang — `test_subprocess_runner_agy_missing_auth_returns_failure_no_subprocess` (T3.4); CLI surfaces a user-readable `agy_missing_auth_env` message
+- [x] **NFR-5 / TRD-v2 §10** — `cli_backend.py` ≥ 85% coverage (achieved 100%); full suite ≥ 80% (achieved 95%)
+- [x] **NFR-7 / TRD-v2 §10** — `ruff check`, `ruff format --check`, `mypy --strict src` green
+- [x] **FR-8 (regression safety)** — All Phase 1 + Phase 2 tests pass unchanged (post-review baseline **193 passing**, commit `53359e4`); `test_e2e_happy_path.py` passes unmodified; the `SHELL:`/`LIB:` job paths remain untouched
 
 ## Resolved decisions (see plan §12 / `context.md` Decisions table for full rationale)
 
@@ -108,7 +108,13 @@ tasks file all need updating.
 
 ## Implementation notes (post-hoc — filled in after work is done)
 
-_To be appended as Phase 3 lands. Track: final LoC counts for `cli_backend.py` and the
-`orchestrator.py` delta; coverage percentages achieved; whether T3.8's live `agy`
-run succeeded or auth blocked it; any of the seven Resolved Decisions that needed
-overriding in practice; final test count delta from Phase 2's baseline._
+**Completed 2026-06-30.**
+
+- `cli_backend.py`: 192 LoC (under the 200-line NFR-4 budget). 100% coverage.
+- `orchestrator.py` delta: ~40 net lines (hardcoded argv block + returncode branch replaced by `resolve_backend()` + `make_backend()` + `backend.preflight()` + `backend.build_argv()` + `backend.parse_result()`). Two new kwargs added to `__init__` (`default_backend`, `loaded_workflow`).
+- Coverage: 100% on `cli_backend.py`; 95% repo-wide (well above 80% gate).
+- Test delta: +46 tests (193 → 239). Breakdown: 34 unit (`test_cli_backend.py`), 5 runner (`test_phase4.py`), 3 config (`test_config.py`), 4 integration (`test_cli_backend_dispatch.py`).
+- All seven Resolved Decisions held as designed — no overrides needed in practice.
+- One implementation note: `StageSpec` constructor uses `index`, `span_kind`, `gate_label`, `gate_index` (not a `gate:` shorthand) — adjusted test helpers accordingly.
+- `test_job_workflow_tailor_materials_dispatches_via_claude_backend`: the `RAW:` tool string on `tailor_materials` is not in the plugin allow-list, so the test verifies backend resolution at the `resolve_backend()` call level rather than through a full `SubprocessStageRunner.run()` dispatch (it uses `command_overrides` to bypass the allow-list for the subprocess path). The `backend: claude` field is set in the YAML and correctly consumed by `resolve_backend()`.
+- T3.8 manual smoke test: **not yet attempted** (off-CI, requires live `agy` binary + `GEMINI_API_KEY`). Remains the only open task.

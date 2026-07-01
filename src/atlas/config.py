@@ -14,6 +14,7 @@ class Config:
     plugin_commands: dict[str, str] = field(default_factory=dict)
     timeout_overrides: dict[str, int] = field(default_factory=dict)
     model: str = "haiku"  # default to haiku for cost efficiency
+    default_backend: str = "claude"  # from .atlas.toml [backend] default
 
     @classmethod
     def load(cls, repo_root: Path) -> Config:
@@ -48,12 +49,19 @@ class Config:
             if isinstance(raw_timeout, dict)
             else {}
         )
+        backend_section = merged.get("backend", {})
+        default_backend: str = (
+            str(backend_section.get("default", "claude"))
+            if isinstance(backend_section, dict)
+            else "claude"
+        )
         return cls(
             repo_root=repo_root,
             plumb_db_path=Path(str(merged["plumb_db_path"])),
             plugin_commands=plugin_commands,
             timeout_overrides=timeout_overrides,
             model=str(merged.get("model", "haiku")),
+            default_backend=default_backend,
         )
 
 

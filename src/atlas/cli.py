@@ -100,6 +100,8 @@ def _make_pipeline(
         timeout_overrides=cfg.timeout_overrides,
         command_overrides=cfg.plugin_commands,
         model=cfg.model,
+        default_backend=cfg.default_backend,
+        loaded_workflow=loaded,
     )
     # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
     # CompositeStageRunner is always used so dev.yaml's plain plugin-command

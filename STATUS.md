@@ -1,9 +1,9 @@
 ---
 project: atlas
-status: v1.0 — T5.1 manual E2E complete, all 5 TRD criteria verified
-phase: v1 — COMPLETE
-last_updated: 2026-05-06
-next_gate: tag v1.0
+status: v2.2 — Phase 3 (CLI backend dispatch) complete
+phase: v2.2 — COMPLETE
+last_updated: 2026-06-30
+next_gate: tag v2.2 (user-discretionary)
 blocked_on: null
 ---
 
@@ -11,8 +11,10 @@ blocked_on: null
 
 ## Current
 
-**v1.0 is complete.** All five implementation phases done, all P0/P1/P2 findings
-closed, and T5.1 manual E2E passed. 119 tests pass at 92.15% coverage.
+**v2.2 (Phase 3) is complete.** CLI backend dispatch shipped: `CliBackend` Protocol,
+`ClaudeCodeBackend` (byte-identical to Phase 2 argv), `AntigravityBackend` (agy,
+auth fail-closed), 4-tier backend resolution, and `Config.default_backend` from
+`.atlas.toml`. 239 tests pass at 95% coverage.
 
 **T5.1 manual E2E results (2026-05-06):**
 - Target: throwaway Flask repo at `/tmp/flask-cache-e2e`
@@ -32,6 +34,17 @@ validated via tasks.md / process exit code. Install plumb to unlock durable DB
 writes — no atlas code changes needed.
 
 ## Recent (last 7 days)
+
+- **Phase 3 complete — CLI backend dispatch (v2.2)** (2026-06-30):
+  - `src/atlas/cli_backend.py` (new, 192 LoC) — `CliBackend` Protocol + `ClaudeCodeBackend` + `AntigravityBackend` + `resolve_backend()` + `make_backend()` + `UnknownBackendError`.
+  - `SubprocessStageRunner` refactored to delegate argv construction and result parsing to `CliBackend` strategy (~30 net lines changed in `orchestrator.py`).
+  - `Config.default_backend` field added (`.atlas.toml [backend] default`); threaded into `_make_pipeline()`.
+  - 4-tier backend resolution: per-stage YAML > workflow default > config > hard `"claude"`.
+  - `AntigravityBackend.preflight()` enforces `GEMINI_API_KEY`/`GOOGLE_API_KEY` presence before any subprocess — no silent browser-OAuth fallback (TRD-v2 §4 Security).
+  - `ClaudeCodeBackend` produces byte-identical argv to Phase 2's hardcoded path (FR-8 / Resolved Decisions #1, #2).
+  - 46 new tests (34 unit + 5 runner + 3 config + 4 integration); 239 total, 95% coverage, 100% on `cli_backend.py`.
+  - `docs/3_guides/cli_backends.md` added — per-CLI auth, 4-tier resolution, `agy` experimental status.
+  - T3.8 manual smoke test: pending (off-CI; requires `agy` binary + `GEMINI_API_KEY`).
 
 - **T5.1 manual E2E complete + Haiku default** (2026-05-06):
   - Full 7-stage pipeline ran end-to-end on throwaway Flask repo.
