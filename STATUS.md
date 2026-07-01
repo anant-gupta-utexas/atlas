@@ -1,7 +1,6 @@
 ---
 project: atlas
 status: v2.2 — Phase 3 (CLI backend dispatch) complete
-phase: v2.2 — COMPLETE
 last_updated: 2026-06-30
 next_gate: tag v2.2 (user-discretionary)
 blocked_on: null
@@ -11,129 +10,54 @@ blocked_on: null
 
 ## Current
 
-**v2.2 (Phase 3) is complete.** CLI backend dispatch shipped: `CliBackend` Protocol,
-`ClaudeCodeBackend` (byte-identical to Phase 2 argv), `AntigravityBackend` (agy,
-auth fail-closed), 4-tier backend resolution, and `Config.default_backend` from
-`.atlas.toml`. 239 tests pass at 95% coverage.
+**v2.2 (Phase 3) is complete.** 239 tests pass at 95% coverage.
 
-**T5.1 manual E2E results (2026-05-06):**
-- Target: throwaway Flask repo at `/tmp/flask-cache-e2e`
-- Task: `atlas run "add response-cache middleware" --auto-approve`
-- Model: `haiku` (new default; configurable via `.atlas.toml [model]`)
-- All 7 stages completed successfully (research → code_review)
-- All 5 TRD v1.0 acceptance criteria verified:
-  1. ✅ Run closed with `status='success'`; tasks.md all 7 boxes checked
-  2. ✅ 7 spans recorded in correct stage order
-  3. ✅ 6 user-signal scores (gates 0–5 all resolved)
-  4. ✅ `git log main` unchanged; code committed only to worktree branch
-  5. ✅ Routing fixture: 6/6 fixture tests pass, `_validate_routing_fixture()` clean
+Shipped in v2.2: `CliBackend` Protocol, `ClaudeCodeBackend`, `AntigravityBackend`, 4-tier backend resolution, `Config.default_backend` from `.atlas.toml [backend] default`.
 
-**Note on plumb integration:** plumb is not yet installed as a path dependency,
-so this run used PlumbIO stub mode. Span/score data was recorded in-memory and
-validated via tasks.md / process exit code. Install plumb to unlock durable DB
-writes — no atlas code changes needed.
+### YAML workflow engine (Phases 1–3, complete)
 
-## Recent (last 7 days)
+**Phase 3** — CLI backend dispatch. `CliBackend` Protocol extracted; `ClaudeCodeBackend` (byte-identical argv) and `AntigravityBackend` (`agy`, auth fail-closed on missing `GEMINI_API_KEY`) added. Backend resolved via 4-tier cascade: per-stage YAML > workflow default > `.atlas.toml` > hard `"claude"`. 239 tests, 95% coverage, 100% on `cli_backend.py`.
 
-- **Phase 3 complete — CLI backend dispatch (v2.2)** (2026-06-30):
-  - `src/atlas/cli_backend.py` (new, 192 LoC) — `CliBackend` Protocol + `ClaudeCodeBackend` + `AntigravityBackend` + `resolve_backend()` + `make_backend()` + `UnknownBackendError`.
-  - `SubprocessStageRunner` refactored to delegate argv construction and result parsing to `CliBackend` strategy (~30 net lines changed in `orchestrator.py`).
-  - `Config.default_backend` field added (`.atlas.toml [backend] default`); threaded into `_make_pipeline()`.
-  - 4-tier backend resolution: per-stage YAML > workflow default > config > hard `"claude"`.
-  - `AntigravityBackend.preflight()` enforces `GEMINI_API_KEY`/`GOOGLE_API_KEY` presence before any subprocess — no silent browser-OAuth fallback (TRD-v2 §4 Security).
-  - `ClaudeCodeBackend` produces byte-identical argv to Phase 2's hardcoded path (FR-8 / Resolved Decisions #1, #2).
-  - 46 new tests (34 unit + 5 runner + 3 config + 4 integration); 239 total, 95% coverage, 100% on `cli_backend.py`.
-  - `docs/3_guides/cli_backends.md` added — per-CLI auth, 4-tier resolution, `agy` experimental status.
-  - T3.8 manual smoke test: pending (off-CI; requires `agy` binary + `GEMINI_API_KEY`).
+**Phase 2** — `job` workflow (content-pipeline integration). `LIB:` tool-string convention added; `LibraryStageRunner` maps a closed registry to content-pipeline adapters (`ingest_postings`, `score_fit`). `job-cli.yaml` shipped as the dependency-free `RAW:`-only variant. Missing content-pipeline install fails fast and names `job-cli` as the alternative. Gate output rendered via `score_jobs_report.render_report()`. 220 tests.
 
-- **T5.1 manual E2E complete + Haiku default** (2026-05-06):
-  - Full 7-stage pipeline ran end-to-end on throwaway Flask repo.
-  - All 5 TRD v1.0 acceptance criteria verified (see Current section).
-  - Added `model` config field (default `"haiku"`) to `Config` and `SubprocessStageRunner`.
-  - `claude --model haiku` now passed to every stage subprocess; overrideable via `.atlas.toml [model]`.
+**Phase 1** — core loader and `StageSpec` data model. `dev.yaml` extracted from hardcoded `STAGES`; `workflow_loader.py` added; `stages.py` switched from `StrEnum` to dataclass-per-stage. `_DEFAULT_TIMEOUT_S` generalized into per-stage `timeout_s` with 4-tier resolution. Routing fixture scoped to `dev`-only. 193 tests.
 
-- **T5.1 closure fixes complete** (2026-05-06):
-  - P0: Resume child-run handoff with parent_run_id tracking and active run id propagation
-  - P1: Original task text persistence (base64 in tasks.md) and rehydration on resume
-  - P1: Durable rejection example persistence via plumb._storage_writer.write_example()
-  - P2: Hook idempotency dedupe on (run_id, commit_sha, metric)
-  - P2: Real latency_ms measurement (time.monotonic) in Pipeline.step()
-  - P2: Same-process context drift fix via Pipeline._latest_ctx and run_to_completion() update
-  - P2: Rationale threading to plumb add_score(rationale=...)
-  - Added 8 comprehensive unit tests (test_t51_closure.py); 119 total tests pass at 92.13% coverage.
-  - Commit: 0546620
+### Pipeline (v1, complete)
 
-- **Phase 5 complete** (2026-05-01):
-  - `src/atlas/config.py` — TOML loader with user/repo merge.
-  - `src/atlas/cli.py` — Typer CLI (`atlas run`, `atlas resume`, `atlas status`, `atlas hook`).
-  - `src/atlas/post_commit_hook.py` — git hook that writes the `gate_commit` score.
-  - `tests/e2e/test_e2e_happy_path.py` — 3 automated E2E tests (stub plugins) covering all 5 TRD success criteria.
-  - `.github/workflows/ci.yml` — 4-job CI: unit+integration (coverage ≥80%), lint, mypy, E2E.
-  - `pyproject.toml` updated to v1.0.0 with `atlas` entry point, dev extras, coverage/ruff config.
+**Phase 5 + T5.1 closure** — CLI (`atlas run`, `atlas resume`, `atlas status`, `atlas hook`), TOML config loader, post-commit hook. Closure fixes: parent_run_id handoff, original task text persistence, hook idempotency, real latency_ms measurement. 119 tests at 92% coverage. Manual E2E (2026-05-06): full 7-stage pipeline on throwaway Flask repo, all 5 TRD v1.0 acceptance criteria verified (PlumbIO stub mode).
 
-- **Phase 4 complete** (2026-05-01):
-  - `src/atlas/orchestrator.py` — `SubprocessStageRunner` (list-form, per-stage timeouts, capture_output), `ClickPrompter` (re-prompt 3×, 4 KB clamp, `AbortedError`), allow-list check.
-  - `src/atlas/plugin_resolver.py` — 7-tool mapping table + `resolve()` function.
-  - `tests/unit/test_phase4.py` — 18 tests covering all §7 error scenarios.
+**Phase 4** — `SubprocessStageRunner` (list-form argv, per-stage timeouts, capture_output), `ClickPrompter` (3× re-prompt, 4 KB clamp, `AbortedError`), `plugin_resolver.py` (7-tool mapping table). 18 new tests.
 
-- **Phase 3 complete** (2026-05-01):
-  - `src/atlas/worktree.py` — `WorktreeManager` (`create`, `merge_back`, `cleanup`), path containment, dirty-repo guard.
-  - Stage 5 hand-off: Pipeline creates worktree before invoking code_gen; no main-branch commits.
-  - `tests/integration/test_main_branch_isolation.py` — 2 real-git-repo tests.
-  - `tests/unit/test_worktree.py` — 15 unit tests (subprocess mocks).
+**Phase 3** — `WorktreeManager` (`create`, `merge_back`, `cleanup`), path containment, dirty-repo guard. Stage 5 hand-off creates worktree before `code_gen`; no main-branch commits.
 
-- **Phases 1 + 2 complete** (2026-04-27 – 2026-05-01):
-  - `src/atlas/stages.py`, `src/atlas/orchestrator.py`, `src/atlas/state.py`, `src/atlas/plumb_io.py`.
-  - 34 unit tests for Phase 1 state machine; plumb wrapper with stub/real mode.
+**Phases 1–2** — `stages.py`, `orchestrator.py` (7-stage state machine, 6 human gates), `state.py`, `plumb_io.py` (stub/real mode). 34 unit tests.
 
-## v1 module coverage
+## Module coverage
 
-| Module | File | Est. LoC | Status |
-| --- | --- | --- | --- |
-| CLI entry point | `src/atlas/cli.py` | 90 | ✅ Done |
-| Stage table + enums | `src/atlas/stages.py` | 47 | ✅ Done |
-| State machine | `src/atlas/orchestrator.py` | 446 | ✅ Done |
-| State store | `src/atlas/state.py` | 155 | ✅ Done |
-| plumb wrapper | `src/atlas/plumb_io.py` | 204 | ✅ Done |
-| Worktree manager | `src/atlas/worktree.py` | 186 | ✅ Done |
-| Plugin resolver | `src/atlas/plugin_resolver.py` | 35 | ✅ Done |
-| TOML config | `src/atlas/config.py` | 68 | ✅ Done |
-| Post-commit hook | `src/atlas/post_commit_hook.py` | 100 | ✅ Done |
-| Routing fixture | `tests/fixtures/routing_ground_truth.json` | — | ✅ Done |
-| CI workflow | `.github/workflows/ci.yml` | — | ✅ Done |
+| Module | File | Status |
+| --- | --- | --- |
+| CLI entry point | `src/atlas/cli.py` | ✅ |
+| Stage table + enums | `src/atlas/stages.py` | ✅ |
+| State machine | `src/atlas/orchestrator.py` | ✅ |
+| State store | `src/atlas/state.py` | ✅ |
+| plumb wrapper | `src/atlas/plumb_io.py` | ✅ |
+| Worktree manager | `src/atlas/worktree.py` | ✅ |
+| Plugin resolver | `src/atlas/plugin_resolver.py` | ✅ |
+| TOML config | `src/atlas/config.py` | ✅ |
+| Post-commit hook | `src/atlas/post_commit_hook.py` | ✅ |
+| CLI backend dispatch | `src/atlas/cli_backend.py` | ✅ |
+| YAML workflow loader | `src/atlas/workflow_loader.py` | ✅ |
 
 ## Next
 
-- **Tag `v1.0`** — all criteria met; cut the release tag.
-- **Install plumb** as a path dependency to unlock durable span/score writes in real mode.
-- **v1.1 backlog**: log rotation, HTTP shell boundary, plumb v2 `add_example` on RunHandle.
-
-### Phase 2 — YAML-driven workflows (analysis, deferred)
-
-See [`docs/1_product_and_research/yaml-driven-workflows-analysis.md`](docs/1_product_and_research/yaml-driven-workflows-analysis.md)
-§7 (added 2026-06-07) for the full prioritization. Net ordering:
-
-1. **Support near-term library-consumers with no atlas code change.** atlas is
-   reused as a library (`SubprocessStageRunner`, `WorktreeManager`, `Pipeline`,
-   `write_example`-on-rejection at `orchestrator.py:319`); the workflow engine
-   is not on the critical path.
-2. **Then author one worked-example non-dev workflow YAML** (analysis §3.5) —
-   the cheap go/no-go test before any refactor.
-3. **Only if that feels natural**, commit YAML-driven workflows to atlas v2 as
-   one deliberate scope decision (enum-loosening + loader + per-stage `isolate`
-   + the "300 LoC / no registry" vow relaxation, taken together).
-
-The measurement-layer dependency is settled: the closed `spans.kind` set needs
-**no** measurement-layer change (validate/map at the atlas loader); per-workflow
-provenance should ride a proposed `spans.attributes` JSON column rather than a
-dedicated `runs.workflow` add.
+- Tag `v2.2` — all criteria met.
+- Install plumb as a path dependency to unlock durable span/score writes.
+- v1.1 backlog: log rotation, HTTP shell boundary, plumb v2 `add_example` on RunHandle.
+- T3.8 manual smoke test: pending (requires `agy` binary + `GEMINI_API_KEY`).
 
 ## Pointers
 
 - PRD: `docs/1_product_and_research/PRD.md`
 - TRD: `docs/2_architecture/TRD.md`
 - SDD: `docs/2_architecture/system_design.md`
-- **TRS (pipeline)**: `dev/active/atlas-pipeline-trs/`
-  - [`atlas-pipeline-trs-plan.md`](dev/active/atlas-pipeline-trs/atlas-pipeline-trs-plan.md) — design contract
-  - [`atlas-pipeline-trs-phases.md`](dev/active/atlas-pipeline-trs/atlas-pipeline-trs-phases.md) — 5 phases + decisions
-  - [`atlas-pipeline-trs-tasks.md`](dev/active/atlas-pipeline-trs/atlas-pipeline-trs-tasks.md) — progress checklist
+- YAML workflow engine: `docs/3_guides/yaml_workflow_engine.md`

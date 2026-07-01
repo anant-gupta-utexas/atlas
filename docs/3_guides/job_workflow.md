@@ -9,7 +9,7 @@ Atlas ships two built-in job-search workflows alongside the default `dev` pipeli
 | Variant | Command | How it works | Requires |
 |---|---|---|---|
 | `job` | `atlas run "<task>" --workflow job` | `ingest_postings` and `score_fit` call content-pipeline **in-process** via `LibraryStageRunner` (Mode A). Returns structured results; `gate_shortlist` shows a rendered shortlist report. | `content-pipeline` installed (`uv sync --extra job`) |
-| `job_cli` | `atlas run "<task>" --workflow job_cli` | All four stages dispatch via **subprocess** (`RAW:` → `SubprocessStageRunner`). `content-pipeline` CLI must be on `PATH`, but the Python package need not be installed in atlas's environment (Mode B). | `content-pipeline` console script on `PATH` |
+| `job_cli` | `atlas run "<task>" --workflow job_cli` | `ingest_postings` and `score_fit` dispatch via `SHELL:` → `ShellStageRunner` directly to the `content-pipeline` CLI. `tailor_materials` and `emit_package` use `RAW:` → `claude -p`. `content-pipeline` CLI must be on `PATH`, but the Python package need not be pip-installed in atlas's environment (Mode B). | `content-pipeline` console script on `PATH` |
 
 Both variants produce a 4-span run (`ingest_postings`, `score_fit`, `tailor_materials`, `emit_package`) with 3 human gates.
 
@@ -81,7 +81,7 @@ Both variants share the same stage structure, gates, and `span_kind`s:
 
 `tailor_materials` sets `timeout_s: 1800` because it's a `RAW:`/subprocess stage that can run long. `ingest_postings` and `score_fit` in `job.yaml` deliberately omit `timeout_s` — their effective timeout comes from content-pipeline's own HTTP/LLM client settings, not from atlas's subprocess mechanism.
 
-In `job_cli.yaml`, `score_fit` also sets `timeout_s: 1800` because it becomes a `RAW:` subprocess stage.
+In `job_cli.yaml`, `score_fit` also sets `timeout_s: 1800` because it becomes a `SHELL:` subprocess stage dispatching the `content-pipeline score-jobs --pending` command directly. `timeout_s` is honored by `ShellStageRunner` (unlike `LIB:` stages where it is inert).
 
 ---
 

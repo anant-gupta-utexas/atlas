@@ -138,11 +138,14 @@ unchecked box — no human re-briefing.
 
 | What you need | Where |
 |---------------|-------|
-| Product requirements + scope | [PRD](docs/1_product_and_research/PRD.md) |
-| System design + span tree | [System Design](docs/2_architecture/system_design.md) |
-| Technical requirements | [TRD](docs/2_architecture/TRD.md) |
-| Dev environment setup | [Getting Started](docs/3_guides/getting_started.md) |
-| Testing strategy | [Testing](docs/4_testing/index.md) |
+| All docs (entry point) | [docs/README.md](docs/README.md) |
+| YAML workflow engine — schema, runners, phases | [docs/3_guides/yaml_workflow_engine.md](docs/3_guides/yaml_workflow_engine.md) |
+| Job-search workflow (`job` / `job_cli`) | [docs/3_guides/job_workflow.md](docs/3_guides/job_workflow.md) |
+| CLI backend dispatch (claude, agy) | [docs/3_guides/cli_backends.md](docs/3_guides/cli_backends.md) |
+| System design + span tree | [docs/2_architecture/system_design.md](docs/2_architecture/system_design.md) |
+| v2 technical requirements | [docs/2_architecture/TRD-v2.md](docs/2_architecture/TRD-v2.md) |
+| Dev environment setup | [docs/3_guides/getting_started.md](docs/3_guides/getting_started.md) |
+| Testing strategy (239 tests) | [docs/4_testing/index.md](docs/4_testing/index.md) |
 | Repo conventions | [CLAUDE.md](CLAUDE.md) |
 
 ---

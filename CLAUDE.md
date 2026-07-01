@@ -21,12 +21,17 @@ atlas run "add response-cache middleware to this Flask repo"
 
 ## Documentation Map
 
-- **[README.md](README.md)** — v1 deliverables, status, quick start
-- **[docs/1_product_and_research/PRD.md](docs/1_product_and_research/PRD.md)** — v1 Product Requirements Document (MVP scope, user stories, gates, success metrics)
+- **[docs/README.md](docs/README.md)** — Hub MOC: top-level entry point linking to all domain docs
+- **[docs/2_architecture/TRD-v2.md](docs/2_architecture/TRD-v2.md)** — v2 Technical Requirements (YAML engine, multi-workflow, backend dispatch)
+- **[docs/2_architecture/TRD.md](docs/2_architecture/TRD.md)** — v1 Technical Requirements (NFRs, integrations, data model — carry forward)
 - **[docs/2_architecture/system_design.md](docs/2_architecture/system_design.md)** — 7-stage state machine, span tree shape, worktree boundary
-- **[docs/2_architecture/TRD.md](docs/2_architecture/TRD.md)** — Technical Requirements (NFRs, integrations, data model)
+- **[docs/3_guides/yaml_workflow_engine.md](docs/3_guides/yaml_workflow_engine.md)** — YAML schema reference, tool-string conventions, runner types, phase history
+- **[docs/3_guides/core_concepts.md](docs/3_guides/core_concepts.md)** — Pipeline, gates, state file, runner types, plumb integration
 - **[docs/3_guides/getting_started.md](docs/3_guides/getting_started.md)** — Dev environment setup
-- **[docs/4_testing/index.md](docs/4_testing/index.md)** — Testing strategy and fixtures
+- **[docs/3_guides/job_workflow.md](docs/3_guides/job_workflow.md)** — Job-search workflow (job / job_cli variants)
+- **[docs/3_guides/cli_backends.md](docs/3_guides/cli_backends.md)** — CLI backend dispatch (claude, agy), auth, error types
+- **[docs/4_testing/index.md](docs/4_testing/index.md)** — Testing strategy, 239 tests, CI configuration
+- **[docs/1_product_and_research/PRD.md](docs/1_product_and_research/PRD.md)** — v1 Product Requirements Document
 
 ## Project Structure
 
