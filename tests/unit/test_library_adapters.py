@@ -84,38 +84,37 @@ def _install_score_jobs_stubs(
     access_failures_cls = MagicMock(return_value=access_failures_instance)
 
     modules = {
-        "src": _stub_module("src"),
-        "src.application": _stub_module("src.application"),
-        "src.application.use_cases": _stub_module("src.application.use_cases"),
-        "src.application.use_cases.score_jobs": _stub_module(
-            "src.application.use_cases.score_jobs", ScoreJobsUseCase=use_case_cls
+        "application": _stub_module("application"),
+        "application.use_cases": _stub_module("application.use_cases"),
+        "application.use_cases.score_jobs": _stub_module(
+            "application.use_cases.score_jobs", ScoreJobsUseCase=use_case_cls
         ),
-        "src.infrastructure": _stub_module("src.infrastructure"),
-        "src.infrastructure.cli": _stub_module("src.infrastructure.cli"),
-        "src.infrastructure.cli.cmd_score_jobs": _stub_module(
-            "src.infrastructure.cli.cmd_score_jobs",
+        "infrastructure": _stub_module("infrastructure"),
+        "infrastructure.cli": _stub_module("infrastructure.cli"),
+        "infrastructure.cli.cmd_score_jobs": _stub_module(
+            "infrastructure.cli.cmd_score_jobs",
             _build_llm_client=MagicMock(return_value=MagicMock()),
             _load_profile_text=MagicMock(return_value="profile text"),
             _load_prompt=MagicMock(return_value="prompt text"),
         ),
-        "src.infrastructure.cli.score_jobs_report": _stub_module(
-            "src.infrastructure.cli.score_jobs_report",
+        "infrastructure.cli.score_jobs_report": _stub_module(
+            "infrastructure.cli.score_jobs_report",
             render_report=MagicMock(return_value=report_text),
         ),
-        "src.infrastructure.config": _stub_module("src.infrastructure.config"),
-        "src.infrastructure.config.settings": _stub_module(
-            "src.infrastructure.config.settings", Settings=settings_cls
+        "infrastructure.config": _stub_module("infrastructure.config"),
+        "infrastructure.config.settings": _stub_module(
+            "infrastructure.config.settings", Settings=settings_cls
         ),
-        "src.infrastructure.storage": _stub_module("src.infrastructure.storage"),
-        "src.infrastructure.storage.access_failures_log": _stub_module(
-            "src.infrastructure.storage.access_failures_log",
+        "infrastructure.storage": _stub_module("infrastructure.storage"),
+        "infrastructure.storage.access_failures_log": _stub_module(
+            "infrastructure.storage.access_failures_log",
             AccessFailuresLog=access_failures_cls,
         ),
-        "src.infrastructure.storage.archive": _stub_module(
-            "src.infrastructure.storage.archive", FilesystemArchive=MagicMock()
+        "infrastructure.storage.archive": _stub_module(
+            "infrastructure.storage.archive", FilesystemArchive=MagicMock()
         ),
-        "src.infrastructure.storage.meta_store": _stub_module(
-            "src.infrastructure.storage.meta_store", CapturesMetaStore=meta_store_cls
+        "infrastructure.storage.meta_store": _stub_module(
+            "infrastructure.storage.meta_store", CapturesMetaStore=meta_store_cls
         ),
     }
     return modules
@@ -196,42 +195,41 @@ def _install_capture_stubs(*, run_all_results: list[MagicMock]) -> dict[str, Mod
     loader_cls = MagicMock(return_value=loader_instance)
 
     modules = {
-        "src": _stub_module("src"),
-        "src.application": _stub_module("src.application"),
-        "src.application.dispatcher": _stub_module(
-            "src.application.dispatcher", CrawlerDispatcher=dispatcher_cls
+        "application": _stub_module("application"),
+        "application.dispatcher": _stub_module(
+            "application.dispatcher", CrawlerDispatcher=dispatcher_cls
         ),
-        "src.application.use_cases": _stub_module("src.application.use_cases"),
-        "src.application.use_cases.capture": _stub_module(
-            "src.application.use_cases.capture", CaptureUseCase=use_case_cls
+        "application.use_cases": _stub_module("application.use_cases"),
+        "application.use_cases.capture": _stub_module(
+            "application.use_cases.capture", CaptureUseCase=use_case_cls
         ),
-        "src.infrastructure": _stub_module("src.infrastructure"),
-        "src.infrastructure.config": _stub_module("src.infrastructure.config"),
-        "src.infrastructure.config.loader": _stub_module(
-            "src.infrastructure.config.loader", ConfigLoader=loader_cls
+        "infrastructure": _stub_module("infrastructure"),
+        "infrastructure.config": _stub_module("infrastructure.config"),
+        "infrastructure.config.loader": _stub_module(
+            "infrastructure.config.loader", ConfigLoader=loader_cls
         ),
-        "src.infrastructure.config.settings": _stub_module(
-            "src.infrastructure.config.settings", Settings=settings_cls
+        "infrastructure.config.settings": _stub_module(
+            "infrastructure.config.settings", Settings=settings_cls
         ),
-        "src.infrastructure.scrapers": _stub_module("src.infrastructure.scrapers"),
-        "src.infrastructure.scrapers.ats_boards": _stub_module(
-            "src.infrastructure.scrapers.ats_boards", AtsBoardScraper=MagicMock()
+        "infrastructure.scrapers": _stub_module("infrastructure.scrapers"),
+        "infrastructure.scrapers.ats_boards": _stub_module(
+            "infrastructure.scrapers.ats_boards", AtsBoardScraper=MagicMock()
         ),
-        "src.infrastructure.scrapers.generic": _stub_module(
-            "src.infrastructure.scrapers.generic", GenericScraper=MagicMock()
+        "infrastructure.scrapers.generic": _stub_module(
+            "infrastructure.scrapers.generic", GenericScraper=MagicMock()
         ),
-        "src.infrastructure.scrapers.rss": _stub_module(
-            "src.infrastructure.scrapers.rss", RssScraper=MagicMock()
+        "infrastructure.scrapers.rss": _stub_module(
+            "infrastructure.scrapers.rss", RssScraper=MagicMock()
         ),
-        "src.infrastructure.storage": _stub_module("src.infrastructure.storage"),
-        "src.infrastructure.storage.archive": _stub_module(
-            "src.infrastructure.storage.archive", FilesystemArchive=MagicMock()
+        "infrastructure.storage": _stub_module("infrastructure.storage"),
+        "infrastructure.storage.archive": _stub_module(
+            "infrastructure.storage.archive", FilesystemArchive=MagicMock()
         ),
-        "src.infrastructure.storage.captures_md": _stub_module(
-            "src.infrastructure.storage.captures_md", CapturesMdAppender=MagicMock()
+        "infrastructure.storage.captures_md": _stub_module(
+            "infrastructure.storage.captures_md", CapturesMdAppender=MagicMock()
         ),
-        "src.infrastructure.storage.meta_store": _stub_module(
-            "src.infrastructure.storage.meta_store", CapturesMetaStore=MagicMock()
+        "infrastructure.storage.meta_store": _stub_module(
+            "infrastructure.storage.meta_store", CapturesMetaStore=MagicMock()
         ),
     }
     return modules

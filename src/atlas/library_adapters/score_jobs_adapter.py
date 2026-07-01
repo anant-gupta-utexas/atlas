@@ -1,7 +1,8 @@
 """Adapter for the content_pipeline.score_jobs LIB: stage.
 
 Lazily imports content-pipeline at call time (NFR-3) — no module-level
-``from src....`` import anywhere in this file.
+``from application....`` / ``from infrastructure....`` import anywhere in
+this file.
 """
 
 from __future__ import annotations
@@ -12,19 +13,22 @@ from atlas.stages import StageSpec
 
 def invoke(*, ctx: RunContext, stage: StageSpec) -> StageOutcome:
     """Construct ScoreJobsUseCase from content-pipeline Settings and run_pending()."""
-    from src.application.use_cases.score_jobs import ScoreJobsUseCase
-    from src.infrastructure.cli.cmd_score_jobs import (
+    from application.use_cases.score_jobs import ScoreJobsUseCase
+    from infrastructure.cli.cmd_score_jobs import (
         _build_llm_client,
         _load_profile_text,
         _load_prompt,
     )
-    from src.infrastructure.cli.score_jobs_report import render_report
-    from src.infrastructure.config.settings import Settings
-    from src.infrastructure.storage.access_failures_log import AccessFailuresLog
-    from src.infrastructure.storage.archive import FilesystemArchive
-    from src.infrastructure.storage.meta_store import CapturesMetaStore
+    from infrastructure.cli.score_jobs_report import render_report
+    from infrastructure.config.settings import Settings
+    from infrastructure.storage.access_failures_log import AccessFailuresLog
+    from infrastructure.storage.archive import FilesystemArchive
+    from infrastructure.storage.meta_store import CapturesMetaStore
 
-    settings = Settings()  # reads content-pipeline's own env/config, unrelated to .atlas.toml
+    # Settings is a pydantic BaseSettings — required fields are populated from
+    # .env/environment at runtime, so the no-arg call is correct despite mypy's
+    # call-arg complaint (only visible when the job extra is installed).
+    settings = Settings()  # type: ignore[call-arg]  # reads content-pipeline's own env/config
     prompt_text = _load_prompt(settings.score_jobs_prompt_path)
     profile_text = _load_profile_text(settings.job_profile_path)
     llm_client = _build_llm_client(settings)

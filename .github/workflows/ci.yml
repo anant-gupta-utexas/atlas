@@ -52,42 +52,70 @@ jobs:
           name: coverage-report
           path: .coverage
 
-  # T2.9: Job-extra leg — runs the full test suite with content-pipeline
-  # installed as the job optional extra.  Requires content-pipeline checked
-  # out as a sibling at ../content-pipeline; this job is skipped unless a
-  # content-pipeline repo secret or path is available.
+  # T2.9: Job-extra leg — runs the suite with content-pipeline installed as the
+  # `job` optional extra, so the real LIB: adapter import path is exercised
+  # (tests/integration/test_job_adapters_real_import.py). This is the CI signal
+  # that catches a content-pipeline API/packaging mismatch that _import_adapter-
+  # patched tests cannot.
   #
-  # To enable: check out content-pipeline in CI using an actions/checkout step
-  # targeting your private content-pipeline repo, then uncomment the job.
-  #
-  # test-job-extra:
-  #   name: Test (job extra, Python 3.13)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Check out plumb
-  #       uses: actions/checkout@v4
-  #       with:
-  #         repository: anant-gupta-utexas/plumb
-  #         ref: v1.0.1
-  #         path: plumb
-  #     - name: Symlink plumb to ../plumb
-  #       run: ln -s "$GITHUB_WORKSPACE/plumb" "$GITHUB_WORKSPACE/../plumb"
-  #     - name: Check out content-pipeline
-  #       uses: actions/checkout@v4
-  #       with:
-  #         repository: <org>/content-pipeline   # replace with real repo path
-  #         path: content-pipeline
-  #     - name: Symlink content-pipeline to ../content-pipeline
-  #       run: ln -s "$GITHUB_WORKSPACE/content-pipeline" "$GITHUB_WORKSPACE/../content-pipeline"
-  #     - name: Install uv
-  #       uses: astral-sh/setup-uv@v4
-  #       with:
-  #         python-version: "3.13"
-  #     - name: Install dependencies with job extra
-  #       run: uv sync --extra dev --extra job
-  #     - name: Run full test suite
-  #       run: uv run pytest --cov=src/atlas --cov-fail-under=80 -v
+  # content-pipeline is private, so checkout needs a PAT with read access stored
+  # as the CONTENT_PIPELINE_TOKEN secret. The job is guarded on that secret
+  # being present, so forks / secret-less contexts skip it cleanly rather than
+  # failing on an unauthenticated checkout.
+  test-job-extra:
+    name: Test (job extra, Python 3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check availability of content-pipeline token
+        id: gate
+        run: |
+          if [ -n "${{ secrets.CONTENT_PIPELINE_TOKEN }}" ]; then
+            echo "have_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_token=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CONTENT_PIPELINE_TOKEN not set — skipping job-extra leg."
+          fi
+
+      - name: Check out plumb
+        if: steps.gate.outputs.have_token == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: anant-gupta-utexas/plumb
+          ref: v1.0.1
+          path: plumb
+
+      - name: Symlink plumb to ../plumb
+        if: steps.gate.outputs.have_token == 'true'
+        run: ln -s "$GITHUB_WORKSPACE/plumb" "$GITHUB_WORKSPACE/../plumb"
+
+      - name: Check out content-pipeline
+        if: steps.gate.outputs.have_token == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: anant-gupta-utexas/content-pipeline
+          ref: main
+          token: ${{ secrets.CONTENT_PIPELINE_TOKEN }}
+          path: content-pipeline
+
+      - name: Symlink content-pipeline to ../content-pipeline
+        if: steps.gate.outputs.have_token == 'true'
+        run: ln -s "$GITHUB_WORKSPACE/content-pipeline" "$GITHUB_WORKSPACE/../content-pipeline"
+
+      - name: Install uv
+        if: steps.gate.outputs.have_token == 'true'
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies with job extra
+        if: steps.gate.outputs.have_token == 'true'
+        run: uv sync --extra dev --extra job
+
+      - name: Run suite with job extra (real LIB: adapter import path)
+        if: steps.gate.outputs.have_token == 'true'
+        run: uv run pytest --cov=src/atlas --cov-fail-under=80 -v
 
   lint:
     name: Lint + Format

@@ -26,6 +26,7 @@ from atlas.orchestrator import (
     SubprocessStageRunner,
 )
 from atlas.plumb_io import PlumbIO
+from atlas.shell_runner import ShellStageRunner
 from atlas.stages import StageSpec
 from atlas.state import StateStore
 from atlas.workflow_loader import (
@@ -106,7 +107,11 @@ def _make_pipeline(
     library: LibraryStageRunner | None = None
     if any(s.tool.startswith("LIB:") for s in loaded.stages):
         library = LibraryStageRunner()
-    composite = CompositeStageRunner(default=default_runner, library=library)
+    # ShellStageRunner handles SHELL: stages (direct CLI dispatch, e.g. job_cli).
+    shell: ShellStageRunner | None = None
+    if any(s.tool.startswith("SHELL:") for s in loaded.stages):
+        shell = ShellStageRunner(timeout_overrides=cfg.timeout_overrides)
+    composite = CompositeStageRunner(default=default_runner, library=library, shell=shell)
     recorder = _LastOutcomeRunner(composite)
     prompter: ClickPrompter | AutoPrompter = AutoPrompter() if auto_approve else ClickPrompter()
     pipeline = Pipeline(
@@ -124,14 +129,11 @@ def _make_pipeline(
 
 def _emit_content_pipeline_hint(recorder: _LastOutcomeRunner) -> None:
     """If the last stage failed with content_pipeline_not_installed, echo the fix hint."""
-    if (
-        recorder.last is not None
-        and recorder.last.error_type == "content_pipeline_not_installed"
-    ):
+    if recorder.last is not None and recorder.last.error_type == "content_pipeline_not_installed":
         typer.echo(
             "\ncontent-pipeline is not installed.\n"
             "  Install it:  uv sync --extra job  OR  pip install -e ../content-pipeline\n"
-            "  Dependency-free alternative: atlas run \"<task>\" --workflow job_cli",
+            '  Dependency-free alternative: atlas run "<task>" --workflow job_cli',
             err=True,
         )
 

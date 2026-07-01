@@ -4,13 +4,13 @@ default_backend: claude
 stages:
   - name: ingest_postings
     span_kind: tool
-    tool: "RAW:content-pipeline capture --source job-boards"
+    tool: "SHELL:content-pipeline capture --source job-boards"
     gate: null
     isolate: false
 
   - name: score_fit
     span_kind: verify
-    tool: "RAW:content-pipeline score-jobs --pending"
+    tool: "SHELL:content-pipeline score-jobs --pending"
     gate: gate_shortlist
     isolate: false
     timeout_s: 1800

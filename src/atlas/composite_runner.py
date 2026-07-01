@@ -22,9 +22,16 @@ class CompositeStageRunner:
     LIB: prefix; plugin_resolver.resolve() still owns them).
     """
 
-    def __init__(self, *, default: StageRunner, library: StageRunner | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        default: StageRunner,
+        library: StageRunner | None = None,
+        shell: StageRunner | None = None,
+    ) -> None:
         self._default = default
         self._library = library
+        self._shell = shell
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
         if stage.tool.startswith("LIB:"):
@@ -37,4 +44,14 @@ class CompositeStageRunner:
                     error_type="library_runner_unavailable",
                 )
             return self._library.run(ctx=ctx, stage=stage)
+        if stage.tool.startswith("SHELL:"):
+            if self._shell is None:
+                return StageOutcome(
+                    stage=stage,
+                    span_id="",
+                    status="failure",
+                    output_text="",
+                    error_type="shell_runner_unavailable",
+                )
+            return self._shell.run(ctx=ctx, stage=stage)
         return self._default.run(ctx=ctx, stage=stage)  # RAW: and plugin-command stages

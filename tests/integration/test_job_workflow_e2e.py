@@ -16,8 +16,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from atlas.composite_runner import CompositeStageRunner
 from atlas.library_runner import LibraryStageRunner
 from atlas.orchestrator import (
@@ -95,8 +93,14 @@ def _make_job_cli_pipeline(tmp_path: Path, *, plumb: PlumbIO | None = None) -> P
     plumb = plumb or PlumbIO(real=False)
     state = StateStore(tmp_path)
     stages = load_workflow_file(_JOB_CLI_YAML).stages
-    # job_cli.yaml has only RAW: stages — no LibraryStageRunner needed.
-    composite = CompositeStageRunner(default=_FakeSubprocessRunner(), library=None)
+    # job_cli.yaml has SHELL: (content-pipeline CLI) and RAW: (claude) stages, no
+    # LIB: stages. The _FakeSubprocessRunner stands in for BOTH the default
+    # (RAW:→claude) and shell (SHELL:→content-pipeline) runners here so this
+    # plumbing test spawns no real process; a real content-pipeline subprocess
+    # is exercised separately in test_shell_runner.py.
+    composite = CompositeStageRunner(
+        default=_FakeSubprocessRunner(), library=None, shell=_FakeSubprocessRunner()
+    )
     return Pipeline(
         repo_root=tmp_path,
         state=state,
@@ -198,20 +202,29 @@ def test_job_and_dev_coexist_in_same_db(tmp_path: Path) -> None:
 def test_job_workflow_content_pipeline_not_installed_fails_cleanly(tmp_path: Path) -> None:
     """When content-pipeline is unimportable, ingest_postings fails cleanly.
 
-    The outcome carries error_type 'content_pipeline_not_installed' and
-    output_text that names job_cli as the dependency-free alternative.
-    Uses pipeline.step() so we can inspect the outcome directly; step()
-    records the failure span but does NOT delete current-run (that is
-    run_to_completion()'s job on failure close — expected here).
+    content-pipeline imports are function-local inside the adapter body, so a
+    genuinely-missing content-pipeline surfaces as an ImportError raised there.
+    The runner classifies an ImportError naming a content-pipeline package as
+    'content_pipeline_not_installed' with output_text that names job_cli as the
+    dependency-free alternative.  Uses pipeline.step() so we can inspect the
+    outcome directly; step() records the failure span but does NOT delete
+    current-run (that is run_to_completion()'s job on failure close).
     """
+    import builtins
+
     plumb = PlumbIO(real=False)
     pipeline = _make_job_pipeline(tmp_path, plumb=plumb)
 
-    def _raise_import(dotted_path: str) -> None:
-        raise ImportError(f"simulated missing content-pipeline: {dotted_path}")
+    real_import = builtins.__import__
+
+    def _fake_import(name: str, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        # Simulate content-pipeline absent: any of its top-level packages raises.
+        if name.split(".")[0] in ("application", "infrastructure", "domain"):
+            raise ImportError(f"No module named {name!r}", name=name)
+        return real_import(name, *args, **kwargs)
 
     ctx = pipeline.start(task="find swe", slug="find-swe")
-    with patch("atlas.library_runner._import_adapter", side_effect=_raise_import):
+    with patch("builtins.__import__", side_effect=_fake_import):
         outcome = pipeline.step(ctx)
 
     assert outcome is not None
@@ -223,6 +236,29 @@ def test_job_workflow_content_pipeline_not_installed_fails_cleanly(tmp_path: Pat
     assert len(plumb.spans) == 1
     assert plumb.spans[0]["status"] == "failure"
     assert plumb.spans[0]["error_type"] == "content_pipeline_not_installed"
+
+
+def test_job_workflow_atlas_adapter_import_bug_is_not_masked(tmp_path: Path) -> None:
+    """An ImportError resolving the *atlas* adapter module is NOT reported as a
+    missing optional dependency — it surfaces as 'library_adapter_error' so the
+    user is not pointed at the wrong remedy (review finding #3).
+    """
+    plumb = PlumbIO(real=False)
+    pipeline = _make_job_pipeline(tmp_path, plumb=plumb)
+
+    def _raise_atlas_import(dotted_path: str) -> None:
+        raise ImportError(f"atlas adapter broken: {dotted_path}")
+
+    ctx = pipeline.start(task="find swe", slug="find-swe")
+    with patch("atlas.library_runner._import_adapter", side_effect=_raise_atlas_import):
+        outcome = pipeline.step(ctx)
+
+    assert outcome is not None
+    assert outcome.status == "failure"
+    assert outcome.error_type == "library_adapter_error"
+    # It must NOT masquerade as a missing dependency.
+    assert "job_cli" not in outcome.output_text
+    assert plumb.spans[0]["error_type"] == "library_adapter_error"
 
 
 def test_job_cli_workflow_runs_without_content_pipeline(tmp_path: Path) -> None:

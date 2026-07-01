@@ -78,3 +78,28 @@ def test_composite_runner_library_none_surfaces_failure() -> None:
     assert outcome.status == "failure"
     assert outcome.error_type == "library_runner_unavailable"
     assert default.calls == []
+
+
+def test_composite_runner_dispatches_shell_prefix() -> None:
+    default = _RecordingRunner("default")
+    shell = _RecordingRunner("shell")
+    runner = CompositeStageRunner(default=default, library=None, shell=shell)
+    stage = _stage("SHELL:content-pipeline capture")
+
+    outcome = runner.run(ctx=_CTX, stage=stage)
+
+    assert outcome.output_text == "handled by shell"
+    assert shell.calls == [stage]
+    assert default.calls == []
+
+
+def test_composite_runner_shell_none_surfaces_failure() -> None:
+    default = _RecordingRunner("default")
+    runner = CompositeStageRunner(default=default, library=None, shell=None)
+    stage = _stage("SHELL:content-pipeline capture")
+
+    outcome = runner.run(ctx=_CTX, stage=stage)
+
+    assert outcome.status == "failure"
+    assert outcome.error_type == "shell_runner_unavailable"
+    assert default.calls == []

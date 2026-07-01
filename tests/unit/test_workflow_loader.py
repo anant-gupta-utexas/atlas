@@ -359,8 +359,12 @@ def test_load_job_cli_yaml_via_loader() -> None:
     assert len(loaded.stages) == 4
 
     by_name = {s.name: s for s in loaded.stages}
-    for stage in loaded.stages:
-        assert stage.tool.startswith("RAW:"), f"{stage.name} tool is not RAW:-prefixed"
+    # job_cli dispatches the two content-pipeline stages via SHELL: (direct CLI)
+    # and the two claude-mediated stages via RAW:.
+    assert by_name["ingest_postings"].tool.startswith("SHELL:content-pipeline ")
+    assert by_name["score_fit"].tool.startswith("SHELL:content-pipeline ")
+    assert by_name["tailor_materials"].tool.startswith("RAW:")
+    assert by_name["emit_package"].tool.startswith("RAW:")
 
     assert by_name["ingest_postings"].gate_label is None
     assert by_name["score_fit"].gate_label == "gate_shortlist"

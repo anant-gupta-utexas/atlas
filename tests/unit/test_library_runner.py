@@ -39,6 +39,29 @@ def test_library_runner_unknown_ref() -> None:
 
 
 def test_library_runner_content_pipeline_not_installed() -> None:
+    """A content-pipeline ImportError raised from inside the adapter body (its
+    imports are function-local) is classified as content_pipeline_not_installed
+    with the install hint — the genuine "extra not installed" case.
+    """
+    runner = LibraryStageRunner()
+    stage = _lib_stage()
+
+    def _cp_missing(*, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        raise ImportError("No module named 'application.dispatcher'", name="application.dispatcher")
+
+    with patch("atlas.library_runner._import_adapter", return_value=_cp_missing):
+        outcome = runner.run(ctx=_CTX, stage=stage)
+
+    assert outcome.status == "failure"
+    assert outcome.error_type == "content_pipeline_not_installed"
+    assert "job_cli" in outcome.output_text
+
+
+def test_library_runner_atlas_adapter_import_error_not_masked() -> None:
+    """An ImportError resolving the atlas adapter module itself is a real
+    atlas-side bug — it surfaces as library_adapter_error, NOT as a missing
+    optional dependency (review finding #3).
+    """
     runner = LibraryStageRunner()
     stage = _lib_stage()
 
@@ -46,7 +69,26 @@ def test_library_runner_content_pipeline_not_installed() -> None:
         outcome = runner.run(ctx=_CTX, stage=stage)
 
     assert outcome.status == "failure"
-    assert outcome.error_type == "content_pipeline_not_installed"
+    assert outcome.error_type == "library_adapter_error"
+    assert "job_cli" not in outcome.output_text
+
+
+def test_library_runner_non_content_pipeline_import_error_not_masked() -> None:
+    """An ImportError for an unrelated module raised deep in the adapter body is
+    a real bug, not a missing content-pipeline — stays library_adapter_error.
+    """
+    runner = LibraryStageRunner()
+    stage = _lib_stage()
+
+    def _unrelated_missing(*, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        raise ImportError("No module named 'some_typo_dep'", name="some_typo_dep")
+
+    with patch("atlas.library_runner._import_adapter", return_value=_unrelated_missing):
+        outcome = runner.run(ctx=_CTX, stage=stage)
+
+    assert outcome.status == "failure"
+    assert outcome.error_type == "library_adapter_error"
+    assert "job_cli" not in outcome.output_text
 
 
 def test_library_runner_adapter_exception_caught() -> None:
