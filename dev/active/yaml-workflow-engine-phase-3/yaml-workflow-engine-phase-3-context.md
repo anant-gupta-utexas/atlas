@@ -7,8 +7,37 @@ Reference notes for anyone picking up this work cold.
 Phases 1 and 2 are **merged on `main`** as of 2026-06-30 (unlike Phase 2's draft-against-pre-Phase-1
 situation). T3.1 is a sanity grep + suite re-run, not a hard gate. The seams Phase 3 needs
 (`StageSpec.backend`, `LoadedWorkflow.default_backend`, `SubprocessStageRunner` as the single
-subprocess dispatcher, `CompositeStageRunner` wrapping it) are all present and exercised by the
-existing test suite.
+**`claude -p`** subprocess dispatcher, `CompositeStageRunner` wrapping it) are all present and
+exercised by the existing test suite (**193 passing** at the post-review baseline).
+
+### ⚠ Phase 2 review resolution changed the surface Phase 3 builds on (commit `53359e4`)
+
+This TRS was first drafted against Phase 2's *pre-review* state. The Phase 2 code review landed
+four fixes (commit `53359e4`, docs note in `7cd350a`) that Phase 3 must respect but does **not**
+modify:
+
+1. **New `ShellStageRunner`** (`src/atlas/shell_runner.py`, 118 LoC) — dispatches `SHELL:`-prefixed
+   tools as a direct list-form subprocess (`shell=False`, closed allow-list `{content-pipeline}`,
+   honors `timeout_s`, never raises). This is a *separate* dispatch path from `SubprocessStageRunner`
+   (which stays the `claude -p` path). Phase 3 refactors only the latter.
+2. **`CompositeStageRunner` gained a `shell=` slot** — now `CompositeStageRunner(default=..., library=...,
+   shell=...)` (57 LoC, up from 41). `cli.py::_make_pipeline()` already wires a `ShellStageRunner`
+   when any stage is `SHELL:`. Phase 3 must **preserve** this wiring, only adding `default_backend=`
+   and `loaded_workflow=` to the `SubprocessStageRunner(...)` construction.
+3. **`job_cli.yaml`'s two content-pipeline stages switched `RAW:` → `SHELL:`** — they now run the
+   `content-pipeline` CLI as a real subprocess instead of routing the string through `claude -p`.
+   So the `job.*` (LIB:, in-process) vs `job_cli.*` (SHELL:, subprocess CLI) metric split is now a
+   genuine in-process-vs-subprocess comparison. Phase 3 leaves `job_cli.yaml` alone.
+4. **`LibraryStageRunner` ImportError mapping narrowed** — only an ImportError naming a content-pipeline
+   top-level package (`application`/`infrastructure`/`domain`) yields `content_pipeline_not_installed`;
+   an atlas-adapter or unrelated ImportError now surfaces as `library_adapter_error`. Adapters dropped
+   the `src.` import prefix (content-pipeline's src-layout maps to bare top-level names). Phase 3 leaves
+   `library_runner.py` and the adapters alone.
+
+**CI note:** `.github/workflows/ci.yml` now has an active `test-job-extra` leg guarded on a
+`CONTENT_PIPELINE_TOKEN` repo secret (checks out the private content-pipeline, runs the real-import
+suite; self-skips when the secret is absent). This is a **Phase 2 open item**, not a Phase 3 blocker —
+Phase 3 adds no content-pipeline stages. See Phase 2 tasks "Post-review follow-up".
 
 ## Key files
 
@@ -36,7 +65,11 @@ existing test suite.
   [tasks](../yaml-workflow-engine-phase-2/yaml-workflow-engine-phase-2-tasks.md)) — added
   `job.yaml` with `tailor_materials.backend: claude` that Phase 2 deliberately left inert
   ("`tailor_materials`'s `backend: claude` field is parsed but not dispatched on a per-stage
-  basis"). Phase 3 finally consumes it.
+  basis"). Phase 3 finally consumes it. **Read the Phase 2 tasks "Post-review follow-up" section**
+  (resolved 2026-06-30, commit `53359e4`): it added `ShellStageRunner`, the `CompositeStageRunner`
+  `shell=` slot, the `job_cli.yaml` `RAW:` → `SHELL:` switch, and the narrowed `LibraryStageRunner`
+  ImportError mapping — the surface Phase 3 now builds against (summarized under "Phase 2 review
+  resolution" above).
 - v1 TRD: [`docs/2_architecture/TRD.md`](../../../docs/2_architecture/TRD.md) — NFRs / integrations
   that carry forward unchanged.
 
@@ -63,13 +96,15 @@ existing test suite.
 **Modified:**
 - `src/atlas/orchestrator.py` — `SubprocessStageRunner.__init__` gains `default_backend` and
   `loaded_workflow` kwargs; `SubprocessStageRunner.run()` replaces its hardcoded
-  `["claude", "-p", ...]` block with `backend.build_argv()` / `backend.preflight()` /
-  `backend.parse_result()`. Net ~30 lines added; subprocess invocation pattern, timeout
-  handling, and `plugin_resolver`/`build_prompt` flow are unchanged.
+  `["claude", "-p", ...]` block (~lines 583–622; class starts at 535) with `backend.build_argv()` /
+  `backend.preflight()` / `backend.parse_result()`. Net ~30 lines added; subprocess invocation
+  pattern, timeout handling, and `plugin_resolver`/`build_prompt` flow are unchanged. Only the
+  `claude -p` path — `ShellStageRunner`'s subprocess path is separate and untouched.
 - `src/atlas/config.py` — `Config.default_backend: str = "claude"` field; `Config.load()`
   reads `[backend] default` from `.atlas.toml`.
 - `src/atlas/cli.py` — `_make_pipeline()` passes `default_backend=cfg.default_backend` and
-  `loaded_workflow=loaded` into `SubprocessStageRunner(...)`. ~2-line change.
+  `loaded_workflow=loaded` into `SubprocessStageRunner(...)`. ~2-line change. **Do not remove** the
+  pre-existing `ShellStageRunner` import + `shell=shell` wiring added by the Phase 2 review.
 - `tests/unit/test_phase4.py` (or `test_subprocess_runner.py` if that's where Phase 1 put the
   runner tests) — +5 tests for backend wiring + the load-bearing
   `test_subprocess_runner_agy_missing_auth_returns_failure_no_subprocess` security test.
@@ -81,12 +116,14 @@ existing test suite.
   field. Phase 1's loader knows nothing about `_KNOWN_BACKENDS`.
 - `src/atlas/stages.py` — `StageSpec.backend` was added in Phase 1; Phase 3 only consumes it.
 - `src/atlas/state.py` — no state-file shape changes.
-- `src/atlas/composite_runner.py`, `library_runner.py`, `library_adapters/*` — Phase 2 work
-  unchanged.
+- `src/atlas/composite_runner.py`, `library_runner.py`, `shell_runner.py`, `library_adapters/*` —
+  Phase 2 work (incl. the review resolution in commit `53359e4`) unchanged. The `shell=` slot on
+  `CompositeStageRunner` and the whole `ShellStageRunner` stay as-is.
 - `src/atlas/plugin_resolver.py`, `plumb_io.py`, `post_commit_hook.py`, `worktree.py` — all
   unchanged.
 - `src/atlas/workflows/*.yaml` — no YAML changes; existing `tailor_materials.backend: claude`
-  in `job.yaml` already correct.
+  in `job.yaml` already correct; `job_cli.yaml`'s `SHELL:` content-pipeline stages stay routed
+  to `ShellStageRunner`.
 - `tests/e2e/test_e2e_happy_path.py` — runs unmodified (regression proof).
 - `tests/fixtures/routing_ground_truth.json` — dev pipeline unchanged.
 

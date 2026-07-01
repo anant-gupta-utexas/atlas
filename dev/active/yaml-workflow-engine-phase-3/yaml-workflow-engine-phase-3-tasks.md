@@ -13,9 +13,10 @@ gate:  none
 next:  T3.1 — sanity-check Phase 1 + Phase 2 seams
 ```
 
-## Status — prerequisites resolved (2026-06-30)
+## Status — prerequisites resolved (2026-06-30), incl. Phase 2 review
 
-Phase 1 and Phase 2 are both merged on `main` and this TRS is written against the
+Phase 1 and Phase 2 are both merged on `main`, **and the Phase 2 code review is
+resolved** (commit `53359e4`, docs note `7cd350a`). This TRS is written against the
 current shipped codebase (not a draft-ahead-of-implementation snapshot like Phase
 2's banner described). The seams Phase 3 consumes are already in place:
 
@@ -23,20 +24,43 @@ current shipped codebase (not a draft-ahead-of-implementation snapshot like Phas
   but inert.
 - `LoadedWorkflow.default_backend: str | None` — added in Phase 1
   (`workflow_loader.py`), currently parsed but inert.
-- `SubprocessStageRunner` — the single subprocess dispatcher (`orchestrator.py`
-  lines 535–623), today hardcodes `claude -p ...`. Phase 3 refactors this to
-  delegate argv + result-parsing to a `CliBackend` strategy.
-- `CompositeStageRunner` — Phase 2's `LIB:` / `RAW:` / plugin-command dispatcher
-  (`composite_runner.py`), unchanged by Phase 3.
+- `SubprocessStageRunner` — the single **`claude -p`** subprocess dispatcher
+  (`orchestrator.py`; class starts line 535, argv block ~583–622), today hardcodes
+  `claude -p ...`. Phase 3 refactors this to delegate argv + result-parsing to a
+  `CliBackend` strategy.
+- `CompositeStageRunner` — Phase 2's `LIB:` / `SHELL:` / `RAW:` / plugin-command
+  dispatcher (`composite_runner.py`, 57 LoC), unchanged by Phase 3. Its constructor
+  now takes a third `shell=` slot.
+- `ShellStageRunner` — **new in the Phase 2 review** (`shell_runner.py`, 118 LoC).
+  Dispatches `SHELL:` tools as a direct list-form subprocess. Separate path from
+  `SubprocessStageRunner`; **unchanged by Phase 3.**
 - `job.yaml`'s `tailor_materials.backend: claude` — already declared in Phase 2;
-  Phase 3 is the phase that finally consumes it.
+  Phase 3 is the phase that finally consumes it. (`job_cli.yaml`'s content-pipeline
+  stages are now `SHELL:` → `ShellStageRunner`, not `RAW:` — Phase 3 leaves them.)
 
 There is **no T3.0 hard verification gate** (unlike Phase 2's T2.0). T3.1 is a
 lightweight grep-confirm + baseline test re-run, not a blocking checkpoint.
+Post-review test baseline: **193 passing**.
+
+### What the Phase 2 review changed that Phase 3 must respect (commit `53359e4`)
+
+Phase 3 modifies **only** the `claude -p` path inside `SubprocessStageRunner`. The
+review resolution added a parallel `SHELL:` path Phase 3 must not break:
+
+- `ShellStageRunner` (`shell_runner.py`) + `CompositeStageRunner(shell=...)` slot +
+  the `cli.py::_make_pipeline()` `ShellStageRunner` wiring → **preserve, don't remove**.
+- `job_cli.yaml` `RAW:` → `SHELL:` switch → **leave as-is**.
+- `LibraryStageRunner` ImportError narrowed (`library_adapter_error` vs
+  `content_pipeline_not_installed`); adapters dropped the `src.` prefix → **leave as-is**.
+- CI now has an active `test-job-extra` leg gated on the `CONTENT_PIPELINE_TOKEN`
+  secret (self-skips when absent). This is a **Phase 2 open item**, not a Phase 3
+  blocker — Phase 3 adds no content-pipeline stages. See Phase 2 tasks
+  "Post-review follow-up". T3.9 only requires `mypy --strict src` stay green **both**
+  with and without the `job` extra (the dual-leg posture the review established).
 
 ## Tasks (flat — Phase 3 only, no sub-phases)
 
-- [ ] **T3.1** — Sanity-check Phase 1 + Phase 2 seams (grep `StageSpec.backend`, `LoadedWorkflow.default_backend`, single `SubprocessStageRunner`; full-suite baseline)
+- [ ] **T3.1** — Sanity-check Phase 1 + Phase 2 seams (grep `StageSpec.backend`, `LoadedWorkflow.default_backend`, single `SubprocessStageRunner` for the `claude -p` path; confirm the `ShellStageRunner`/`shell=` wiring from the Phase 2 review is present and left intact; full-suite baseline = **193 passing**)
 - [ ] **T3.2** — Author `src/atlas/cli_backend.py` — `CliBackend` Protocol + `ClaudeCodeBackend` + `AntigravityBackend` + `resolve_backend()` + `make_backend()` + `UnknownBackendError`
 - [ ] **T3.3** — Unit-test `cli_backend.py` (~20 tests; argv parity, parse_result by returncode + JSON shape, preflight env-var paths, resolve priority table); ≥ 85% coverage
 - [ ] **T3.4** — Refactor `SubprocessStageRunner` to delegate to a `CliBackend` strategy (new `default_backend` + `loaded_workflow` kwargs; argv / parse_result calls replace hardcoded block)
@@ -44,7 +68,7 @@ lightweight grep-confirm + baseline test re-run, not a blocking checkpoint.
 - [ ] **T3.6** — Integration tests — `agy` dispatch end-to-end (mocked subprocess), mixed-backend workflow, dev-pipeline-unaffected proof, `job.tailor_materials` now dispatches via `ClaudeCodeBackend`
 - [ ] **T3.7** — Document per-CLI auth + `agy` experimental status (`docs/3_guides/cli_backends.md`)
 - [ ] **T3.8** — Manual smoke test against a real `agy` binary (off-CI; document result whether it succeeds or auth blocks)
-- [ ] **T3.9** — CI green: `ruff check` + `ruff format --check` + `mypy --strict src` + coverage gates (≥ 80% repo-wide, ≥ 85% on `cli_backend.py`)
+- [ ] **T3.9** — CI green: `ruff check` + `ruff format --check` + `mypy --strict src` (both with and without `--extra job`, per the Phase 2 review's dual-leg posture) + coverage gates (≥ 80% repo-wide, ≥ 85% on `cli_backend.py`). No new CI job needed; the `CONTENT_PIPELINE_TOKEN` secret is a Phase-2 open item, not a Phase-3 blocker.
 - [ ] **T3.10** — Update `STATUS.md`; flag `v2.2` tag (user-discretionary)
 
 ## Exit criteria (TRD-v2 §14 Phase 3 + §13 #7–8, copied for tracking)
@@ -57,7 +81,7 @@ lightweight grep-confirm + baseline test re-run, not a blocking checkpoint.
 - [ ] **§14 exit #4** — `agy` auth failure produces a clear error, not a silent hang — `test_subprocess_runner_agy_missing_auth_returns_failure_no_subprocess` (T3.4); CLI surfaces a user-readable `agy_missing_auth_env` message
 - [ ] **NFR-5 / TRD-v2 §10** — `cli_backend.py` ≥ 85% coverage; full suite ≥ 80% (existing gate)
 - [ ] **NFR-7 / TRD-v2 §10** — `ruff check`, `ruff format --check`, `mypy --strict src` green
-- [ ] **FR-8 (regression safety)** — All Phase 1 + Phase 2 tests pass unchanged; `test_e2e_happy_path.py` passes unmodified
+- [ ] **FR-8 (regression safety)** — All Phase 1 + Phase 2 tests pass unchanged (post-review baseline **193 passing**, commit `53359e4`); `test_e2e_happy_path.py` passes unmodified; the `SHELL:`/`LIB:` job paths remain untouched
 
 ## Resolved decisions (see plan §12 / `context.md` Decisions table for full rationale)
 

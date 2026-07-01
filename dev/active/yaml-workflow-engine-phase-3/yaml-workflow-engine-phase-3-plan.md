@@ -19,8 +19,10 @@
 **Prerequisite status (2026-06-30):**
 
 - ✅ **Phase 1 complete** — `workflow_loader.py` ships; `StageSpec.backend: str | None` is parsed and threaded through (Phase 1 §3.2, Resolved Decision #5); `LoadedWorkflow.default_backend` is parsed; both fields are currently **inert** in `SubprocessStageRunner`.
-- ✅ **Phase 2 complete** — `CompositeStageRunner` dispatches `LIB:`/`RAW:`/plugin-command tools to the right runner; `job.yaml`'s `tailor_materials.backend: claude` field is parsed but not consumed.
-- The seams Phase 3 needs (`StageSpec.backend`, `LoadedWorkflow.default_backend`, `SubprocessStageRunner` as the single subprocess dispatcher, `CompositeStageRunner` already wrapping it) are all in place. Phase 3 is the phase that finally *consumes* the `backend` field. **No upstream gating task is required** — Phase 1 and 2 are merged on `main`.
+- ✅ **Phase 2 complete + review-resolved (commit `53359e4`)** — `CompositeStageRunner` dispatches `LIB:`/`SHELL:`/`RAW:`/plugin-command tools to the right runner; `job.yaml`'s `tailor_materials.backend: claude` field is parsed but not consumed. The Phase 2 code review landed four fixes that Phase 3 must build against (see note below): a new `ShellStageRunner` (`shell_runner.py`), `CompositeStageRunner` now takes a third `shell=` kwarg, `job_cli.yaml`'s two content-pipeline stages switched `RAW:` → `SHELL:`, and `LibraryStageRunner`'s `ImportError` mapping was narrowed (`library_adapter_error` vs `content_pipeline_not_installed`).
+- The seams Phase 3 needs (`StageSpec.backend`, `LoadedWorkflow.default_backend`, `SubprocessStageRunner` as the single **`claude -p`** subprocess dispatcher, `CompositeStageRunner` already wrapping it) are all in place. Phase 3 is the phase that finally *consumes* the `backend` field. **No upstream gating task is required** — Phase 1 and 2 are merged on `main`.
+
+> **Phase 2 review-resolution note (2026-06-30, commit `53359e4`).** Phase 3 was originally drafted against Phase 2's pre-review state. The Phase 2 code review resolution added a **`SHELL:` dispatch path** that Phase 3 does not touch but must not break or mis-describe. Concretely: `CompositeStageRunner(default=..., library=..., shell=...)` now has three runner slots; `job_cli.yaml` dispatches `SHELL:content-pipeline ...` to `ShellStageRunner` (a direct list-form subprocess, `shell=False`, closed allow-list `{content-pipeline}`), **not** `SubprocessStageRunner`. Phase 3 only refactors the `claude -p` path inside `SubprocessStageRunner`; `ShellStageRunner`, `LibraryStageRunner`, and `CompositeStageRunner` are all **unchanged by Phase 3** (see §3.1 and Appendix A). This note supersedes any earlier "`job_cli.yaml` unchanged / uses `RAW:`" wording in this TRS.
 
 ---
 
@@ -31,7 +33,7 @@
 Everything TRD-v2 §14 Phase 3's engineering-scope bullets and §3.4 specify:
 
 - Define a `CliBackend` Protocol per TRD-v2 §3.4 (signature locked: `build_argv(prompt, model, add_dirs, timeout_s, extra_flags) -> list[str]` and `parse_result(stdout, stderr, returncode) -> StageOutcome`).
-- Implement `ClaudeCodeBackend` by **extracting** the existing argv-construction and stdout-handling logic from `SubprocessStageRunner.run()` (lines 582–622 in `orchestrator.py`) into a class that satisfies the Protocol. **No flag changes** (see Resolved Decision #2 below — `--bare` is deliberately NOT added; `--no-session-persistence` stays).
+- Implement `ClaudeCodeBackend` by **extracting** the existing argv-construction and stdout-handling logic from `SubprocessStageRunner.run()` (the `["claude", "-p", ...]` block and the `returncode`/stdout handling — currently orchestrator.py ~lines 583–622; `SubprocessStageRunner` class starts at line 535) into a class that satisfies the Protocol. **No flag changes** (see Resolved Decision #2 below — `--bare` is deliberately NOT added; `--no-session-persistence` stays).
 - Implement `AntigravityBackend` per `agy -p` flag surface (`headless-clis-reference.md` Part C): `agy -p <prompt> --output-format json --include-directories <dirs> --model <m>`, parse JSON `.response` / `.error` fields, validate `GEMINI_API_KEY` or `GOOGLE_API_KEY` is set before subprocess dispatch (TRD-v2 §4 Security).
 - Refactor `SubprocessStageRunner` to accept a `CliBackend` strategy (default: `ClaudeCodeBackend()`). The runner becomes a thin shell that owns subprocess invocation + timeout + retry/exception handling; the backend owns argv + result parsing.
 - Backend resolution (4-tier, per TRD-v2 §3.4): per-stage `StageSpec.backend` → workflow `LoadedWorkflow.default_backend` → `.atlas.toml [backend] default` → hard default `"claude"`. Resolution happens inside `SubprocessStageRunner.run()` (or a small helper) so per-stage selection is dynamic, not fixed at runner construction time.
@@ -69,7 +71,7 @@ Importantly: this phase is where the `backend` field added in Phase 1 finally pa
 - **FR-5** (§3.4) — `AntigravityBackend.parse_result()` JSON-parses stdout (expecting `{"response": str, "stats": {...}, "error": {...}?}` per `headless-clis-reference.md` Part C). On `returncode == 0` and a `response` field, returns `status="success", output_text=<response>`. On non-zero returncode (1/42/53 — agy's documented exit codes) returns `status="failure"` with a specific `error_type` (see §6.3's table). On unparseable JSON returns `status="failure", error_type="agy_unparseable_output"`.
 - **FR-6** (§3.4, TRD-v2 §4 Security) — `AntigravityBackend` validates that `GEMINI_API_KEY` or `GOOGLE_API_KEY` is set in `os.environ` **before** spawning the subprocess. If neither is set, returns `StageOutcome(status="failure", error_type="agy_missing_auth_env")` without attempting subprocess dispatch. The check happens once per `run()` call (cheap; no caching needed). This makes the "do not silently fall back to browser auth" requirement enforceable.
 - **FR-7** (§3.4 backend resolution order) — Per-stage `StageSpec.backend` → `LoadedWorkflow.default_backend` → `Config.default_backend` → hard default `"claude"`. Resolution is centralized in a `resolve_backend()` helper (analogous to Phase 1's `resolve_timeout()`), exposed at module level so it's directly unit-testable.
-- **FR-8** (regression safety) — All Phase 1 + Phase 2 tests pass unchanged. Dev pipeline behavior is byte-identical (same argv, same stdout-as-`output_text`, same `--model haiku` default). Job pipeline behavior is byte-identical for the `RAW:` and `LIB:` stages; `tailor_materials.backend: claude` now correctly resolves to `ClaudeCodeBackend`, but since that backend produces the same argv as today's hardcoded path, no behavioral difference.
+- **FR-8** (regression safety) — All Phase 1 + Phase 2 tests pass unchanged (post-review Phase 2 baseline: **193 passing** as of commit `53359e4`). Dev pipeline behavior is byte-identical (same argv, same stdout-as-`output_text`, same `--model haiku` default). Job pipeline behavior is unchanged for the `LIB:` (in-process, `job.yaml`), `SHELL:` (subprocess CLI, `job_cli.yaml`), and `RAW:`/plugin stages — Phase 3 does not touch `LibraryStageRunner` or `ShellStageRunner`. `tailor_materials.backend: claude` (a `RAW:`/plugin stage in `job.yaml` routed through `SubprocessStageRunner`) now correctly resolves to `ClaudeCodeBackend`, but since that backend produces the same argv as today's hardcoded path, no behavioral difference.
 - **FR-9** (§14) — At least one integration test demonstrates `AntigravityBackend` dispatch end-to-end: a synthetic workflow with `backend: agy` on a stage, content-pipeline mocked / not needed, `subprocess.run` patched to return a canned agy JSON response. The test asserts the argv contains `agy` (not `claude`), `--include-directories` (not `--add-dir`), and the parsed `output_text` matches the mocked `response` field.
 
 ### Non-functional (from TRD-v2 §4, §5, §10)
@@ -77,7 +79,7 @@ Importantly: this phase is where the `backend` field added in Phase 1 finally pa
 - **NFR-1** (§4 Performance) — `CliBackend.build_argv()` and `parse_result()` are pure computation, < 1 ms each (TRD-v2 §4 verbatim). No I/O, no env reads inside `build_argv()` (env reads belong in `AntigravityBackend.run()`-time validation, FR-6, not in argv construction).
 - **NFR-2** (§4 Reliability) — Backend resolution is deterministic; same inputs always produce the same backend. Resolution failure (unknown backend name) → `StageOutcome(status="failure", error_type="unknown_backend")`, not an exception that crashes the orchestrator loop.
 - **NFR-3** (§4 Usability) — `agy` auth failure produces a clear, user-facing error message naming the required env vars and pointing at `headless-clis-reference.md` Part C's auth note. Not a silent hang, not a raw traceback (TRD-v2 §13 #7's "agy auth failure produces a clear error, not a silent hang").
-- **NFR-4** (§5 LoC budget) — TRD-v2 §5 caps engine code (orchestrator + loader + backends + state) at ~600 lines total. Phase 3 adds `cli_backend.py` (target ≤ 200 lines: Protocol + 2 backend classes + `resolve_backend()`). Current state: orchestrator.py = 719 LoC, workflow_loader.py = 188, state.py = ~270, composite_runner.py = 41 (Phase 2 split). Phase 3's additions push the engine total higher, but Phase 3's *contribution* (the `cli_backend.py` file) is the new "backends" line item in TRD-v2 §5's parenthetical, so the existing total stays in budget if the new file is lean.
+- **NFR-4** (§5 LoC budget) — TRD-v2 §5 caps engine code (orchestrator + loader + backends + state) at ~600 lines total. Phase 3 adds `cli_backend.py` (target ≤ 200 lines: Protocol + 2 backend classes + `resolve_backend()`). Current state (post Phase 2 review, commit `53359e4`): orchestrator.py = 718 LoC, workflow_loader.py = 188, state.py = ~270, composite_runner.py = 57 (grew from 41 when the `shell=` slot was added), shell_runner.py = 118 (new in the Phase 2 review resolution). Phase 3's additions push the engine total higher, but Phase 3's *contribution* (the `cli_backend.py` file) is the new "backends" line item in TRD-v2 §5's parenthetical, so the existing total stays in budget if the new file is lean.
 - **NFR-5** (§10 coverage) — `cli_backend.py` ≥ 85% (matches TRD-v2 §10's explicit target). Existing modules unchanged from Phase 2 (full suite ≥ 80%).
 - **NFR-6** (§4 Security) — `yaml.safe_load()` is already used by Phase 1's loader; Phase 3 introduces no new YAML parsing. Trust boundary unchanged: workflow YAML is trusted, `backend: <name>` is allowed to be any string but is validated against the closed set `{"claude", "agy"}` at *dispatch* time (not load time — keeping Phase 1's loader unchanged, see Resolved Decision #6).
 - **NFR-7** (§4 mypy/ruff CI gates) — `mypy --strict src` and `ruff check`/`ruff format --check` pass.
@@ -92,9 +94,10 @@ Importantly: this phase is where the `backend` field added in Phase 1 finally pa
 src/atlas/
 ├── __init__.py
 ├── cli.py                     # + Config.default_backend wired into _make_pipeline()
-├── orchestrator.py             # SubprocessStageRunner refactored to accept a CliBackend strategy
-├── composite_runner.py          # unchanged from Phase 2
-├── library_runner.py             # unchanged from Phase 2
+├── orchestrator.py             # SubprocessStageRunner (claude -p path) refactored to accept a CliBackend strategy
+├── composite_runner.py          # unchanged from Phase 2 (already routes LIB:/SHELL:/RAW: via default/library/shell slots)
+├── library_runner.py             # unchanged from Phase 2 (post-review: library_adapter_error vs content_pipeline_not_installed)
+├── shell_runner.py                # unchanged from Phase 2 review (ShellStageRunner — SHELL: content-pipeline CLI dispatch)
 ├── library_adapters/              # unchanged from Phase 2
 ├── workflow_loader.py              # unchanged from Phase 1
 ├── stages.py                        # unchanged from Phase 1
@@ -108,10 +111,10 @@ src/atlas/
 └── workflows/
     ├── dev.yaml                          # unchanged (no per-stage backend overrides; uses claude by default)
     ├── job.yaml                           # unchanged from Phase 2 (already has tailor_materials.backend: claude, now finally consumed)
-    └── job_cli.yaml                        # unchanged from Phase 2
+    └── job_cli.yaml                        # unchanged from Phase 2 review — its content-pipeline stages are SHELL: (→ ShellStageRunner), NOT touched by Phase 3
 ```
 
-`cli_backend.py` is the only new code module. `Config` gains one field. `SubprocessStageRunner` is refactored to delegate argv/result-parsing to a `CliBackend`. No other Phase 1 / Phase 2 files change.
+`cli_backend.py` is the only new code module. `Config` gains one field. `SubprocessStageRunner` (the `claude -p` path only) is refactored to delegate argv/result-parsing to a `CliBackend`. No other Phase 1 / Phase 2 files change — in particular `shell_runner.py`, `composite_runner.py`, and `library_runner.py` (all from the Phase 2 review resolution) are untouched by Phase 3.
 
 ### 3.2 `cli_backend.py` — the new module
 
@@ -459,11 +462,15 @@ def _make_pipeline(repo_root, cfg, *, auto_approve=False, workflow=None, workflo
     library: LibraryStageRunner | None = None
     if any(s.tool.startswith("LIB:") for s in loaded.stages):
         library = LibraryStageRunner()
-    composite = CompositeStageRunner(default=default_runner, library=library)
+    # ShellStageRunner (Phase 2 review) is wired here already; Phase 3 leaves it untouched.
+    shell: ShellStageRunner | None = None
+    if any(s.tool.startswith("SHELL:") for s in loaded.stages):
+        shell = ShellStageRunner(timeout_overrides=cfg.timeout_overrides)
+    composite = CompositeStageRunner(default=default_runner, library=library, shell=shell)
     # ... rest unchanged ...
 ```
 
-`loaded_workflow` is threaded into `SubprocessStageRunner` so the runner can read `workflow.default_backend` at dispatch time (tier 2 of `resolve_backend()`). This is the only Phase-3-specific `cli.py` change beyond passing `cfg.default_backend`.
+`loaded_workflow` is threaded into `SubprocessStageRunner` so the runner can read `workflow.default_backend` at dispatch time (tier 2 of `resolve_backend()`). This is the only Phase-3-specific `cli.py` change beyond passing `cfg.default_backend` — the `ShellStageRunner` wiring (the `shell=` slot and the `SHELL:` detection) already exists from the Phase 2 review resolution (commit `53359e4`) and Phase 3 must **preserve** it, not remove it. The `import ShellStageRunner` line and the `shell=shell` argument in the `CompositeStageRunner(...)` call are pre-existing; Phase 3's diff on this function adds only `default_backend=` and `loaded_workflow=` to the `SubprocessStageRunner(...)` call.
 
 ---
 
@@ -496,6 +503,8 @@ atlas hook install
 | `SubprocessStageRunner(default_backend=..., loaded_workflow=...)` | `atlas.orchestrator` | Two new kwargs |
 
 ### 4.3 Error surface (extends Phase 2's table)
+
+Phase 3 adds only the `claude`/`agy`-backend rows below. The Phase 2 review resolution (commit `53359e4`) already expanded the shared error surface with `library_adapter_error` (a real adapter/use-case bug, as opposed to `content_pipeline_not_installed`) and the `ShellStageRunner` error types (`shell_command_invalid`, `shell_command_not_allowed`, `shell_command_not_found`, `shell_timeout`, `shell_nonzero_exit`, plus `shell_runner_unavailable` from `CompositeStageRunner`). Phase 3 does not touch those; they're listed here only so the combined error vocabulary is discoverable in one place.
 
 | Condition | `error_type` | When detected |
 |---|---|---|
@@ -780,7 +789,7 @@ Flat list, ordered by execution sequence. Cross-task dependencies captured via `
     - [ ] `grep -n "backend:" src/atlas/stages.py` confirms `StageSpec.backend: str | None`.
     - [ ] `grep -n "default_backend" src/atlas/workflow_loader.py` confirms `LoadedWorkflow.default_backend` is parsed.
     - [ ] `tests/unit/test_workflow_loader.py` passes (loader correctly parses `backend:` and `default_backend:` fields without consuming them).
-    - [ ] Full existing test suite green (Phase 1's 153 + Phase 2's job-workflow tests + 3 e2e — count is informational, baseline for regression).
+    - [ ] Full existing test suite green (post Phase 2 review baseline: **193 passing** as of commit `53359e4` — count is informational, baseline for regression). Note: the `test_job_adapters_real_import.py` real-boundary tests self-skip when content-pipeline isn't installed, so the local count may be lower than CI's `test-job-extra` leg.
   - **Files to Create/Modify**: None — verification only.
   - **Dependencies**: Phase 1 + Phase 2 (merged on `main`)
   - **Testing Requirements**: Full existing suite re-run, no new tests
@@ -876,13 +885,14 @@ Flat list, ordered by execution sequence. Cross-task dependencies captured via `
   - **Testing Requirements**: Manual; not CI-gated
 
 * **[T3.9] CI lint / type-check pass** [Effort: S]
-  - **Description**: Run `ruff check`, `ruff format --check`, `mypy --strict src` against the full repo after Phase 3 lands. Fix any lint / type errors introduced by the new module or the refactor. Confirm coverage gate (≥ 80% repo-wide, ≥ 85% on `cli_backend.py`) passes.
+  - **Description**: Run `ruff check`, `ruff format --check`, `mypy --strict src` against the full repo after Phase 3 lands. Fix any lint / type errors introduced by the new module or the refactor. Confirm coverage gate (≥ 80% repo-wide, ≥ 85% on `cli_backend.py`) passes. **Phase 2 review context:** `.github/workflows/ci.yml` now has an **active** `test-job-extra` leg (checks out the private content-pipeline repo, `uv sync --extra dev --extra job`, runs the real-import suite) that self-skips unless the repo secret **`CONTENT_PIPELINE_TOKEN`** is present (see Phase 2 tasks "Post-review follow-up"). Phase 3 adds no content-pipeline stages, so it does not depend on that secret — but the mypy config now has an optional-dep override for `application`/`infrastructure`/`domain` (bare top-level names) with `warn_unused_ignores` disabled for `library_adapters`. Verify `mypy --strict src` stays green **both** with and without the `job` extra installed (the dual-leg posture the review resolution established); do not re-tighten the override such that only one leg passes.
   - **Acceptance Criteria**:
     - [ ] `ruff check src tests` is clean.
     - [ ] `ruff format --check src tests` is clean.
-    - [ ] `mypy --strict src` is clean.
+    - [ ] `mypy --strict src` is clean **both** with and without `--extra job` installed (matches the Phase 2 review's dual-leg mypy posture).
     - [ ] `pytest --cov=src/atlas --cov-fail-under=80` passes.
     - [ ] Per-file coverage report shows `cli_backend.py` ≥ 85%.
+    - [ ] No new CI job is required for Phase 3 (the existing `test` + `test-job-extra` legs cover it); the `CONTENT_PIPELINE_TOKEN` prerequisite is a Phase-2 open item, not a Phase-3 blocker.
   - **Files to Create/Modify**: Any lint / type fixes that surface.
   - **Dependencies**: T3.3, T3.4, T3.5, T3.6
   - **Testing Requirements**: CI green on all 4 gates
@@ -937,9 +947,9 @@ The minimal set of code locations Phase 3 touches:
 | File | Change |
 |---|---|
 | `src/atlas/cli_backend.py` | **NEW.** Protocol + Claude + Antigravity + helpers. |
-| `src/atlas/orchestrator.py` | `SubprocessStageRunner.__init__` gains `default_backend` + `loaded_workflow` kwargs; `SubprocessStageRunner.run()` replaces hardcoded argv block with `backend.build_argv()` + `backend.preflight()` + `backend.parse_result()`. ~30 net lines added. |
+| `src/atlas/orchestrator.py` | `SubprocessStageRunner.__init__` gains `default_backend` + `loaded_workflow` kwargs; `SubprocessStageRunner.run()` replaces its hardcoded `claude -p` argv block (~lines 583–622) with `backend.build_argv()` + `backend.preflight()` + `backend.parse_result()`. ~30 net lines added. The `SHELL:`/`LIB:` dispatch lives in `shell_runner.py`/`library_runner.py` and is out of this refactor's scope. |
 | `src/atlas/config.py` | `Config.default_backend: str = "claude"` field; `Config.load()` reads `[backend] default`. |
-| `src/atlas/cli.py` | `_make_pipeline()` threads `cfg.default_backend` and `loaded` into `SubprocessStageRunner(...)`. ~2 line change. |
+| `src/atlas/cli.py` | `_make_pipeline()` threads `cfg.default_backend` and `loaded` into `SubprocessStageRunner(...)`. ~2 line change. **Preserve** the existing `ShellStageRunner` import + `shell=shell` wiring from the Phase 2 review (commit `53359e4`) — do not drop it. |
 | `tests/unit/test_cli_backend.py` | **NEW.** ~20 tests covering argv / parse_result / preflight / resolve. |
 | `tests/unit/test_subprocess_runner.py` (or `test_phase4.py`) | +5 tests for backend wiring + auth-fail security path. |
 | `tests/unit/test_config.py` | +2 tests for `[backend] default` parsing. |
@@ -951,9 +961,9 @@ The minimal set of code locations Phase 3 touches:
 - `src/atlas/workflow_loader.py` — loader unchanged (Resolved Decision #7).
 - `src/atlas/stages.py` — `StageSpec.backend` was added in Phase 1; Phase 3 only consumes it.
 - `src/atlas/state.py` — no state-file shape changes.
-- `src/atlas/composite_runner.py`, `library_runner.py`, `library_adapters/*` — Phase 2 work unchanged.
+- `src/atlas/composite_runner.py`, `library_runner.py`, `shell_runner.py`, `library_adapters/*` — Phase 2 work (incl. the review resolution in commit `53359e4`) unchanged. In particular the `shell=` slot on `CompositeStageRunner` and the whole `ShellStageRunner` stay as-is.
 - `src/atlas/plugin_resolver.py`, `plumb_io.py`, `post_commit_hook.py`, `worktree.py` — all unchanged.
-- `src/atlas/workflows/*.yaml` — no YAML changes; existing `tailor_materials.backend: claude` already correct.
+- `src/atlas/workflows/*.yaml` — no YAML changes; existing `tailor_materials.backend: claude` (`job.yaml`) already correct, and `job_cli.yaml`'s `SHELL:` stages stay routed to `ShellStageRunner`.
 - `tests/e2e/test_e2e_happy_path.py` — runs unmodified (regression proof).
 - `routing_ground_truth.json` — dev pipeline unchanged.
 
