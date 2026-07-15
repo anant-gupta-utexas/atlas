@@ -8,8 +8,8 @@ Reference notes for anyone picking up this work cold.
 - [`docs/2_architecture/TRD-v2.md`](../../../docs/2_architecture/TRD-v2.md) — the phase contract this TRS details. §3.1–3.7, §10, §14 (Phase 1), Appendix A are the load-bearing sections.
 - [`docs/2_architecture/TRD.md`](../../../docs/2_architecture/TRD.md) — v1 NFRs/integrations that carry forward unchanged.
 - [`docs/1_product_and_research/PRD.md`](../../../docs/1_product_and_research/PRD.md) — v1 product scope. Note: predates v2 entirely; no v2 PRD exists yet (TRD-v2's own preamble flags this).
-- [`docs/1_product_and_research/yaml-driven-workflows-analysis.md`](../../../docs/1_product_and_research/yaml-driven-workflows-analysis.md) — engine plan + plumb impact analysis grounding TRD-v2.
-- [`docs/1_product_and_research/job-workflow-scope.md`](../../../docs/1_product_and_research/job-workflow-scope.md) — first worked example (Phase 2, not this TRS, but explains *why* the loader's shape is what it is).
+- [`docs/1_product_and_research/yaml-driven-workflows-analysis.md`](../yaml-workflow-engine-design-notes/yaml-driven-workflows-analysis.md) — engine plan + plumb impact analysis grounding TRD-v2.
+- [`docs/1_product_and_research/job-workflow-scope.md`](../yaml-workflow-engine-design-notes/job-workflow-scope.md) — first worked example (Phase 2, not this TRS, but explains *why* the loader's shape is what it is).
 
 ### TRS itself (this directory)
 - [`yaml-workflow-engine-phase-1-plan.md`](./yaml-workflow-engine-phase-1-plan.md) — design (sections 1–11) + flat task list (T1.1–T1.13).

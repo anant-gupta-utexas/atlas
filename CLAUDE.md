@@ -22,30 +22,41 @@ atlas run "add response-cache middleware to this Flask repo"
 ## Documentation Map
 
 - **[docs/README.md](docs/README.md)** — Hub MOC: top-level entry point linking to all domain docs
-- **[docs/2_architecture/TRD-v2.md](docs/2_architecture/TRD-v2.md)** — v2 Technical Requirements (YAML engine, multi-workflow, backend dispatch)
+- **[docs/2_architecture/TRD-v2.md](docs/2_architecture/TRD-v2.md)** — v2 Technical Requirements (YAML engine, multi-workflow, backend dispatch). Shipped; historical planning record — see `yaml_workflow_engine.md` for current mechanics.
 - **[docs/2_architecture/TRD.md](docs/2_architecture/TRD.md)** — v1 Technical Requirements (NFRs, integrations, data model — carry forward)
-- **[docs/2_architecture/system_design.md](docs/2_architecture/system_design.md)** — 7-stage state machine, span tree shape, worktree boundary
+- **[docs/2_architecture/system_design.md](docs/2_architecture/system_design.md)** — Current architecture: YAML-driven stages, `StageRunner`/`CliBackend` dispatch, span tree shape, worktree boundary
 - **[docs/3_guides/yaml_workflow_engine.md](docs/3_guides/yaml_workflow_engine.md)** — YAML schema reference, tool-string conventions, runner types, phase history
-- **[docs/3_guides/core_concepts.md](docs/3_guides/core_concepts.md)** — Pipeline, gates, state file, runner types, plumb integration
+- **[docs/3_guides/core_concepts.md](docs/3_guides/core_concepts.md)** — Workflows, gates, state file, runner types, backend selection, plumb integration
 - **[docs/3_guides/getting_started.md](docs/3_guides/getting_started.md)** — Dev environment setup
 - **[docs/3_guides/job_workflow.md](docs/3_guides/job_workflow.md)** — Job-search workflow (job / job_cli variants)
 - **[docs/3_guides/cli_backends.md](docs/3_guides/cli_backends.md)** — CLI backend dispatch (claude, agy), auth, error types
 - **[docs/4_testing/index.md](docs/4_testing/index.md)** — Testing strategy, 239 tests, CI configuration
 - **[docs/1_product_and_research/PRD.md](docs/1_product_and_research/PRD.md)** — v1 Product Requirements Document
+- **[docs/1_product_and_research/BACKLOG.md](docs/1_product_and_research/BACKLOG.md)** — Single source of pending/future work
+- **[STATUS.md](STATUS.md)** — Current version, what's shipped, test count at a glance
 
 ## Project Structure
 
 ```
 atlas/
 ├── src/atlas/               # Main package
-│   ├── cli.py              # Entry point (@typer commands)
-│   ├── orchestrator.py      # 7-stage state machine
-│   ├── plumb_adapter.py     # plumb integration (span/score writes)
-│   ├── worktree_manager.py  # git worktree lifecycle (stage 5)
+│   ├── cli.py               # Entry point (@typer commands)
+│   ├── orchestrator.py      # Gated-workflow state machine
+│   ├── workflow_loader.py   # YAML workflow → StageSpec loader
+│   ├── workflows/           # dev.yaml, job.yaml, job_cli.yaml
+│   ├── stages.py            # StageSpec dataclass + stage table
+│   ├── cli_backend.py       # CliBackend dispatch (claude, agy)
+│   ├── composite_runner.py  # RAW: / LIB: / SHELL: runner dispatch
+│   ├── library_runner.py    # LIB: content-pipeline adapters
+│   ├── shell_runner.py      # SHELL: subprocess runner
+│   ├── plugin_resolver.py   # plugin-command → argv mapping
+│   ├── plumb_io.py          # plumb integration (span/score writes)
+│   ├── worktree.py          # git worktree lifecycle (code_gen stage)
 │   └── post_commit_hook.py  # Score writing from commit output
 ├── tests/
 │   ├── fixtures/            # routing_ground_truth.json, test repos
-│   └── unit/                # State machine, span tree, hook parser tests
+│   ├── unit/                # State machine, span tree, hook parser tests
+│   └── integration/         # Workflow-level + adapter-import tests
 └── dev/active/              # Feature TDS/plans during implementation
 ```
 
@@ -68,7 +79,7 @@ atlas/
 
 ## Development Workflow
 
-1. **Before writing code:** Read `[docs/2_architecture/TRD.md](docs/2_architecture/TRD.md)` for integration boundaries and data contracts.
+1. **Before writing code:** Read [docs/2_architecture/system_design.md](docs/2_architecture/system_design.md) for current architecture, and [docs/2_architecture/TRD-v2.md](docs/2_architecture/TRD-v2.md) / [TRD.md](docs/2_architecture/TRD.md) for integration boundaries and data contracts.
 2. **Stages are black boxes.** Each stage invokes an external tool (agent plugin, `/verify` slash command) and parses output. Don't reimplement agent logic inside atlas.
 3. **State lives in files.** `dev/active/<task>/tasks.md` is the source of truth. Resume protocol reads it, no in-memory state.
 4. **Testing:** Fixture `routing_ground_truth.json` validates the 7-stage table. Mock agent responses in tests; run E2E against a real throwaway feature once per release.

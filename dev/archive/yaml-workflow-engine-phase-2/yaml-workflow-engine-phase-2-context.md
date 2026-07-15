@@ -14,10 +14,10 @@ start T2.1+ until Phase 1 has actually merged.**
 
 ### Source-of-truth docs (read first, in order)
 - [`docs/2_architecture/TRD-v2.md`](../../../docs/2_architecture/TRD-v2.md) — the phase contract this TRS details. §3.8, §6, §10, §14 (Phase 2) are the load-bearing sections.
-- [`docs/1_product_and_research/job-workflow-scope.md`](../../../docs/1_product_and_research/job-workflow-scope.md) — the original worked-example design note this TRS implements. §2 (consumption modes), §3 (phased scope) are the core sections.
+- [`docs/1_product_and_research/job-workflow-scope.md`](../yaml-workflow-engine-design-notes/job-workflow-scope.md) — the original worked-example design note this TRS implements. §2 (consumption modes), §3 (phased scope) are the core sections.
 - [`dev/active/yaml-workflow-engine-phase-1/`](../yaml-workflow-engine-phase-1/) — Phase 1's TRS (plan + context + tasks). Phase 2 depends on every artifact it specifies. **Updated 2026-06-29 (commit `a70029b`):** Resolved Decision #5 pulled the `_DEFAULT_TIMEOUT_S` generalization into Phase 1 — `StageSpec` now has **10 fields** (added `timeout_s: int | None`), `_ALLOWED_STAGE_KEYS` now includes `gate_is_async` + `timeout_s`, and `SubprocessStageRunner` resolves timeouts via a 4-tier `resolve_timeout()` (plan §6.7). Phase 2 incorporated this — see Decision #7 below.
 - [`docs/1_product_and_research/PRD.md`](../../../docs/1_product_and_research/PRD.md) — v1 product scope; still no v2 PRD exists.
-- [`docs/1_product_and_research/cli-backend-dispatch.md`](../../../docs/1_product_and_research/cli-backend-dispatch.md) — relevant only for Phase 3 (`tailor_materials`'s `backend: claude` field is parsed but not dispatched on in Phase 2).
+- [`docs/1_product_and_research/cli-backend-dispatch.md`](../yaml-workflow-engine-design-notes/cli-backend-dispatch.md) — relevant only for Phase 3 (`tailor_materials`'s `backend: claude` field is parsed but not dispatched on in Phase 2).
 
 ### TRS itself (this directory)
 - [`yaml-workflow-engine-phase-2-plan.md`](./yaml-workflow-engine-phase-2-plan.md) — design (sections 1–11) + flat task list (T2.0–T2.10).

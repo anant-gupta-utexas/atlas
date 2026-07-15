@@ -2,7 +2,7 @@
 
 ## Overview
 
-Atlas ships 239 tests at 95% coverage as of v2.2. CI runs on every push and PR; `main` is never green without all quality gates passing: `pytest`, `ruff check`/`ruff format`, and `mypy --strict src`.
+Atlas ships 239 tests at 95% coverage as of v2.2. CI is manual-only (`workflow_dispatch`) — this is a single-maintainer repo, so the suite is the local pre-commit gate rather than an on-push check. When run, it enforces the same quality gates: `pytest`, `ruff check`/`ruff format`, and `mypy --strict src`.
 
 ## Test organization
 

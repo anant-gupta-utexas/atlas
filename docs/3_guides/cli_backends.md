@@ -94,6 +94,6 @@ Note the flag difference vs claude: `--include-directories` (not `--add-dir`), r
 
 ## See also
 
-- [cli-backend-dispatch.md](../1_product_and_research/cli-backend-dispatch.md) — design rationale and per-CLI flag table
+- [cli-backend-dispatch.md](../../dev/archive/yaml-workflow-engine-design-notes/cli-backend-dispatch.md) — design rationale and per-CLI flag table (archived design note; decision shipped in v2.2)
 - [headless-clis-reference.md](../1_product_and_research/headless-clis-reference.md) — Part B (claude headless) and Part C (agy headless, auth status)
 - [TRD-v2.md](../2_architecture/TRD-v2.md) §3.4 (backend resolution), §4 (security), §5 (agy experimental status)

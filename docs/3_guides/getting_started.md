@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.13+
 - git 2.5+ (required for `git worktree`)
 - [uv](https://astral.sh/uv) (recommended) or pip
 - [plumb](https://github.com/anant-gupta-utexas/plumb) installed as a

@@ -1,15 +1,25 @@
 # System Design
 
-> **Status:** v1 finalized (Tech Lead pass complete 2026-04-24).
-> Captures the architecture as it will ship for the Week 4 local CLI.
-> Subsequent releases get their own SDD revisions.
+> **Status:** v1 architecture finalized 2026-04-24 (Tech Lead pass). Updated
+> 2026-07-15 to reflect the v2.0–v2.2 YAML workflow engine (shipped
+> 2026-06-30): the hardcoded 7-stage pipeline described below is now one
+> workflow (`dev.yaml`) among several, loaded through a generic
+> `StageRunner`/`CliBackend` seam. Sections below are annotated where v2
+> changed the shape. For the full YAML schema, runner dispatch chain, and
+> backend resolution, see
+> [`docs/3_guides/yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md)
+> — that guide is the current source of truth for engine mechanics; this
+> document covers architecture-level structure and trade-offs.
 
 ## Problem Statement & Requirements
 
-Atlas is a local CLI runtime that walks a fixed 7-stage dev-workflow
-pipeline, stops at six human gates, and writes every run as a typed
-span tree into [plumb](https://github.com/anant-gupta-utexas/plumb) —
-the measurement spine.
+Atlas is a local CLI runtime that walks a human-gated workflow defined in
+YAML (the `dev` workflow, by default, encodes the original 7-stage
+dev-workflow pipeline), stops at explicit human gates, and writes every
+run as a typed span tree into [plumb](https://github.com/anant-gupta-utexas/plumb) —
+the measurement spine. As of v2, atlas can run any workflow expressed as a
+YAML stage list — not only the dev pipeline — through the same gate
+machinery.
 
 The full scope is in [`../1_product_and_research/PRD.md`](../1_product_and_research/PRD.md).
 This document covers the *how*: component shape, data flow, boundary
@@ -68,6 +78,18 @@ imports. Atlas itself owns only:
 
 ## System Components & Services
 
+> **v2 update:** the diagram and component list below are v1-era (one
+> hardcoded pipeline). As of v2.2, `atlas.cli` resolves a workflow through
+> `workflow_loader.py` before constructing the pipeline, and stage dispatch
+> goes through a `CompositeStageRunner` that routes to `SubprocessStageRunner`
+> (plugin commands + `RAW:`, now backed by a `CliBackend` strategy),
+> `LibraryStageRunner` (`LIB:`), or `ShellStageRunner` (`SHELL:`) by tool-string
+> prefix. `Pipeline` itself is unchanged in shape — it still only sees the
+> `StageRunner` Protocol — but it now consumes `tuple[StageSpec, ...]` loaded
+> from YAML instead of a hardcoded tuple. See
+> [`yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md#architecture-overview)
+> for the current data-flow diagram covering all five v2 modules.
+
 ```mermaid
 graph TD
     User([Operator])
@@ -95,6 +117,9 @@ graph TD
     PlumbIO --> Plumb
 ```
 
+*(v1-era diagram; `Pipeline` node above now sits behind `workflow_loader.py`
++ `CompositeStageRunner`, see the guide linked above for the current shape.)*
+
 ### `atlas.cli` — CLI surface
 
 - `run(task: str)` — inserts a `runs` row, creates
@@ -103,20 +128,60 @@ graph TD
   if no active run.
 - `hook install` / `hook uninstall` — writes to / removes from
   `.git/hooks/post-commit` (idempotent).
+- **v2:** `run` and `resume` also accept `--workflow <name>` /
+  `--workflow-file <path>`, resolved via `workflow_loader.py` before the
+  pipeline is constructed. `_make_pipeline()` wires up
+  `SubprocessStageRunner`, and conditionally `LibraryStageRunner` /
+  `ShellStageRunner`, into a `CompositeStageRunner`.
 
 One command entrypoint registered via `pyproject.toml`.
 
 ### `atlas.pipeline` — state machine
 
-- Seven stages, hardcoded in order: `research`, `prd_draft`,
-  `trd_draft`, `tds_gen`, `plan_review`, `code_gen`, `code_review`.
+- Seven stages for the default `dev` workflow, in order: `research`,
+  `prd_draft`, `trd_draft`, `tds_gen`, `plan_review`, `code_gen`,
+  `code_review`. **v2:** these are no longer hardcoded — they are loaded
+  from `src/atlas/workflows/dev.yaml` via `workflow_loader.py` into the
+  same `tuple[StageSpec, ...]` shape `Pipeline` always consumed. Other
+  workflows (`job`, `job_cli`, or user-authored YAML) supply their own
+  stage tuples through the identical loader path.
 - Each stage: open span → invoke tool (or surface prompt for manual
   stages like research) → close span → check gate → either advance
   or pause.
-- Gates: six hard stops, each a one-line user prompt (approve /
-  reject), each writes one `scores` row.
-- No dynamic routing in v1: stage → tool mapping is a 7-row constant
-  (also committed as `tests/fixtures/routing_ground_truth.json`).
+- Gates: hard stops, each a one-line user prompt (approve / reject),
+  each writes one `scores` row. Gate score metric names are namespaced
+  by workflow (`dev` keeps bare names for backward compatibility; other
+  workflows prefix `<workflow>.<gate_label>`).
+- No dynamic routing: stage → tool mapping for the `dev` workflow is a
+  7-row constant validated against `tests/fixtures/routing_ground_truth.json`
+  regardless of whether it's loaded from YAML or (pre-v2) a hardcoded
+  tuple — the fixture and its test are dev-workflow-only.
+
+### Runner dispatch (v2) — `CompositeStageRunner` and friends
+
+Added in Phase 2/3 of the v2 build. `Pipeline` is unaware of any of this —
+it depends only on the `StageRunner` Protocol.
+
+- **`CompositeStageRunner`** (`composite_runner.py`) — routes each stage by
+  its `tool` string prefix: `LIB:` → `LibraryStageRunner`, `SHELL:` →
+  `ShellStageRunner`, anything else (plugin commands, `RAW:`) →
+  `SubprocessStageRunner`.
+- **`SubprocessStageRunner`** (`orchestrator.py`) — the v1 runner,
+  generalized in Phase 3 to dispatch through a `CliBackend` strategy
+  (`ClaudeCodeBackend` or `AntigravityBackend`) instead of a hardcoded
+  `claude -p` argv build. Backend resolution is a 4-tier cascade:
+  per-stage YAML → workflow `default_backend` → `.atlas.toml [backend]` →
+  hard default `"claude"`.
+- **`LibraryStageRunner`** (`library_runner.py`) — dispatches `LIB:` tool
+  strings to in-process content-pipeline adapters via a closed registry
+  (`atlas/library_adapters/`). Used by the `job` workflow.
+- **`ShellStageRunner`** (`shell_runner.py`) — dispatches `SHELL:` tool
+  strings as direct list-form subprocesses against an allow-listed set of
+  binaries. Used by the `job_cli` workflow (the dependency-free variant of
+  `job`).
+
+Full schema, dispatch chain diagram, and error-type tables:
+[`yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md).
 
 ### `atlas.state` — `tasks.md` and `.atlas/current-run`
 
@@ -129,6 +194,11 @@ One command entrypoint registered via `pyproject.toml`.
   `atlas status`, the `run_id` in `.atlas/current-run` must match
   the `run_id` in the referenced `tasks.md` header. Mismatch → exit
   non-zero with a recovery hint naming both values.
+- **v2:** the `## current` block gained a `workflow:` field. On resume,
+  atlas re-reads this field and re-resolves the workflow YAML through
+  `workflow_loader.py` to reconstruct the `StageSpec` tuple. If the YAML
+  has since been deleted or edited in a breaking way, resume fails
+  loudly rather than silently falling back to `dev`.
 
 ### `atlas.hook` — post-commit hook
 
@@ -356,9 +426,9 @@ Restated from PRD §6.4 for completeness:
   against a sacrificial Flask repo.
 - **"Production."** There is no production for v1. The tool runs on
   the author's laptop.
-- **CI.** GitHub Actions on push + PR: `pytest`, `ruff check`,
-  `mypy src`, and the routing-ground-truth fixture test. No deployment
-  step.
+- **CI.** GitHub Actions, manual `workflow_dispatch` only (single-maintainer
+  repo): `pytest`, `ruff check`, `mypy src`, and the routing-ground-truth
+  fixture test. No deployment step.
 - **Release.** No release mechanism in v1 — the repo *is* the
   artifact. A tagged `v1.0` when Week 4 ships and a full end-to-end
   run completes on the real target.
@@ -424,20 +494,12 @@ in [`../1_product_and_research/PRD.md`](../1_product_and_research/PRD.md) §"Ris
 
 ## Future Considerations
 
-- **v1.1 — HTTP shell.** A thin FastAPI or Flask layer around the
-  CLI so a mobile shortcut can trigger `atlas run`. Adds
-  authentication, request validation, and a small queue; none of
-  that is in v1. This is also when the atlas ↔ plumb boundary
-  warrants reconsideration as IPC rather than direct calls.
-- **v1.2 — Bounded auto-retry in the worktree.** Stage 5 retries
-  `/verify` failures automatically with a hard iteration cap. This
-  is where paired `examples` rows (failed span → passing span) start
-  appearing at zero marginal authoring cost.
-- **v2 — Multiple run kinds.** If atlas picks up non-dev-workflow
-  tasks (content-pipeline runs, data-migration runs), `runs.kind`
-  becomes meaningful and the schema gains the column.
-- **v2 — `/dev-resume` slash command.** Replaces the CLAUDE.md
-  resume-instruction paragraph once drift is felt twice.
+The v2 YAML workflow engine (multiple run kinds via named workflows,
+per-stage CLI backend choice) shipped and is covered above. Remaining
+forward-looking items — HTTP shell, bounded auto-retry, `runs.kind`
+schema column, `/dev-resume` slash command, and others — are tracked in
+one place going forward: [`BACKLOG.md`](../1_product_and_research/BACKLOG.md).
+
 - **Upstream contribution path.** If a reference repo ends up
   implementing the phase-gated-pipeline-with-state-file pattern
   first, atlas should fork-and-trim rather than ship a third

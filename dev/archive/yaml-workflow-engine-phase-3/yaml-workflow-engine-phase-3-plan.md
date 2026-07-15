@@ -4,7 +4,7 @@
 **Component:** `src/atlas/cli_backend.py` (new) + `orchestrator.py` (refactor `SubprocessStageRunner`) + `cli.py`, `config.py` (extended)
 **Status:** Draft, pre-implementation
 **Last reviewed:** 2026-06-30
-**Grounds on:** [TRD-v2](../../../docs/2_architecture/TRD-v2.md) §3.4, §4, §5, §6, §10, §13 #7–8, §14 (Phase 3); [`cli-backend-dispatch.md`](../../../docs/1_product_and_research/cli-backend-dispatch.md); [`headless-clis-reference.md`](../../../docs/1_product_and_research/headless-clis-reference.md); [v1 TRD](../../../docs/2_architecture/TRD.md); [PRD](../../../docs/1_product_and_research/PRD.md); Phase 1 TRS ([plan](../yaml-workflow-engine-phase-1/yaml-workflow-engine-phase-1-plan.md)); Phase 2 TRS ([plan](../yaml-workflow-engine-phase-2/yaml-workflow-engine-phase-2-plan.md))
+**Grounds on:** [TRD-v2](../../../docs/2_architecture/TRD-v2.md) §3.4, §4, §5, §6, §10, §13 #7–8, §14 (Phase 3); [`cli-backend-dispatch.md`](../yaml-workflow-engine-design-notes/cli-backend-dispatch.md); [`headless-clis-reference.md`](../../../docs/1_product_and_research/headless-clis-reference.md); [v1 TRD](../../../docs/2_architecture/TRD.md); [PRD](../../../docs/1_product_and_research/PRD.md); Phase 1 TRS ([plan](../yaml-workflow-engine-phase-1/yaml-workflow-engine-phase-1-plan.md)); Phase 2 TRS ([plan](../yaml-workflow-engine-phase-2/yaml-workflow-engine-phase-2-plan.md))
 
 > This TRS details exactly one TRD phase — Phase 3 — into a flat task list. It does not re-plan releases (PRD-owned) or re-sequence phases (TRD-owned). Phase 4 (second-brain trigger skill) is out of scope here and gets its own TRS when picked up.
 

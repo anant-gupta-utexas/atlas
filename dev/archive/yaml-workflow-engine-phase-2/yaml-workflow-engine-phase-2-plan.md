@@ -4,7 +4,7 @@
 **Component:** `src/atlas/workflows/job.yaml` (new) + `library_runner.py` (new) + `plumb_adapter.py`, `cli.py` (extended)
 **Status:** Draft, pre-implementation
 **Last reviewed:** 2026-06-29
-**Grounds on:** [TRD-v2](../../../docs/2_architecture/TRD-v2.md) §3.8, §6, §10, §14 (Phase 2); [`job-workflow-scope.md`](../../../docs/1_product_and_research/job-workflow-scope.md) §2–3; [v1 TRD](../../../docs/2_architecture/TRD.md); [PRD](../../../docs/1_product_and_research/PRD.md); Phase 1 TRS ([plan](../yaml-workflow-engine-phase-1/yaml-workflow-engine-phase-1-plan.md), [context](../yaml-workflow-engine-phase-1/yaml-workflow-engine-phase-1-context.md))
+**Grounds on:** [TRD-v2](../../../docs/2_architecture/TRD-v2.md) §3.8, §6, §10, §14 (Phase 2); [`job-workflow-scope.md`](../yaml-workflow-engine-design-notes/job-workflow-scope.md) §2–3; [v1 TRD](../../../docs/2_architecture/TRD.md); [PRD](../../../docs/1_product_and_research/PRD.md); Phase 1 TRS ([plan](../yaml-workflow-engine-phase-1/yaml-workflow-engine-phase-1-plan.md), [context](../yaml-workflow-engine-phase-1/yaml-workflow-engine-phase-1-context.md))
 
 > This TRS details exactly one TRD phase — Phase 2 — into a flat task list. It does not re-plan releases (PRD-owned) or re-sequence phases (TRD-owned). Phase 3 (CLI backend dispatch) and Phase 4 (second-brain trigger skill) are out of scope here and get their own TRS when picked up.
 

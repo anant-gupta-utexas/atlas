@@ -1,8 +1,16 @@
 # Technical Requirements Document (TRD)
 
+> **Historical record.** This TRD covers the v1 pipeline as it shipped. It is not
+> updated for v2 (YAML workflow engine, multi-workflow, CLI backend dispatch) —
+> see [`TRD-v2.md`](./TRD-v2.md) for that scope and
+> [`../3_guides/yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md)
+> for the current, living reference. NFRs, integration contracts, and the v1
+> success criteria below remain accurate for the `dev` workflow and carry
+> forward unchanged into v2.
+
 **Project:** atlas — v1 local CLI
 **Scope:** v1 (Week 4 local CLI). Subsequent releases get their own TRDs.
-**Status:** v1 approved (Tech Lead pass complete 2026-04-24).
+**Status:** v1 approved (Tech Lead pass complete 2026-04-24). Shipped.
 
 ## Executive Summary
 
@@ -150,8 +158,8 @@ timeout; on timeout or non-zero exit the span is closed with
 ## Infrastructure & Environment Requirements
 
 - **Dev:** local laptop. `uv sync` + `uv run pytest`. No hosted infra.
-- **CI:** GitHub Actions on push + PR. `pytest`, `ruff check`,
-  `mypy src`, and the routing-ground-truth fixture test.
+- **CI:** GitHub Actions, manual `workflow_dispatch` only. `pytest`,
+  `ruff check`, `mypy src`, and the routing-ground-truth fixture test.
 - **Staging / prod:** none. v1 has no deployed surface.
 
 ## Compliance & Regulatory Requirements

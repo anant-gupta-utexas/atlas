@@ -45,7 +45,7 @@ Phase 3 adds no content-pipeline stages. See Phase 2 tasks "Post-review follow-u
 - [`docs/2_architecture/TRD-v2.md`](../../../docs/2_architecture/TRD-v2.md) — the phase contract
   this TRS details. §3.4, §4 (Security), §6, §10, §13 #7–8, §14 (Phase 3), §11 (release tag
   v2.2) are the load-bearing sections.
-- [`docs/1_product_and_research/cli-backend-dispatch.md`](../../../docs/1_product_and_research/cli-backend-dispatch.md)
+- [`docs/1_product_and_research/cli-backend-dispatch.md`](../yaml-workflow-engine-design-notes/cli-backend-dispatch.md)
   — the architecture decision pinning **atlas** as the owner of headless-CLI subprocess dispatch
   (vs content-pipeline staying API-only). Sets the `CliBackend`-as-strategy direction this TRS
   implements verbatim.
