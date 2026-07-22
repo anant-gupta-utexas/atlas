@@ -10,6 +10,17 @@
 > [`docs/3_guides/yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md)
 > — that guide is the current source of truth for engine mechanics; this
 > document covers architecture-level structure and trade-offs.
+>
+> **v3 (planning):** an autonomous, minimal-input **loop mode** is designed on
+> top of the v2 engine — a long-running driver that pulls tickets from a
+> GitHub Issues queue, runs the existing pipeline in a worktree with a
+> selectable engine (`claude` / `codex`), and opens a PR (never merges). It
+> reuses `Pipeline` / `WorktreeManager` / `CliBackend` / `PlumbIO` unchanged;
+> the only additions are a queue adapter, a loop driver, a delivery hook, and
+> the `CodexBackend`. See the new [Loop mode (v3)](#loop-mode-v3) section below,
+> [`TRD-v3.md`](./TRD-v3.md) for the phase contract, and
+> [`loop-mode-design.md`](../1_product_and_research/loop-mode-design.md) for the
+> source-of-truth design note.
 
 ## Problem Statement & Requirements
 
@@ -182,6 +193,161 @@ it depends only on the `StageRunner` Protocol.
 
 Full schema, dispatch chain diagram, and error-type tables:
 [`yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md).
+
+### Loop mode (v3)
+
+> **Status:** planning. This section is the architecture-level view; the phase
+> contract is [`TRD-v3.md`](./TRD-v3.md) and the source-of-truth design note is
+> [`loop-mode-design.md`](../1_product_and_research/loop-mode-design.md). Loop
+> mode is **additive** — everything in v1/v2 above is unchanged. The loop
+> constructs and drives `Pipeline` instances exactly as `atlas.cli::run` does
+> today.
+
+Loop mode turns atlas from a single-run, operator-present orchestrator into a
+long-running driver. The operator's involvement collapses to two points:
+**filing a ticket** (a GitHub issue) and **reviewing a PR**. Between them the
+loop runs unattended. The moat is unchanged — human gate + durable state +
+plumb measurement — but the gate moves from an inline `input()` prompt to an
+**asynchronous, batchable PR review**.
+
+**What is genuinely new** (a queue adapter, a loop driver, a delivery hook, one
+backend) vs. **what is reused verbatim** (`Pipeline`, `WorktreeManager`,
+`CliBackend`, `PlumbIO`, `StateStore`, the whole runner-dispatch chain above):
+
+```mermaid
+graph TD
+    Issues[(GitHub Issues<br/>label atlas:ready)]
+    subgraph loop_new["loop mode — NEW (src/atlas/loop.py, queue_gh.py, deliverer.py)"]
+        Loop[loop driver<br/>tick / run_forever / reconcile]
+        Queue[queue_gh<br/>gh CLI adapter]
+        Triage[triage router<br/>wf:* label, else haiku]
+        Deliver[Deliverer<br/>push branch + gh pr create]
+    end
+    subgraph reused["REUSED from v1/v2 — unchanged"]
+        Pipeline[Pipeline<br/>state machine + gates]
+        Backends[CliBackend<br/>claude / codex]
+        Worktree[WorktreeManager]
+        PlumbIO[plumb_io]
+    end
+    Plumb[(plumb<br/>SQLite)]
+    Ops([Operator])
+
+    Ops -->|files issue| Issues
+    Loop -->|poll / claim / sync| Queue
+    Queue --> Issues
+    Loop --> Triage
+    Loop -->|construct + run per issue| Pipeline
+    Pipeline --> Backends
+    Pipeline --> Worktree
+    Pipeline --> PlumbIO
+    PlumbIO --> Plumb
+    Loop -->|on success| Deliver
+    Deliver -->|branch + PR| Issues
+    Issues -->|PR merged / closed| Loop
+    Loop -->|user_signal score| PlumbIO
+    Ops -->|review / merge PR| Issues
+```
+
+#### The loop cycle (`loop.py`)
+
+One **`tick()`** is a linear state machine — deliberately not a scheduler or a
+DAG engine:
+
+1. **Sync first.** For every in-flight (`atlas:working`) issue, read its PR
+   state: merged → write a `user_signal` **success** score (1.0), relabel
+   `atlas:done`, close the issue; closed-unmerged → `user_signal` **0.0**,
+   relabel `atlas:rejected`. Idempotent on re-tick.
+2. **Pull** the next `atlas:ready` issue across the configured repos (none →
+   idle sleep).
+3. **Triage** the lane (§below).
+4. **Claim** — swap `atlas:ready` → `atlas:working`, assign self.
+5. **Build the prompt** — issue title + body + guardrail "signs" + the existing
+   `context_hint` that points the agent at `tasks.md` and the worktree.
+6. **Dispatch** — one-shot: run `Pipeline(loop_dev)` to completion, then the
+   `Deliverer`; planned: run `dev-docs-be`, open a plan-only PR, **stop**.
+7. **Comment + relabel** — post the plumb `run_id` and a score summary on the PR.
+
+**`run_forever()`** wraps `tick()` with the configured interval, a per-day
+budget (run count + dollar cap from real `runs.dollar_cost`), and a circuit
+breaker (consecutive no-progress ticks or identical errors → cooldown → resume).
+It first calls **`reconcile_orphans()`** — a crash-recovery pass that resets any
+`atlas:working` issue with no open PR back to `atlas:ready` and prunes stale
+`.atlas/worktrees/*`. The loop processes **one issue per tick** and is
+**sequential** in v3.0–v3.2 (`concurrency=1`), so the v2 single-run-per-repo
+state model (`.atlas/current-run` holds one run) is preserved; concurrency > 1
+is deferred to Phase L4 and is the one change that requires per-run state keys.
+
+#### Two-lane routing
+
+The router **is** the v2 workflow-selection seam (`wf:*` label → workflow YAML),
+with a classifier fallback:
+
+- **One-shot lane** (`wf:quick` → `loop_dev.yaml`, an ungated
+  `plan → code_gen[isolate] → verify`): the whole issue is one work item.
+  Delivers a single PR (`Closes #n`). Quality is enforced by `verify` + the PR
+  review, not inline gates.
+- **Planned lane** (`wf:planned`): the loop produces a per-phase TRS via
+  `dev-docs-be`, opens a **plan-only PR** carrying just the `dev/active/<slug>/`
+  triad with the TRS's Pending Decisions surfaced in the PR body, and **stops**
+  for review. Later passes implement task-by-task (each its own worktree run +
+  `/code-review`) → **multiple PRs per issue** (`Refs #n`, then `Closes #n` on
+  the last). This is the loop driving the operator's own TRS discipline
+  autonomously, escalating decisions as a PR review.
+- **Router = hybrid:** an explicit `wf:*` label wins; otherwise a fast triage
+  step (haiku, single structured call) reads title + body and picks the lane,
+  recording its choice as a span on the run.
+
+#### Delivery (`Deliverer`)
+
+Delivery is a **post-success side-effect**, an injected collaborator (like
+`GatePrompter`) — **not** a `StageSpec`. Keeping it out of the workflow YAML
+means attended workflows never construct a `Deliverer` and delivery is not a
+measured pipeline stage. `GhPrDeliverer` pushes the worktree branch, runs
+`gh pr create`, and calls `WorktreeManager.cleanup()` — retiring the previously
+unwired `merge_back()` path. It **pushes a branch and opens a PR only**: never
+`main`, never a merge, never a force-push (asserted by test).
+
+#### Engines & telemetry
+
+Engine per run resolves through the existing 4-tier `CliBackend` cascade, with
+the loop injecting the backend from an `engine:*` label. **`CodexBackend`** is
+the one new backend (`codex exec --json -C <worktree> --sandbox
+workspace-write`, JSONL result parsing, fail-closed `preflight`), registered in
+`_KNOWN_BACKENDS` alongside `claude` and the experimental `agy`. In loop mode
+`ClaudeCodeBackend` also emits `--output-format json` so `total_cost_usd` +
+`usage` populate the `runs.tokens_in` / `tokens_out` / `dollar_cost` columns
+(which already exist) — guarded by a per-run flag so **attended** `dev` runs keep
+their plain-text stdout for gate-parity.
+
+#### Security posture (loop mode)
+
+- **Permission profile, not YOLO.** Loop runs use `--permission-mode
+  acceptEdits` + a curated `--allowedTools` allowlist (in the *target* repo's
+  checked-in `.claude/settings.json`) + a `--max-turns` cap. Never
+  `--dangerously-skip-permissions`; the worktree is a directory boundary, not a
+  filesystem sandbox. `CodexBackend` uses `--sandbox workspace-write` for the
+  equivalent confinement.
+- **PR-only delivery.** The loop never pushes `main`, merges, or force-pushes.
+- **Prompt injection via issue bodies.** Issue text becomes part of the agent
+  prompt. In a **private, single-author** repo (the v3 target) this equals the
+  operator typing the command. If a target repo is **public or multi-author**,
+  the loop MUST require an allowlisted issue author (`[loop].trusted_authors`)
+  before dispatch, or sanitize the body — a hard requirement gated on repo
+  visibility.
+- **Runaway bound.** A per-day **cost cap** and a **no-progress circuit
+  breaker** both bound the loop; neither alone is sufficient.
+
+#### New on-disk / config surface
+
+| File / config | Purpose |
+|---|---|
+| `.atlas.toml [loop]` / `~/.atlas/config.toml [loop]` | repos, poll interval, budgets, breaker thresholds, concurrency |
+| target repo `.claude/settings.json` | loop-run tool allowlist (per target repo) |
+| `.atlas/runs/<run_id>.log` | per-run log — the primary `atlas loop attach` tail surface |
+
+CLI: `atlas loop run` (foreground) / `start` (detached tmux session) / `stop` /
+`status` / `attach`. **tmux is observability only** — control is the CLI + files,
+never tmux send-keys.
 
 ### `atlas.state` — `tasks.md` and `.atlas/current-run`
 

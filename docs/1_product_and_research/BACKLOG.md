@@ -27,6 +27,34 @@ Grouped by theme, not by origin doc. Each item notes where it came from.
       self-skips silently without it. *(from `.github/workflows/ci.yml`,
       `docs/4_testing/index.md`)*
 
+## Loop mode (v3) — planning locked, not yet built
+
+Autonomous, minimal-input development loop on top of the v2 engine. Design note:
+[`loop-mode-design.md`](loop-mode-design.md); phase contract:
+[`../2_architecture/TRD-v3.md`](../2_architecture/TRD-v3.md); architecture:
+[`../2_architecture/system_design.md`](../2_architecture/system_design.md#loop-mode-v3).
+Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
+
+- [ ] **Phase L0 — honest baseline** *(→ v3.0)*. Version reconcile + tag `v2.2`;
+      first-ever live attended `atlas run` on the real `claude` backend;
+      `ClaudeCodeBackend` loop-mode JSON telemetry (cost/tokens → plumb);
+      headless permission profile; `Deliverer`/`GhPrDeliverer` (push branch +
+      `gh pr create` + `cleanup()`, retiring the dead `merge_back()` path).
+- [ ] **Phase L1 — CodexBackend + `loop_dev.yaml`** *(→ v3.0)*. `codex exec
+      --json` backend registered in `_KNOWN_BACKENDS`; ungated loop workflow
+      (`plan → code_gen → verify`); Codex section added to
+      `headless-clis-reference.md`.
+- [ ] **Phase L2 — the loop daemon** *(→ v3.1)*. `queue_gh.py` (GitHub Issues
+      adapter) + `loop.py` (tick / run_forever / reconcile_orphans + two-lane
+      triage + budgets + circuit breaker); `[loop]` config; `atlas loop
+      run|start|stop|status|attach` (tmux for observability only).
+- [ ] **Phase L3 — self-healing + routing** *(→ v3.2)*. Pre-PR plumb judge gate;
+      diagnosis-injected single child-run retry (`parent_run_id`); failed runs
+      → plumb examples; score-informed engine/workflow routing (stretch).
+- [ ] **Phase L4 — scale-out** *(→ v3.3)*. Second target repo (plumb backlog);
+      `concurrency > 1` (lift the `.atlas/current-run` single-run assumption via
+      per-run state keys); weekly cost-per-landed-PR report.
+
 ## v1.1-era carryforward (pre-YAML-engine backlog, still open)
 
 - [ ] **Log rotation.** `.atlas/runs/<run_id>.log` has no rotation; logs
