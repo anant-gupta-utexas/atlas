@@ -15,8 +15,22 @@ FAILED tests/integration/test_job_adapters_real_import.py::test_score_jobs_adapt
 
 This is the exact drift TRD-v3 §14 Phase L0 calls out ("fix or `xfail` the content-pipeline
 drift integration test so a green suite means green") — it is not hypothetical, it is the
-current state of `main` as of this TRS's authoring. The `score_jobs` use case appears to have
-moved/renamed on the content-pipeline side since atlas's adapter code was written.
+current state of `main` as of this TRS's authoring.
+
+**Root cause, verified against the sibling repo (2026-07-21) — it is a decomposition, not a
+rename:** content-pipeline (at `/Users/anant/PersonalProjects/content-pipeline`) split
+`ScoreJobsUseCase` into a three-stage pipeline —
+`application/use_cases/score_jobs_{ingest,prep,score}.py` (+ `score_merge.py`) — and **no
+`ScoreJobsUseCase` class exists anywhere in that repo**. atlas's
+`src/atlas/library_adapters/score_jobs_adapter.py:16` still imports the pre-split class and
+calls `run_pending()` on it.
+
+That makes this **neither a one-line fix nor an unreachable failure**: re-targeting the
+adapter requires designing how it composes ingest → prep → score, which is **`job`-workflow
+scope, unrelated to loop mode**. L0 therefore `xfail`s it (T-L0.3) with a reason string
+naming the three replacement modules, and frames it as *"the adapter targets a superseded
+API"* — **not** *"the drift test is broken."* The test is reporting a correct signal; L0 is
+just not the phase that acts on it. TRD-v3 §14 was amended upstream to record this.
 
 Also confirmed: `pyproject.toml` currently declares `version = "1.0.0"` while `STATUS.md`,
 git commit messages, and every doc reference the shipped state as **v2.2**. This is the
@@ -85,7 +99,9 @@ Neither of these blocks L0 from starting; they **are** two of L0's tasks (T-L0.2
   the caller decomposes `UsageStats` into the tuple and carries `total_cost_usd` separately
   (in-memory only).
 - `pyproject.toml` — version bump `1.0.0` → `2.2.0`.
-- `tests/integration/test_job_adapters_real_import.py` — fix or `xfail`-mark the drift test.
+- `tests/integration/test_job_adapters_real_import.py` — `xfail(strict=False)`-mark the
+  superseded-adapter test (reason string names `score_jobs_{ingest,prep,score}`). **Not** a
+  fix — see the root-cause note in Status above.
 - `tests/unit/test_cli_backend.py` — new test cases for the telemetry/permission argv paths.
 - `tests/integration/test_cli_backend_dispatch.py` — new loop-mode-dispatch + attended-invariance
   tests.
@@ -112,7 +128,9 @@ Neither of these blocks L0 from starting; they **are** two of L0's tasks (T-L0.2
   schema changes at all in this phase.
 - `src/atlas/workflows/*.yaml` — no new workflow in L0 (`loop_dev.yaml` is Phase L1).
 - `src/atlas/composite_runner.py`, `library_runner.py`, `shell_runner.py`,
-  `library_adapters/*` (except the possible T-L0.3 fix), `plugin_resolver.py`,
+  `library_adapters/*` (**including `score_jobs_adapter.py` — T-L0.3 marks the test `xfail`
+  and does NOT touch the adapter; re-targeting it is `job`-workflow scope**),
+  `plugin_resolver.py`,
   `post_commit_hook.py`, `state.py`, `workflow_loader.py`, `stages.py` — all untouched.
 - `tests/e2e/test_e2e_happy_path.py`, `tests/integration/test_main_branch_isolation.py` — run
   unmodified (regression proof); `test_main_branch_isolation.py`'s assertion style is the
@@ -129,7 +147,7 @@ design has drifted from this TRS — pause and reconcile before proceeding.
 | - | --- | --- |
 | 1 | `parse_usage()` is a **new method on `ClaudeCodeBackend`, not a `CliBackend` Protocol member**. | Keeps the Protocol at 3 methods for every backend (`AntigravityBackend`, future `CodexBackend` in L1) rather than forcing every backend to implement token/cost extraction even if their CLI doesn't expose it the same way. `SubprocessStageRunner` duck-types (`hasattr`/optional-Protocol check) before calling it. See plan §"Dependencies & Interfaces". |
 | 2 | JSON-vs-plain-text detection in `parse_result`/`parse_usage` is **by stdout content sniffing, not a mode flag threaded through the method signature**. | `parse_result`'s signature is fixed by the `CliBackend` Protocol (`stdout, stderr, returncode`) shared with `AntigravityBackend`; adding a mode parameter would be backend-specific Protocol pollution. `SubprocessStageRunner` already knows it requested `telemetry=json` via the argv it built — it just calls `parse_usage` unconditionally and gets `None` back for attended (plain-text) dispatches. See plan §"Algorithm & Logic Design". |
-| 3 | `Deliverer.deliver()` takes **`title`/`body` strings**, not TRD-v3 §3.7's literal `issue`/`scores` objects. | L0 has no `issue` (GitHub Issues queue) or `scores` (loop run-scoring summary) types — those are Phase L2 concepts. The caller (a manual harness in L0; `loop.py` in L2) composes `title`/`body` from whatever context it has. Flagged as **Pending Decision #1** in the plan in case the maintainer wants the wider signature locked now instead. |
+| 3 | `Deliverer.deliver()` ships **narrow** in L0 — `(*, run_id, branch, worktree_path, title, body)`; TRD-v3 §3.7's `issue`/`scores` shape is the **L2 target**, and L0 implements a documented subset. **CONFIRMED 2026-07-21.** | L0 has no `Issue`/`Score` types (both are L2). The placeholder alternative (`dict \| None`) gives *illusory* Protocol stability — unchecked ≠ stable, and it designs the type twice with no protection in between. Widening in L2 is mechanical: params are **keyword-only**, so adding `issue`/`scores` is additive and mypy flags every call site. `title`/`body` stay pre-rendered strings because composing a body from an issue is **L2's job, not the `Deliverer`'s** — that separation is what lets L2 extend without disturbing delivery mechanics. A callout box in the plan warns future readers that the TRD-vs-code signature difference is intentional. |
 | 4 | `record_span()` gains `tokens=(in, out)` as an **optional kwarg on the existing method**, matching plumb's real `add_span(tokens=...)` signature — not a `usage=UsageStats` kwarg, and not a new sibling `record_usage()` call. | Plumb's confirmed API (`plumb/api.py:264`) takes a bare `(in, out)` tuple and has no per-span cost field. One call site to keep in sync. Run-level `dollar_cost` is unreachable in plumb v1.0.1's online path → deferred to plumb P1-a (BACKLOG.md). Spike **resolved** (was Pending Decision #2). |
 | 5 | Push safety (`GhPrDeliverer` never touches `main`, never `--force`) is enforced **by construction (hardcoded argv shape) plus a defensive branch-name assertion**, not by a runtime config flag. | Matches TRD-v3 §4 Security's explicit ask: "asserted never to push `main` or force-push" (§13 #4) — a config flag could be misconfigured; a hardcoded argv shape + assertion cannot silently drift. Mirrors Phase 3's `test_subprocess_runner_agy_missing_auth_returns_failure_no_subprocess` pattern of asserting the dangerous call *never fires*, not just checking a return value. |
 | 6 | On `git push`/`gh pr create` failure, the worktree is **not** cleaned up. | Preserves the unpushed/un-PR'd work for manual recovery — matches the general atlas posture of "fail visibly, don't destroy state" (e.g. `WorktreeManager.cleanup()` itself never touches `main` and is already designed to be safe to retry). A cleanup-after-failure would make a failed delivery unrecoverable without re-running the whole stage. |
@@ -199,6 +217,13 @@ per TRD-v3 §14's own phase split. Not tracked here.)
   in plumb v1.0.1's online path (`finalize_run` sets none; no `RunHandle` cost setter) —
   deferred to plumb P1-a (`set_usage` + `finalize_run` threading), tracked in BACKLOG.md. L0
   writes per-span `tokens` only.
-- **A starter `.claude/settings.json` allowlist for atlas's own repo.** Deferred to L2 per
-  Pending Decision #4 — the required tool set is easier to pin down once `loop_dev.yaml` (L1)
-  and the actual loop prompt shape (L2) exist.
+- **A starter `.claude/settings.json` allowlist for atlas's own repo.** **Deferred to L2 —
+  decided, not merely postponed.** An allowlist is a security boundary with *asymmetric*
+  failure modes: too narrow → the loop stalls on a denied tool (loud, obvious, cheap); too
+  broad → an unattended agent's capability is silently widened with no signal. The second is
+  the one you must never author blind, and guessing biases **generous** — the wrong
+  direction. L0 cannot know the tool set (`loop_dev.yaml` is L1; prompt shape is L2). **L0
+  defines the permission *profile*** (`--permission-mode acceptEdits` + `--max-turns` + "an
+  allowlist is required and lives in the target repo"); **L2 derives the *contents*
+  empirically** — first run under a deliberately tight list, widening only on observed
+  denials.
