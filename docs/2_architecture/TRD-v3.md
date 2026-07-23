@@ -56,7 +56,7 @@ The v2 TRD positioned atlas against Claude Code's dynamic workflows: the commodi
 ### KPIs this build must make measurable
 
 - **Zero-touch delivery.** A labeled issue produces a PR with no human input between labeling and review (the headline smoke test).
-- **Cost-per-landed-PR.** Total `dollar_cost` across runs / issues reaching a merged PR — queryable from plumb.
+- **Cost-per-landed-PR.** Total `dollar_cost` across runs / issues reaching a merged PR — queryable from plumb **once plumb P1-a (`set_usage`) lands**; until then only token counts are durable (§3.6).
 - **Intervention rate.** Fraction of runs requiring a human nudge beyond the standard PR review.
 - **Engine A/B.** The same task class run under `claude` vs `codex`, compared in `plumb run stats`.
 - **Self-healing lift (v3.2).** Fraction of first-attempt failures rescued by a diagnosis-injected retry vs. blind failure.
@@ -194,7 +194,16 @@ def run_forever(cfg: LoopConfig) -> None:
 
 Loop runs require two things attended runs don't:
 
-**Telemetry.** `ClaudeCodeBackend.build_argv` adds `--output-format json` for loop runs; `parse_result` maps `subtype` → status and surfaces `total_cost_usd` + `usage` (`input_tokens` / `output_tokens`). These thread into plumb via `plumb_io.py` to populate the `runs.tokens_in` / `tokens_out` / `dollar_cost` columns (which already exist). **Guard behind a per-run flag** so attended `dev` runs keep human-readable stdout — the v2 Phase-3 decision that Claude stays plain-text for gate-parity holds for attended mode only.
+**Telemetry.** `ClaudeCodeBackend.build_argv` adds `--output-format json` for loop runs; `parse_result` maps `subtype` → status and surfaces `total_cost_usd` + `usage` (`input_tokens` / `output_tokens`). **Guard behind a per-run flag** so attended `dev` runs keep human-readable stdout — the v2 Phase-3 decision that Claude stays plain-text for gate-parity holds for attended mode only.
+
+**Where that telemetry actually lands (verified against plumb v1.0.1 — tokens and dollars are *not* symmetric):**
+
+| Signal | Sink | Status |
+|---|---|---|
+| `usage.input_tokens` / `output_tokens` | **Span-level** — `RunHandle.add_span(tokens=(in, out))` (`plumb/api.py:264`), threaded via `plumb_io.py` | **Works today.** Persists *summed* into `spans.tokens`; the in/out split is lost at the DB layer until plumb v1.1. |
+| `total_cost_usd` | **Run-level only** — there is **no per-span cost column** in plumb (not in v1.0.1, and not in v1.1: `spans.attributes` is JSON, and P1-a's `set_usage` is deliberately run-level) | **Blocked on plumb P1-a.** Parsed and surfaced in-memory (logs, PR-comment body) but has **no durable sink** until `set_usage` + `finalize_run` threading land. |
+
+The `runs.tokens_in` / `tokens_out` / `dollar_cost` columns exist in plumb's schema, but **the online `with run()` path does not write them** — `finalize_run` (`plumb/storage_sqlite.py:431`, `_FINALIZE_RUN` SQL) sets none of them and `RunHandle` exposes no cost/usage setter. A live run today therefore produces a `runs` row with `dollar_cost = NULL`. Do **not** design against those columns before plumb P1-a; do **not** go looking for a per-span cost sink, as none exists.
 
 **Permissions.** Loop runs use a non-interactive profile: **not** `--bare` (the pipeline needs plugin/skill discovery), but `--permission-mode acceptEdits` + a curated `--allowedTools` allowlist (stored in the *target repo's* `.claude/settings.json`, checked in) + a `--max-turns` cap. **No `--dangerously-skip-permissions`** — the worktree is a directory boundary, not a filesystem sandbox. `CodexBackend` uses `--sandbox workspace-write` for the equivalent confinement.
 
@@ -260,7 +269,7 @@ All v1/v2 constraints carry forward. Additionally:
 - **Codex CLI required for `engine:codex`.** `codex exec` must be installed and authenticated (`OPENAI_API_KEY` or `codex login`). `CodexBackend.preflight()` fails closed if not.
 - **tmux required for `atlas loop start/attach`** (the detached-session convenience). `atlas loop run` works without tmux.
 - **Sequential in v3.0–v3.2.** `concurrency=1`; the v2 single-run-per-repo state model is preserved. Concurrency > 1 (Phase L4) is the one place that requires lifting the `.atlas/current-run` single-run assumption.
-- **plumb v1.0.1 is sufficient for v3.0–v3.2.** Run-level cost/token columns and child runs already exist. plumb v1.1 (durable `rationale`, first-class `add_example`, idempotent scoring) improves the self-healing and sync paths but is not a hard blocker — the interim private-API / local-dedupe patterns from v2 carry the gap.
+- **plumb v1.0.1 is sufficient for v3.0–v3.2 — with one carve-out.** Child runs and per-span token writes work today. The run-level cost/token *columns* exist but are **not writable** from the online `with run()` path, so **run-level `dollar_cost` is a genuine plumb P1-a dependency**, not an interim-pattern gap: it blocks the cost half of cost-per-landed-PR (§3.6, §13 #1/#5/#12) and the `max_dollars_per_day` budget cap (§12). Everything else in plumb v1.1 (durable `rationale`, first-class `add_example`, idempotent scoring) improves the self-healing and sync paths but is not a hard blocker — the interim private-API / local-dedupe patterns from v2 carry those gaps.
 - **Private, single-author target repos in v3.** The prompt-injection mitigation (§4 Security) is deferred *only* under this assumption and becomes mandatory the moment it no longer holds.
 
 ---
@@ -300,7 +309,8 @@ All v1/v2 integrations carry forward. New integrations:
 repos = ["anant-gupta-utexas/atlas"]     # target repos (v3.0: atlas builds atlas)
 poll_interval_s = 60
 max_runs_per_day = 20
-max_dollars_per_day = 10.0                # checked against summed runs.dollar_cost
+max_dollars_per_day = 10.0                # pre-P1-a: summed from in-process total_cost_usd,
+                                          # NOT runs.dollar_cost (unwritable — §3.6, §12)
 max_turns = 40                            # per-run agent turn cap
 no_progress_limit = 3                     # breaker: consecutive no-progress ticks
 identical_error_limit = 5                 # breaker: consecutive identical errors
@@ -315,7 +325,8 @@ concurrency = 1                           # v3.0–v3.2 fixed at 1
 
 | plumb concern | Verdict | Action |
 |---|---|---|
-| `runs.tokens_in` / `tokens_out` / `dollar_cost` | Exists | Populate from Claude/Codex JSON usage (§3.6) |
+| `spans.tokens` (per-span) | Works as-is | Populate from Claude/Codex JSON `usage` via `add_span(tokens=(in, out))` — persists summed (§3.6) |
+| `runs.tokens_in` / `tokens_out` / `dollar_cost` | **Columns exist but are unwritable** from the online `with run()` path (`finalize_run` sets none; no `RunHandle` cost setter) | **Blocked on plumb P1-a (`set_usage` + finalize threading).** Do not design against these before then (§3.6) |
 | `user_signal` scorer | Works as-is | PR merged → 1.0; closed-unmerged → 0.0 (§3.1 sync) |
 | `parent_run_id` child runs | Works as-is | Self-healing retry lineage (v3.2) |
 | `examples` (`origin_run_id`) | Works as-is | Failed-run capture (v3.2); interim private-API write from v2 carries until plumb v1.1 |
@@ -360,7 +371,7 @@ None. Same as v1/v2.
 | **One-shot lane** | `loop_dev` runs to completion → `Deliverer` opens exactly one PR (`Closes #n`). |
 | **Planned lane stop** | `dev-docs-be` runs → plan-only PR with triad + Pending Decisions → loop STOPS (no code_gen this pass). |
 | **CodexBackend argv/parse** | `build_argv` produces the `codex exec --json -C … --sandbox workspace-write` list; `parse_result` extracts status/stats from JSONL; `preflight` fails closed on missing auth (asserts no subprocess spawned). |
-| **Claude JSON telemetry** | Loop-mode `ClaudeCodeBackend` parses `total_cost_usd` + `usage` and writes `tokens_in/out` + `dollar_cost` to plumb; attended mode stays plain-text (byte-identity preserved). |
+| **Claude JSON telemetry** | Loop-mode `ClaudeCodeBackend` parses `total_cost_usd` + `usage`; tokens reach plumb as `add_span(tokens=(in, out))`; `total_cost_usd` is surfaced in-memory only (no durable sink pre-P1-a — §3.6). Attended mode stays plain-text (byte-identity preserved). |
 | **Deliverer safety** | Pushes a branch + `gh pr create`; **never** pushes `main`, **never** `--force`. |
 | **Budget cutoff** | `max_runs_per_day` / `max_dollars_per_day` halt dispatch. |
 | **Circuit breaker** | `no_progress_limit` / `identical_error_limit` open the breaker → cooldown → resume. |
@@ -399,7 +410,7 @@ Same as v1/v2 — no deployed surface; the repo is the artifact. The loop runs o
 | Risk | Impact | Probability | Mitigation |
 |---|---|---|---|
 | Loop mode becomes a framework (schedulers, DAGs, plugin system) | High | Medium | The loop is a `while` over `tick()`; `tick()` is a linear state machine. New code = queue adapter + loop + deliverer + one backend. No scheduler, no DAG engine. If it grows one, it has drifted from scope — same vow as v1/v2. |
-| Runaway cost / infinite loop | High | Medium | Dual bound: per-day cost cap (`max_dollars_per_day` from real `runs.dollar_cost`) **and** no-progress circuit breaker. Both required; neither alone is sufficient. |
+| Runaway cost / infinite loop | High | Medium | Dual bound: per-day cost cap **and** no-progress circuit breaker. Both required; neither alone is sufficient. ⚠ **`max_dollars_per_day` cannot read `runs.dollar_cost` until plumb P1-a** (that column is never written — §3.6). Until then L2 must enforce the cap from the **in-memory `total_cost_usd`** each backend returns per run, accumulated by the loop process itself (and reset/persisted across restarts), or fall back to `max_runs_per_day` as the hard bound. Resolve in the L2 TRS. |
 | Prompt injection via issue body | High | Low (private repo) → High (if public) | Private single-author assumption in v3; `trusted_authors` allowlist becomes mandatory the moment a repo is public/multi-author (§4). |
 | Codex headless auth blocks `engine:codex` | Medium | Medium | Opt-in; default `claude`; `preflight()` fails closed with a clear error; Claude-only fallback is a config change, not a rewrite. |
 | Crash strands an `atlas:working` issue | Medium | Medium | `reconcile_orphans()` on startup resets stale labels + prunes worktrees. |
@@ -427,13 +438,13 @@ Same as v1/v2 — no deployed surface; the repo is the artifact. The loop runs o
 v3 milestones ship when the following hold.
 
 ### v3.0 — Measured baseline + engines + delivery (Phases L0+L1 exit)
-1. **Live attended run, measured.** A real `atlas run "<task>"` on the `claude` backend produces a plumb `runs` row with real `tokens_in/out` + `dollar_cost` (the first-ever live run — see L0).
+1. **Live attended run, measured.** A live `atlas run "<task>"` on the `claude` backend produces a plumb run whose `code_gen` span carries real `tokens` from the backend JSON (the first-ever live run — see L0). **Run-level `dollar_cost` (and the run-level token roll-up) is deferred to plumb P1-a (`set_usage`) and is NOT an L0 exit gate** — it becomes real when plumb v1.1 lands, and is verified at L2 (cost-per-landed-PR). See §3.6 for why tokens and dollars are not symmetric here.
 2. **Attended-mode invariance.** Full v2 suite green; `atlas run` unchanged.
 3. **`CodexBackend` dispatch.** A `loop_dev` run under `engine:codex` produces a valid `StageOutcome` (mocked in CI via captured JSONL; real dispatch in manual testing if auth allows). `preflight` fails closed on missing auth with no subprocess spawned.
 4. **Delivery primitive.** The `Deliverer` pushes a branch + opens a PR for a completed run and calls `cleanup()`; asserted never to push `main` or force-push.
 
 ### v3.1 — The loop daemon (Phase L2 exit)
-5. **Zero-touch delivery (headline).** One `atlas:ready` issue in the atlas repo → `atlas loop start` → a PR appears (`Closes #n`) with a plumb `run_id` comment, with **zero keystrokes between labeling and reviewing**. Merging it makes the next tick write a `user_signal` success and close the issue.
+5. **Zero-touch delivery (headline).** One `atlas:ready` issue in the atlas repo → `atlas loop start` → a PR appears (`Closes #n`) with a plumb `run_id` comment, with **zero keystrokes between labeling and reviewing**. Merging it makes the next tick write a `user_signal` success and close the issue. **Requires plumb P1-a** for the cost half of the story: run-level `dollar_cost` (and therefore cost-per-landed-PR) is unwritable until `set_usage` + `finalize_run` threading land — until then L2 reports tokens, not dollars (§3.6).
 6. **Two-lane routing works.** A `wf:quick` issue yields one PR; a `wf:planned` issue yields a plan-only PR (triad + Pending Decisions) and the loop stops.
 7. **Budgets & breaker.** Per-day cost/run caps halt dispatch; the breaker opens on no-progress/identical-error thresholds and resumes after cooldown.
 8. **Crash recovery.** Killing the loop mid-run and restarting resets the stranded issue and prunes its worktree.
@@ -444,7 +455,7 @@ v3 milestones ship when the following hold.
 
 ### v3.3 — Scale-out (Phase L4 exit)
 11. **Second repo + concurrency.** The plumb repo runs as a second target; `concurrency > 1` works with per-run state keys.
-12. **Weekly report.** `plumb run stats` yields a cost-per-landed-PR + intervention-rate summary.
+12. **Weekly report.** `plumb run stats` yields a cost-per-landed-PR + intervention-rate summary. **Requires plumb P1-a** for the cost dimension (§3.6); pre-P1-a the report is tokens-per-landed-PR + intervention rate.
 
 ### Cross-cutting
 13. **LoC discipline.** Loop-mode code (loop + queue adapter + deliverer + CodexBackend) stays small — a state machine, not a framework. Target ≤ ~500 lines net across the new modules.
@@ -465,7 +476,7 @@ v3 milestones ship when the following hold.
 **Engineering scope summary:**
 - Version reconciliation: bump `pyproject.toml` → `2.2.0`, tag `v2.2`; fix or `xfail` the content-pipeline drift integration test so a green suite means green.
 - **First live attended run** (has never happened): `atlas run "<small task>" --workflow dev` against the real `claude` backend; confirm subprocess spawn + gate prompts + a plumb run with spans. Capture findings into `headless-clis-reference.md`.
-- `ClaudeCodeBackend` loop-mode telemetry (§3.6): `--output-format json`; `parse_result` surfaces `total_cost_usd` + `usage`; thread into plumb via `plumb_io.py`. Guard behind a per-run flag (attended stays plain-text).
+- `ClaudeCodeBackend` loop-mode telemetry (§3.6): `--output-format json`; `parse_result` surfaces `total_cost_usd` + `usage`; thread into plumb via `plumb_io.py`. Guard behind a per-run flag (attended stays plain-text). **Note (verified against plumb v1.0.1):** tokens land at the **span** level via `add_span(tokens=(in, out))`; `total_cost_usd` has **no durable sink** until plumb P1-a and is in-memory only. L0 reports tokens, not dollars — do not build against `runs.dollar_cost` here (§3.6, §13 #1).
 - Headless permission profile (§3.6): `--permission-mode acceptEdits` + curated `--allowedTools` (target repo `.claude/settings.json`) + `--max-turns`. No `--dangerously-skip-permissions`.
 - `Deliverer` / `GhPrDeliverer` (§3.7): push branch + `gh pr create` + `WorktreeManager.cleanup()`; replaces the dead `merge_back()` path. Exercised manually in L0; the loop calls it in L2.
 
@@ -532,7 +543,7 @@ v3 milestones ship when the following hold.
 **Engineering scope summary:**
 - Add the plumb repo as a second target (its own backlog → issues).
 - Concurrency > 1: lift the `.atlas/current-run` single-run assumption via per-run state keys (Appendix A); bound by a semaphore at `[loop].concurrency`.
-- Weekly `plumb run stats` → a cost-per-landed-PR + intervention-rate report.
+- Weekly `plumb run stats` → a cost-per-landed-PR + intervention-rate report (cost dimension requires plumb P1-a — §3.6).
 
 **Exit criteria:** §13 items 11, 12.
 
@@ -545,7 +556,7 @@ Grounded in the current v2.2 source. "New" modules are the only substantial addi
 | File | Action | Change |
 |---|---|---|
 | `cli_backend.py` | Modify | Add `CodexBackend`; extend `_KNOWN_BACKENDS` / `make_backend()`. Add `--output-format json` (loop-mode flag) to `ClaudeCodeBackend`; surface `total_cost_usd` + `usage` in `parse_result`. |
-| `plumb_io.py` | Modify | Thread `tokens_in` / `tokens_out` / `dollar_cost` from backend usage into the run/span writes. |
+| `plumb_io.py` | Modify | Thread backend `usage` into the **span** write as `add_span(tokens=(in, out))`. Run-level `tokens_in`/`tokens_out`/`dollar_cost` are **not** written (unwritable pre-P1-a — §3.6). |
 | `worktree.py` | Wire | `cleanup()` finally called (by the `Deliverer`); `merge_back()` retired for loop mode. |
 | `workflows/loop_dev.yaml` | New | The ungated one-shot workflow (§3.4). |
 | `queue_gh.py` | New | GitHub Issues adapter (§3.1). |
