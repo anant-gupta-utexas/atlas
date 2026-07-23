@@ -12,6 +12,7 @@ from atlas.cli_backend import (
     ClaudeCodeBackend,
     CliBackend,
     UnknownBackendError,
+    UsageStats,
     make_backend,
     resolve_backend,
 )
@@ -122,6 +123,149 @@ def test_claude_code_backend_parse_result_nonzero_exit() -> None:
 
 def test_claude_code_backend_preflight_is_none() -> None:
     assert ClaudeCodeBackend().preflight() is None
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeBackend — loop-mode telemetry / permission-profile argv (T-L0.4)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_code_backend_argv_telemetry_json() -> None:
+    argv = ClaudeCodeBackend().build_argv(
+        prompt="p",
+        model="haiku",
+        add_dirs=[],
+        timeout_s=60,
+        extra_flags={"telemetry": "json"},
+    )
+    assert "--output-format" in argv
+    assert argv[argv.index("--output-format") + 1] == "json"
+
+
+def test_claude_code_backend_argv_permission_profile_flags() -> None:
+    argv = ClaudeCodeBackend().build_argv(
+        prompt="p",
+        model="haiku",
+        add_dirs=[],
+        timeout_s=60,
+        extra_flags={
+            "permission_mode": "acceptEdits",
+            "allowed_tools": "Bash(git *),Edit",
+            "max_turns": "10",
+        },
+    )
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    assert "--allowedTools" in argv
+    assert argv[argv.index("--allowedTools") + 1] == "Bash(git *),Edit"
+    assert "--max-turns" in argv
+    assert argv[argv.index("--max-turns") + 1] == "10"
+    assert "--dangerously-skip-permissions" not in argv
+
+
+@pytest.mark.parametrize(
+    "extra_flags",
+    [
+        {},
+        {"telemetry": "json"},
+        {"permission_mode": "acceptEdits"},
+        {"allowed_tools": "*"},
+        {"max_turns": "1"},
+        {
+            "telemetry": "json",
+            "permission_mode": "acceptEdits",
+            "allowed_tools": "*",
+            "max_turns": "5",
+        },
+    ],
+)
+def test_claude_code_backend_argv_never_skips_permissions(
+    extra_flags: dict[str, str],
+) -> None:
+    argv = ClaudeCodeBackend().build_argv(
+        prompt="p", model="haiku", add_dirs=[], timeout_s=60, extra_flags=extra_flags
+    )
+    assert "--dangerously-skip-permissions" not in argv
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeBackend — parse_result JSON envelope (T-L0.4)
+# ---------------------------------------------------------------------------
+
+
+def _json_envelope(**overrides: object) -> str:
+    import json as _json
+
+    payload: dict[str, object] = {
+        "subtype": "success",
+        "result": "done",
+        "total_cost_usd": 0.0123,
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    }
+    payload.update(overrides)
+    return _json.dumps(payload)
+
+
+def test_claude_code_backend_parse_result_json_success() -> None:
+    status, output_text, error_type = ClaudeCodeBackend().parse_result(_json_envelope(), "", 0)
+    assert status == "success"
+    assert output_text == "done"
+    assert error_type is None
+
+
+@pytest.mark.parametrize(
+    "subtype",
+    [
+        "error_during_execution",
+        "error_max_turns",
+        "error_max_budget_usd",
+        "error_max_structured_output_retries",
+    ],
+)
+def test_claude_code_backend_parse_result_json_error_subtypes(subtype: str) -> None:
+    stdout = _json_envelope(subtype=subtype, result=None)
+    status, output_text, error_type = ClaudeCodeBackend().parse_result(stdout, "", 0)
+    assert status == "failure"
+    assert error_type == f"claude_{subtype}"
+
+
+def test_claude_code_backend_parse_result_json_malformed_never_raises() -> None:
+    stdout = '{"subtype": "success", "result": '  # truncated / invalid JSON
+    status, output_text, error_type = ClaudeCodeBackend().parse_result(stdout, "", 0)
+    assert status == "failure"
+    assert output_text == stdout
+    assert error_type == "claude_unparseable_json"
+
+
+def test_claude_code_backend_parse_result_plain_text_unchanged() -> None:
+    status, output_text, error_type = ClaudeCodeBackend().parse_result("plain text", "", 0)
+    assert status == "success"
+    assert output_text == "plain text"
+    assert error_type is None
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeBackend — parse_usage (T-L0.4)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_code_backend_parse_usage_plain_text_is_none() -> None:
+    assert ClaudeCodeBackend().parse_usage("plain text") is None
+
+
+def test_claude_code_backend_parse_usage_json_envelope() -> None:
+    usage = ClaudeCodeBackend().parse_usage(_json_envelope())
+    assert usage == UsageStats(total_cost_usd=0.0123, input_tokens=100, output_tokens=50)
+
+
+def test_claude_code_backend_parse_usage_missing_keys_no_keyerror() -> None:
+    stdout = '{"subtype": "success", "result": "done"}'
+    usage = ClaudeCodeBackend().parse_usage(stdout)
+    assert usage == UsageStats(total_cost_usd=None, input_tokens=None, output_tokens=None)
+
+
+def test_claude_code_backend_parse_usage_malformed_json_is_none() -> None:
+    assert ClaudeCodeBackend().parse_usage('{"subtype": ') is None
 
 
 # ---------------------------------------------------------------------------

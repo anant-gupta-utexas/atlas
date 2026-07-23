@@ -14,11 +14,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from atlas.cli_backend import ClaudeCodeBackend, UsageStats
 from atlas.orchestrator import (
     GateDecision,
     RunContext,
     SubprocessStageRunner,
 )
+from atlas.plumb_io import PlumbIO
 from atlas.stages import StageSpec
 from atlas.workflow_loader import LoadedWorkflow, load_workflow_file
 
@@ -242,3 +244,113 @@ def test_job_workflow_tailor_materials_dispatches_via_claude_backend(
     assert "--bare" not in argv
     assert "--output-format" not in argv
     assert outcome.status == "success"
+
+
+# ---------------------------------------------------------------------------
+# test_dev_pipeline_unaffected_by_phase_l0 (T-L0.7 / TRD-v3 §13 #2)
+# ---------------------------------------------------------------------------
+
+
+def test_dev_pipeline_unaffected_by_phase_l0(tmp_path: Path) -> None:
+    """Attended dev-pipeline dispatch is provably unaffected by Phase L0.
+
+    SubprocessStageRunner.run() never sets extra_flags in L0 — no CLI surface
+    exists yet to request loop-mode telemetry/permission flags (that's L2's
+    `atlas loop` command). This proves the byte-identical-argv claim end to
+    end, not just at the ClaudeCodeBackend.build_argv unit-test level.
+    """
+    dev_wf = load_workflow_file(_DEV_YAML)
+    research = next(s for s in dev_wf.stages if s.name == "research")
+
+    runner = SubprocessStageRunner(model="haiku", default_backend="claude", loaded_workflow=dev_wf)
+    ctx = RunContext(
+        run_id="e" * 32,
+        slug="test-dev-l0",
+        task="add cache middleware",
+        repo_root=tmp_path,
+    )
+
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout="research output")
+        outcome = runner.run(ctx=ctx, stage=research)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "claude"
+    assert "--output-format" not in argv
+    assert "--permission-mode" not in argv
+    assert "--allowedTools" not in argv
+    assert "--max-turns" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+    assert outcome.status == "success"
+    assert outcome.output_text == "research output"
+
+
+# ---------------------------------------------------------------------------
+# test_claude_backend_loop_mode_telemetry_end_to_end (T-L0.7 / TRD-v3 §13 #1)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_backend_loop_mode_telemetry_end_to_end(tmp_path: Path) -> None:
+    """Loop-mode dispatch (mocked subprocess) -> UsageStats -> PlumbIO.record_span.
+
+    No `atlas loop` command exists in L0 (that's L2), so this test drives the
+    telemetry pieces directly the way a future loop-mode call site would,
+    proving build_argv/parse_result/parse_usage/record_span compose correctly
+    end to end. total_cost_usd is asserted present in-memory but never
+    written to plumb (deferred to plumb P1-a — see BACKLOG.md).
+    """
+    backend = ClaudeCodeBackend()
+
+    argv = backend.build_argv(
+        prompt="do the task",
+        model="haiku",
+        add_dirs=[tmp_path],
+        timeout_s=60,
+        extra_flags={
+            "telemetry": "json",
+            "permission_mode": "acceptEdits",
+            "allowed_tools": "Bash(git *),Edit",
+            "max_turns": "10",
+        },
+    )
+    assert "--output-format" in argv
+    assert "--dangerously-skip-permissions" not in argv
+
+    json_envelope = json.dumps(
+        {
+            "subtype": "success",
+            "result": "task complete",
+            "total_cost_usd": 0.042,
+            "usage": {"input_tokens": 1234, "output_tokens": 567},
+        }
+    )
+
+    # Mocked subprocess result — no real `claude` binary spawned.
+    result = _completed(stdout=json_envelope)
+
+    status, output_text, error_type = backend.parse_result(
+        result.stdout, result.stderr, result.returncode
+    )
+    assert status == "success"
+    assert output_text == "task complete"
+    assert error_type is None
+
+    usage = backend.parse_usage(result.stdout)
+    assert usage == UsageStats(total_cost_usd=0.042, input_tokens=1234, output_tokens=567)
+
+    plumb = PlumbIO(real=False)
+    run_id = plumb.open_run(task="loop-mode-test")
+    assert usage is not None
+    plumb.record_span(
+        run_id=run_id,
+        kind="code_gen",
+        name="code_gen",
+        status="success",
+        latency_ms=100.0,
+        error_type=None,
+        tokens=(usage.input_tokens, usage.output_tokens),
+    )
+
+    assert plumb.spans[-1]["tokens"] == (1234, 567)
+    # total_cost_usd stays in-memory only — no plumb write for it (plumb P1-a).
+    assert not any("dollar_cost" in span for span in plumb.spans)

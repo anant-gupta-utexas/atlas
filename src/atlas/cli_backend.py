@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -16,6 +17,25 @@ from atlas.stages import StageSpec
 from atlas.workflow_loader import LoadedWorkflow
 
 _KNOWN_BACKENDS: frozenset[str] = frozenset({"claude", "agy"})
+
+
+@dataclass(frozen=True)
+class UsageStats:
+    """Cost/token telemetry parsed from a `claude -p --output-format json` envelope.
+
+    total_cost_usd is surfaced in-memory only — plumb has no per-span or
+    run-level sink reachable from the online run path in v1.0.1 (see
+    docs/1_product_and_research/BACKLOG.md, plumb P1-a). input_tokens /
+    output_tokens are threaded to PlumbIO.record_span(tokens=(in, out)).
+    """
+
+    total_cost_usd: float | None
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+def _looks_like_json_envelope(stdout: str) -> bool:
+    return stdout.lstrip().startswith("{")
 
 
 @runtime_checkable
@@ -74,6 +94,19 @@ class ClaudeCodeBackend:
         ]
         for d in add_dirs:
             argv.extend(["--add-dir", str(d)])
+
+        # Loop-mode-only flags — attended callers never set these keys, so
+        # argv above stays byte-identical to today's output when extra_flags
+        # is empty (test_claude_code_backend_argv_byte_identical_to_phase2).
+        if extra_flags.get("telemetry") == "json":
+            argv += ["--output-format", "json"]
+        if extra_flags.get("permission_mode"):
+            argv += ["--permission-mode", extra_flags["permission_mode"]]
+        if extra_flags.get("allowed_tools"):
+            argv += ["--allowedTools", extra_flags["allowed_tools"]]
+        if extra_flags.get("max_turns"):
+            argv += ["--max-turns", extra_flags["max_turns"]]
+
         return argv
 
     def parse_result(
@@ -81,7 +114,42 @@ class ClaudeCodeBackend:
     ) -> tuple[str, str, str | None]:
         if returncode != 0:
             return ("failure", stdout, "plugin_nonzero_exit")
-        return ("success", stdout, None)
+
+        # Plain-text branch (attended, default) — unchanged.
+        if not _looks_like_json_envelope(stdout):
+            return ("success", stdout, None)
+
+        # JSON branch (loop-mode `--output-format json`).
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            return ("failure", stdout, "claude_unparseable_json")
+
+        subtype = payload.get("subtype")
+        if subtype != "success":
+            return ("failure", payload.get("result") or stdout, f"claude_{subtype}")
+        return ("success", payload.get("result") or "", None)
+
+    def parse_usage(self, stdout: str) -> UsageStats | None:
+        """Extract cost/token telemetry from a JSON-envelope stdout.
+
+        Returns None for plain-text stdout (attended mode never calls this
+        in practice, since it never requests telemetry). Not a CliBackend
+        Protocol member — see Resolved Decision #1 in the Phase L0 TRS.
+        """
+        if not _looks_like_json_envelope(stdout):
+            return None
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            return None
+
+        usage = payload.get("usage") or {}
+        return UsageStats(
+            total_cost_usd=payload.get("total_cost_usd"),
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+        )
 
     def preflight(self) -> tuple[str, str | None] | None:
         return None  # claude -p handles its own auth at subprocess level

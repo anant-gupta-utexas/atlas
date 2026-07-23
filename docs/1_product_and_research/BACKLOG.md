@@ -18,6 +18,12 @@ Grouped by theme, not by origin doc. Each item notes where it came from.
 ## Release / process
 
 - [ ] Tag `v2.2` in git — all v2.2 acceptance criteria are met (per `STATUS.md`).
+      `pyproject.toml` now reads `2.2.0` (Phase L0, T-L0.2); the tag itself
+      stays a manual maintainer action.
+- [ ] Consider CI-automated release tagging (create/push `git tag vX.Y` on
+      merge to `main` when `pyproject.toml`'s version changes), instead of the
+      current manual-tag process. Not built in Phase L0 — flagged as a future
+      convenience, not a requirement. *(from Phase L0 TRS, T-L0.2)*
 - [ ] Install plumb as a versioned dependency instead of a local path
       dependency, to unlock durable span/score writes outside the author's
       machine. *(from STATUS.md v1.1 backlog)*
@@ -84,6 +90,22 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
       `metric_name`, `task_id` prefixing) — revisit only if that convention
       proves insufficient. *(from system_design.md, TRD.md Resolved Decisions)*
 
+## `job` workflow — adapter re-targeting
+
+- [ ] **Re-target `LIB:content_pipeline.score_jobs` adapter to the decomposed
+      ingest/prep/score API.** `src/atlas/library_adapters/score_jobs_adapter.py`
+      still imports content-pipeline's pre-split `ScoreJobsUseCase`, which no
+      longer exists — content-pipeline decomposed it into
+      `application/use_cases/score_jobs_ingest.py`,
+      `score_jobs_prep.py`, and `score_jobs_score.py` (+ `score_merge.py`).
+      `tests/integration/test_job_adapters_real_import.py::test_score_jobs_adapter_real_import_success`
+      is `xfail(strict=False)`-marked pending this (Phase L0, T-L0.3) — it is a
+      real, correct drift signal, not a broken test. Re-targeting means
+      designing how the adapter composes ingest → prep → score; this is
+      `job`-workflow scope, unrelated to loop mode. *(from Phase L0 TRS,
+      T-L0.3, confirmed against `/Users/anant/PersonalProjects/content-pipeline`
+      2026-07-21)*
+
 ## Manual verification pending
 
 - [ ] **T3.8 — Antigravity (`agy`) manual smoke test.** Not yet attempted;
@@ -94,6 +116,18 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
 
 ## plumb-side ideas (not required for current atlas scope)
 
+- [ ] **plumb P1-a — `RunHandle.set_usage()` + `finalize_run` cost threading.**
+      Confirmed (2026-07-21): `runs.dollar_cost` / `runs.tokens_in` /
+      `runs.tokens_out` exist in plumb v1.0.1's schema but are **not
+      writable** from the online `with run()` path — `finalize_run`
+      (`plumb/storage_sqlite.py:431`) sets none of them, and `RunHandle`
+      exposes no cost/usage setter. atlas's Phase L0 writes per-span
+      `tokens=(in, out)` via the confirmed `add_span(tokens=...)` path
+      (`plumb/api.py:264`) but cannot write run-level `dollar_cost` or a
+      token roll-up until plumb adds a `set_usage`-style setter and threads it
+      through `finalize_run`. Blocks atlas's L2 exit criterion (cost-per-
+      landed-PR) and `max_dollars_per_day` budget enforcement (TRD-v3 §12).
+      *(from Phase L0 TRS, T-L0.5, plumb spike resolved 2026-07-21)*
 - [ ] **`runs.workflow` provenance column.** Today "which workflow produced
       this run" is only recoverable via `task_id` prefix convention
       (`job.<slug>` vs `dev.<slug>`). A first-class `runs.workflow TEXT`

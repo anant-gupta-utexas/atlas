@@ -8,9 +8,9 @@ Reference notes live in
 ## Current
 
 ```
-phase: not started
-gate:  none
-next:  T-L0.1 baseline verification
+phase: code complete; manual off-CI verification pending
+gate:  none (T-L0.8/T-L0.9 are not blocking gates, but are unclosed exit criteria)
+next:  T-L0.8 first live attended run (manual, off-CI)
 ```
 
 ## Status — no blocking dependency; two confirmed drifts to fix as part of this phase
@@ -34,23 +34,23 @@ lightweight sanity re-confirmation, not a blocking checkpoint.
 
 ## Tasks (flat — Phase L0 only, no sub-phases)
 
-- [ ] **T-L0.1** — Baseline verification: re-run full suite, reconfirm the exact failing test + pass count; confirm no prior live `atlas run` against a real `claude` backend exists in git history / STATUS.md
-- [ ] **T-L0.2** — Version reconciliation: bump `pyproject.toml` `1.0.0` → `2.2.0`; `v2.2` git tag created manually by maintainer (resolved 2026-07-21); add a BACKLOG "future: consider CI-automated tagging" item
-- [ ] **T-L0.3** — `xfail(strict=False)` `test_score_jobs_adapter_real_import_success` + `BACKLOG.md` entry. **Decision made, investigation done — do not re-litigate or attempt a fix.** content-pipeline decomposed `ScoreJobsUseCase` into `score_jobs_{ingest,prep,score}.py`; the adapter targets a **superseded API** and re-targeting is `job`-workflow scope. Reason string must name the three modules and frame it as superseded-API, **not** "broken test." No change to `score_jobs_adapter.py`
-- [ ] **T-L0.4** — `ClaudeCodeBackend` loop-mode telemetry: `build_argv` gains conditional `--output-format json` + permission-profile flags (gated on `extra_flags`, absent by default); `parse_result` gains a JSON-envelope branch (plain-text branch unchanged); new `parse_usage()` method + `UsageStats` dataclass
-- [ ] **T-L0.5** — Thread per-span tokens into `PlumbIO.record_span()` via a `tokens: tuple[int,int] | None = None` kwarg matching plumb's **confirmed** `add_span(tokens=(in, out))` (`plumb/api.py:264`); `None`-safe. **Do NOT** write run-level `dollar_cost`/`tokens_in`/`tokens_out` — confirmed unreachable in plumb v1.0.1's online path; deferred to plumb P1-a (BACKLOG entry). Caller decomposes `UsageStats` into the tuple; `total_cost_usd` stays in-memory only. *(plumb spike resolved 2026-07-21 — scope reduced from original)*
-- [ ] **T-L0.6** — `Deliverer` Protocol + `GhPrDeliverer` in new `src/atlas/deliverer.py`: push branch (never `main`, never `--force`) → `gh pr create` → `WorktreeManager.cleanup()`; full error-handling table from the plan
-- [ ] **T-L0.7** — Integration tests: loop-mode dispatch end-to-end (mocked JSON envelope) + attended-mode invariance proof (byte-identical argv when no loop-mode flags set)
+- [x] **T-L0.1** — Baseline verification: re-run full suite, reconfirm the exact failing test + pass count; confirm no prior live `atlas run` against a real `claude` backend exists in git history / STATUS.md
+- [x] **T-L0.2** — Version reconciliation: bump `pyproject.toml` `1.0.0` → `2.2.0`; `v2.2` git tag created manually by maintainer (resolved 2026-07-21); add a BACKLOG "future: consider CI-automated tagging" item
+- [x] **T-L0.3** — `xfail(strict=False)` `test_score_jobs_adapter_real_import_success` + `BACKLOG.md` entry. **Decision made, investigation done — do not re-litigate or attempt a fix.** content-pipeline decomposed `ScoreJobsUseCase` into `score_jobs_{ingest,prep,score}.py`; the adapter targets a **superseded API** and re-targeting is `job`-workflow scope. Reason string must name the three modules and frame it as superseded-API, **not** "broken test." No change to `score_jobs_adapter.py`
+- [x] **T-L0.4** — `ClaudeCodeBackend` loop-mode telemetry: `build_argv` gains conditional `--output-format json` + permission-profile flags (gated on `extra_flags`, absent by default); `parse_result` gains a JSON-envelope branch (plain-text branch unchanged); new `parse_usage()` method + `UsageStats` dataclass
+- [x] **T-L0.5** — Thread per-span tokens into `PlumbIO.record_span()` via a `tokens: tuple[int,int] | None = None` kwarg matching plumb's **confirmed** `add_span(tokens=(in, out))` (`plumb/api.py:264`); `None`-safe. **Do NOT** write run-level `dollar_cost`/`tokens_in`/`tokens_out` — confirmed unreachable in plumb v1.0.1's online path; deferred to plumb P1-a (BACKLOG entry). Caller decomposes `UsageStats` into the tuple; `total_cost_usd` stays in-memory only. *(plumb spike resolved 2026-07-21 — scope reduced from original)*
+- [x] **T-L0.6** — `Deliverer` Protocol + `GhPrDeliverer` in new `src/atlas/deliverer.py`: push branch (never `main`, never `--force`) → `gh pr create` → `WorktreeManager.cleanup()`; full error-handling table from the plan
+- [x] **T-L0.7** — Integration tests: loop-mode dispatch end-to-end (mocked JSON envelope) + attended-mode invariance proof (byte-identical argv when no loop-mode flags set)
 - [ ] **T-L0.8** — First live attended run (manual, off-CI): real `atlas run "<task>" --workflow dev` against the live `claude` backend; confirm subprocess spawn + gate prompts + a real plumb run with spans; capture findings into `headless-clis-reference.md`
 - [ ] **T-L0.9** — Manual delivery smoke test (off-CI): real `GhPrDeliverer.deliver()` against a scratch GitHub repo; confirm a real PR appears and `main` is untouched
-- [ ] **T-L0.10** — Lint/type/coverage gate: `ruff check`, `ruff format --check`, `mypy --strict src`, coverage (≥ 80% repo-wide, ≥ 85% on `deliverer.py` + `cli_backend.py` additions)
-- [ ] **T-L0.11** — Update `STATUS.md` with L0 completion
+- [x] **T-L0.10** — Lint/type/coverage gate: `ruff check`, `ruff format --check`, `mypy --strict src`, coverage (≥ 80% repo-wide, ≥ 85% on `deliverer.py` + `cli_backend.py` additions)
+- [x] **T-L0.11** — Update `STATUS.md` with L0 completion
 
 ## Exit criteria (TRD-v3 §13 #1, #2, #4 — copied for tracking)
 
-- [ ] **§13 #1 (as amended in TRD-v3, 2026-07-21)** — A live `atlas run "<task>"` on the `claude` backend produces a plumb run whose **`code_gen` span carries real `tokens`** from the backend JSON. Run-level `dollar_cost` / token roll-up is **explicitly not an L0 gate** — deferred to plumb P1-a (`set_usage`), verified at L2
-- [ ] **§13 #2** — Full v2 suite green; `atlas run` unchanged
-- [ ] **§13 #4** — The `Deliverer` pushes a branch + opens a PR for a completed run and calls `cleanup()`; asserted never to push `main` or force-push
+- [ ] **§13 #1 (as amended in TRD-v3, 2026-07-21)** — A live `atlas run "<task>"` on the `claude` backend produces a plumb run whose **`code_gen` span carries real `tokens`** from the backend JSON. Run-level `dollar_cost` / token roll-up is **explicitly not an L0 gate** — deferred to plumb P1-a (`set_usage`), verified at L2. *Telemetry plumbing (build_argv/parse_result/parse_usage/record_span) is code-complete and unit/integration-tested (T-L0.4/T-L0.5/T-L0.7); the live proof itself (T-L0.8) has not been run yet.*
+- [x] **§13 #2** — Full v2 suite green; `atlas run` unchanged. 271 passed, 1 xfailed (was 238 passed/1 failed pre-L0); `test_dev_pipeline_unaffected_by_phase_l0` proves byte-identical attended argv.
+- [ ] **§13 #4** — The `Deliverer` pushes a branch + opens a PR for a completed run and calls `cleanup()`; asserted never to push `main` or force-push. *`GhPrDeliverer` is code-complete with 100% coverage incl. the load-bearing security test (T-L0.6); the real-world proof against a scratch GitHub repo (T-L0.9) has not been run yet.*
 
 (§13 #3 — `CodexBackend` dispatch — belongs to Phase L1, not tracked here.)
 
@@ -84,4 +84,53 @@ record so L1/L2 don't re-litigate them.
 
 ## Implementation notes (post-hoc — fill in after work is done)
 
-_Not yet started._
+**2026-07-22 — T-L0.1 through T-L0.7, T-L0.10, T-L0.11 done.** T-L0.8 and
+T-L0.9 remain: both require live external systems (a real `claude`
+subscription/session; a real scratch GitHub repo with `gh` auth) and are
+explicitly manual, off-CI, real-time actions per the plan's implementation
+notes — not something to fake or skip.
+
+- **T-L0.1** confirmed exactly the documented baseline: `238 passed, 1
+  failed` (`test_score_jobs_adapter_real_import_success`,
+  `AttributeError: module 'application.use_cases' has no attribute
+  'score_jobs'`). No `open_run` call site exists outside
+  `orchestrator.py`/`plumb_io.py`, and no live-run mention exists in
+  STATUS.md — confirms no prior live attended run.
+- **T-L0.2** — version bump only; `uv sync` resolves cleanly post-bump.
+- **T-L0.3** — verified the xfail fires correctly with the `job` extra
+  installed (`uv sync --extra dev --extra job`): `XFAIL ... 238 passed, 1
+  xfailed`. Without the extra the module self-skips (2 skipped), so CI's
+  `test-job-extra` leg is where this marker is actually exercised.
+- **T-L0.4** — `_looks_like_json_envelope` uses the cheap
+  `stdout.lstrip().startswith("{")` heuristic exactly as pseudocoded; kept
+  `parse_result`/`parse_usage` independent JSON-decode attempts (no shared
+  parsed-payload cache) since the plan explicitly scoped this as simple
+  content-sniffing, not a shared-state optimization.
+- **T-L0.5** — confirmed via reading `plumb/api.py:264` locally
+  (`/Users/anant/PersonalProjects/plumb`) that `add_span(tokens=None)` is the
+  existing default — passing `tokens=tokens` unconditionally with
+  `tokens=None` is byte-identical to the pre-L0 call, so no conditional
+  kwarg-passing was needed on the real-mode branch.
+- **T-L0.6** — `_parse_pr_url` takes the last non-empty stdout line (`gh pr
+  create` prints the URL as its final line) and regex-extracts the PR
+  number; falls back to `number=0` if the URL doesn't match the expected
+  `.../pull/<n>` shape rather than raising, since a malformed-but-nonzero-exit
+  `gh` response is not a documented failure mode worth hardening further in
+  L0.
+- **T-L0.7** — `SubprocessStageRunner.run()` has no loop-mode call site at
+  all in L0 (confirmed by reading `orchestrator.py:616-622`: `extra_flags={}`
+  is hardcoded). So the "loop-mode dispatch end-to-end" test exercises
+  `ClaudeCodeBackend` + `PlumbIO` directly rather than through
+  `SubprocessStageRunner`, matching the TRS's own scope note that `cli.py`/
+  `Pipeline` are untouched in L0 — there is no orchestrator-level loop-mode
+  path to integration-test yet.
+- **T-L0.10** — repo-wide coverage 95.83% (gate: ≥80%); `deliverer.py` and
+  `cli_backend.py` both 100% (gate: ≥85%). `ruff format` auto-fixed two
+  files (`deliverer.py`, `test_cli_backend.py`) on first run — clean on
+  second pass.
+- **Full suite after L0**: 271 passed, 1 xfailed (was 238 passed, 1 failed
+  pre-L0: +33 new tests from T-L0.4/T-L0.5/T-L0.6/T-L0.7, +1 net from the
+  xfail conversion).
+
+**Next session should start with T-L0.8** (live attended run) — it only
+depends on T-L0.1, already done.
