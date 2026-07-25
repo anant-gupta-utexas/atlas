@@ -222,6 +222,37 @@ Decision #2; three of the four remaining L1 code-review findings — see Decisio
 `queue_gh.preflight()` — see Decision #7; any change to workflow YAML files, the
 workflow loader, or backend argv/parse logic; any new plumb schema/table/method).
 
+## T-L2.1 findings (2026-07-25)
+
+- Suite re-confirmed: 301 passed, 1 xfailed, at TRS-authoring-consistent state (no
+  coverage regression check run yet — deferred to T-L2.11).
+- `gh --version`: **2.96.0** (`gh version 2.96.0 (2026-07-02)`), authenticated as
+  `anant-gupta-utexas` via keyring token (scopes: gist, read:org, repo, workflow).
+- Real fixture capture against `anant-gupta-utexas/atlas` itself (scratch issue #4,
+  scratch PR #5 — both created, captured, then closed/deleted/branch-removed):
+  - `gh issue list --json number,title,body,labels` → `tests/fixtures/gh_json/issue_list.json`
+    (real shape: `id`/`description`/`color` present on each label object — `Issue`
+    dataclass parsing must only read `name` off each label, ignoring the rest).
+  - Empty case (`--label` with no matches) → `[]`, captured as `issue_list_empty.json`.
+  - `gh pr view --json state,mergedAt,number,url` captured for all three outcomes:
+    `MERGED` (`mergedAt` populated, real PR #3), `OPEN` (`mergedAt: null`, scratch PR #5
+    pre-close), `CLOSED` unmerged (`mergedAt: null`, same PR #5 post-`gh pr close`).
+  - `gh issue edit --remove-label --add-label --add-assignee` (combined call, Decision
+    #5) verified against the scratch issue: one call successfully swapped labels AND
+    assigned in a single invocation — confirms Decision #5's assumption holds against
+    the real CLI, not just the docs.
+- Label set created on the real repo for ongoing loop use (not scratch — kept):
+  `atlas:ready`, `atlas:working`, `atlas:done`, `atlas:rejected`, `atlas:blocked`,
+  `wf:quick`, `wf:planned`, `engine:codex`, `engine:claude` — per TRD-v3 §3.1's label
+  table. These did not exist before this task; T-L2.13's real smoke test depends on
+  them existing.
+- Schema-drift risk note: `gh issue list --json ...labels` occasionally lagged by ~1-2s
+  after a label mutation before a subsequent `--label`-filtered list call reflected it
+  (search-index propagation delay, not a `gh` bug) — observed once during capture.
+  Not a correctness issue for the loop (poll-interval-based, not immediate-consistency
+  dependent) but worth knowing if a fast unit/integration test ever hits real `gh`
+  instead of a fixture (it won't, per the mocking strategy — noted for completeness).
+
 ## Open threads carried from L1
 
 - **L1's T-L1.1 (write-heavy Codex capture) and T-L1.8 (both-engines manual smoke)**

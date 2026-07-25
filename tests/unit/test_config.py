@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from atlas.config import Config, _deep_merge
+from atlas.config import Config, LoopConfig, _deep_merge
 
 # ---------------------------------------------------------------------------
 # _deep_merge
@@ -135,3 +135,60 @@ def test_config_default_backend_malformed_section(tmp_path: Path) -> None:
     toml.write_text('backend = "claude"\n')
     cfg = Config.load(tmp_path)
     assert cfg.default_backend == "claude"
+
+
+# ---------------------------------------------------------------------------
+# T-L2.3 — LoopConfig / Config.loop
+# ---------------------------------------------------------------------------
+
+
+def test_loop_config_defaults_no_section(tmp_path: Path) -> None:
+    cfg = Config.load(tmp_path)
+    assert cfg.loop == LoopConfig()
+
+
+def test_loop_config_section_overrides_defaults(tmp_path: Path) -> None:
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text(
+        "[loop]\n"
+        'repos = ["anant-gupta-utexas/atlas"]\n'
+        "poll_interval_s = 30\n"
+        "max_runs_per_day = 5\n"
+        "max_dollars_per_day = 2.5\n"
+        "max_turns = 20\n"
+        "no_progress_limit = 2\n"
+        "identical_error_limit = 4\n"
+        "cooldown_min = 15\n"
+        "concurrency = 1\n"
+        'trusted_authors = ["anant-gupta-utexas"]\n'
+    )
+    cfg = Config.load(tmp_path)
+    assert cfg.loop.repos == ("anant-gupta-utexas/atlas",)
+    assert cfg.loop.poll_interval_s == 30
+    assert cfg.loop.max_runs_per_day == 5
+    assert cfg.loop.max_dollars_per_day == 2.5
+    assert cfg.loop.max_turns == 20
+    assert cfg.loop.no_progress_limit == 2
+    assert cfg.loop.identical_error_limit == 4
+    assert cfg.loop.cooldown_min == 15
+    assert cfg.loop.concurrency == 1
+    assert cfg.loop.trusted_authors == ("anant-gupta-utexas",)
+
+
+def test_loop_config_concurrency_not_one_raises() -> None:
+    with pytest.raises(ValueError, match="concurrency"):
+        LoopConfig(concurrency=2)
+
+
+def test_loop_config_trusted_authors_absent_is_empty_tuple(tmp_path: Path) -> None:
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text('[loop]\nrepos = ["a/b"]\n')
+    cfg = Config.load(tmp_path)
+    assert cfg.loop.trusted_authors == ()
+
+
+def test_loop_config_toml_concurrency_not_one_raises(tmp_path: Path) -> None:
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text("[loop]\nconcurrency = 2\n")
+    with pytest.raises(ValueError, match="concurrency"):
+        Config.load(tmp_path)

@@ -82,14 +82,24 @@ def _find_repo_root() -> Path:
     raise typer.Exit(1)
 
 
-def _make_pipeline(
+def make_pipeline(
     repo_root: Path,
     cfg: Config,
     *,
     auto_approve: bool = False,
     workflow: str | None = None,
     workflow_file: Path | None = None,
+    backend_override: str | None = None,
 ) -> tuple[Pipeline, _LastOutcomeRunner]:
+    """Construct a Pipeline + recorder exactly as `atlas run` does.
+
+    Shared by cli.py::run/resume and loop.py (Decision #11) so the two
+    construction paths cannot silently drift. ``backend_override``, when
+    given, takes priority over ``cfg.default_backend`` (but still below a
+    stage's own ``backend`` field or the workflow's ``default_backend`` —
+    the existing 4-tier order in `cli_backend.resolve_backend`) — used by
+    loop.py to honor an issue's `engine:*` label.
+    """
     loaded = resolve_workflow(
         workflow_file=workflow_file, workflow_name=workflow, repo_root=repo_root
     )
@@ -100,7 +110,7 @@ def _make_pipeline(
         timeout_overrides=cfg.timeout_overrides,
         command_overrides=cfg.plugin_commands,
         model=cfg.model,
-        default_backend=cfg.default_backend,
+        default_backend=backend_override or cfg.default_backend,
         loaded_workflow=loaded,
     )
     # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
@@ -170,7 +180,7 @@ def run(
         slug = _slugify(task)
 
     try:
-        pipeline, recorder = _make_pipeline(
+        pipeline, recorder = make_pipeline(
             repo_root,
             cfg,
             auto_approve=auto_approve,
@@ -208,7 +218,7 @@ def resume(
     repo_root = _find_repo_root()
     cfg = Config.load(repo_root)
 
-    # Peek at the active workflow name so _make_pipeline creates the right runner
+    # Peek at the active workflow name so make_pipeline creates the right runner
     # (LibraryStageRunner is only added for LIB:-prefixed workflows like job.yaml).
     state = StateStore(repo_root)
     active_workflow: str | None = None
@@ -218,7 +228,7 @@ def resume(
         active_workflow = state.read_workflow_name(slug)
 
     try:
-        pipeline, recorder = _make_pipeline(
+        pipeline, recorder = make_pipeline(
             repo_root, cfg, auto_approve=auto_approve, workflow=active_workflow
         )
         ctx = pipeline.resume()

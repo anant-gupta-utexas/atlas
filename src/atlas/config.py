@@ -8,6 +8,26 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class LoopConfig:
+    """``[loop]`` config block — atlas loop daemon settings (TRD-v3 §7)."""
+
+    repos: tuple[str, ...] = ()
+    poll_interval_s: int = 60
+    max_runs_per_day: int = 20
+    max_dollars_per_day: float = 10.0
+    max_turns: int = 40
+    no_progress_limit: int = 3
+    identical_error_limit: int = 5
+    cooldown_min: int = 30
+    concurrency: int = 1  # frozen at 1 for v3.0-v3.2
+    trusted_authors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.concurrency != 1:
+            raise ValueError("concurrency > 1 is not supported until Phase L4")
+
+
+@dataclass(frozen=True)
 class Config:
     repo_root: Path
     plumb_db_path: Path
@@ -15,6 +35,7 @@ class Config:
     timeout_overrides: dict[str, int] = field(default_factory=dict)
     model: str = "haiku"  # default to haiku for cost efficiency
     default_backend: str = "claude"  # from .atlas.toml [backend] default
+    loop: LoopConfig = field(default_factory=LoopConfig)
 
     @classmethod
     def load(cls, repo_root: Path) -> Config:
@@ -55,6 +76,8 @@ class Config:
             if isinstance(backend_section, dict)
             else "claude"
         )
+        loop_section = merged.get("loop", {})
+        loop_cfg = _parse_loop_config(loop_section if isinstance(loop_section, dict) else {})
         return cls(
             repo_root=repo_root,
             plumb_db_path=Path(str(merged["plumb_db_path"])),
@@ -62,7 +85,34 @@ class Config:
             timeout_overrides=timeout_overrides,
             model=str(merged.get("model", "haiku")),
             default_backend=default_backend,
+            loop=loop_cfg,
         )
+
+
+def _parse_loop_config(section: dict[str, object]) -> LoopConfig:
+    defaults = LoopConfig()
+    raw_repos = section.get("repos", defaults.repos)
+    repos = tuple(str(r) for r in raw_repos) if isinstance(raw_repos, list) else defaults.repos
+    raw_trusted = section.get("trusted_authors", defaults.trusted_authors)
+    trusted_authors = (
+        tuple(str(a) for a in raw_trusted)
+        if isinstance(raw_trusted, list)
+        else defaults.trusted_authors
+    )
+    return LoopConfig(
+        repos=repos,
+        poll_interval_s=int(section.get("poll_interval_s", defaults.poll_interval_s)),  # type: ignore[arg-type]
+        max_runs_per_day=int(section.get("max_runs_per_day", defaults.max_runs_per_day)),  # type: ignore[arg-type]
+        max_dollars_per_day=float(section.get("max_dollars_per_day", defaults.max_dollars_per_day)),  # type: ignore[arg-type]
+        max_turns=int(section.get("max_turns", defaults.max_turns)),  # type: ignore[arg-type]
+        no_progress_limit=int(section.get("no_progress_limit", defaults.no_progress_limit)),  # type: ignore[arg-type]
+        identical_error_limit=int(
+            section.get("identical_error_limit", defaults.identical_error_limit)
+        ),  # type: ignore[arg-type]
+        cooldown_min=int(section.get("cooldown_min", defaults.cooldown_min)),  # type: ignore[arg-type]
+        concurrency=int(section.get("concurrency", defaults.concurrency)),  # type: ignore[arg-type]
+        trusted_authors=trusted_authors,
+    )
 
 
 def _read_toml(path: Path) -> dict[str, object]:
