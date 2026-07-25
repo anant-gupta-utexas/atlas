@@ -20,6 +20,21 @@ _logger = logging.getLogger("atlas.deliverer")
 
 _PR_URL_RE = re.compile(r"https://\S+/pull/(\d+)")
 
+# Branch names atlas refuses to push, compared after stripping any
+# ``refs/heads/`` prefix and lowercasing (L1 code review finding L3). The
+# real protection is the hardcoded argv shape — no ``--force``, explicit
+# ``-u origin <branch>`` — so this is defense-in-depth; it covers every
+# common spelling of "the shared trunk" rather than only ``main``.
+_PROTECTED_BRANCHES: frozenset[str] = frozenset({"main", "master", "trunk", "develop"})
+
+
+def _normalize_branch(branch: str) -> str:
+    """Strip a ``refs/heads/`` prefix and lowercase, for protected-branch comparison."""
+    stripped = branch.strip()
+    if stripped.startswith("refs/heads/"):
+        stripped = stripped[len("refs/heads/") :]
+    return stripped.lower()
+
 
 class DeliveryError(Exception):
     """Raised on git push / gh pr create failure, or an unsafe branch name."""
@@ -50,6 +65,31 @@ class GhPrDeliverer:
         self._repo_root = repo_root
         self._worktree = worktree
 
+    def _detect_default_branch(self) -> str | None:
+        """Return the repo's normalized default branch, or None if undeterminable.
+
+        Reads ``origin/HEAD``'s symbolic ref, which is purely local (no
+        network). Returns None on any failure — a missing ``origin/HEAD`` is
+        common in fresh clones and must not block delivery. This is an
+        *additional* guard layered on ``_PROTECTED_BRANCHES``; the static set
+        still catches the common spellings when detection is unavailable.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                cwd=self._repo_root,
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+        except (FileNotFoundError, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        # e.g. "origin/main" -> "main"
+        ref = result.stdout.strip()
+        return _normalize_branch(ref.split("/", 1)[1]) if "/" in ref else None
+
     def deliver(
         self,
         *,
@@ -59,10 +99,21 @@ class GhPrDeliverer:
         title: str,
         body: str,
     ) -> PrRef:
-        if branch == "main":
+        normalized = _normalize_branch(branch)
+        if not normalized:
+            raise DeliveryError(f"Refusing to deliver run {run_id}: empty branch name.")
+        if normalized in _PROTECTED_BRANCHES:
             raise DeliveryError(
-                f"Refusing to deliver run {run_id}: branch is 'main'. "
-                "Deliverer never pushes or opens a PR from main."
+                f"Refusing to deliver run {run_id}: branch {branch!r} is a protected "
+                f"branch ({normalized!r}). Deliverer never pushes or opens a PR from "
+                "a shared trunk."
+            )
+        default_branch = self._detect_default_branch()
+        if default_branch is not None and normalized == default_branch:
+            raise DeliveryError(
+                f"Refusing to deliver run {run_id}: branch {branch!r} is this repo's "
+                f"default branch ({default_branch!r}). Deliverer never pushes or "
+                "opens a PR from a shared trunk."
             )
 
         try:

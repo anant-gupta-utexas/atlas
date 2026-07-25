@@ -255,16 +255,34 @@ workflow loader, or backend argv/parse logic; any new plumb schema/table/method)
 
 ## Open threads carried from L1
 
+> **Update (2026-07-25):** all five L1 code review findings have since been closed —
+> see [`loop-mode-code-review.md`](../loop-mode-phase-L1/loop-mode-code-review.md).
+> The three threads below are resolved; kept for the record, with outcomes inline.
+
 - **L1's T-L1.1 (write-heavy Codex capture) and T-L1.8 (both-engines manual smoke)**
   remain open. Per Decision #1, L2 proceeds without blocking on them, but Codex-lane
   `loop_dev` dispatch in L2 inherits the ~4×-token-miscount risk M1 flagged until
   T-L1.1 closes. Whoever picks up T-L2.13 (real smoke tests) should check whether
   T-L1.1 has closed in the meantime and fold in a cache-semantics sanity check if not.
+  → **RESOLVED (2026-07-25):** T-L1.1/T-L1.8 are still unrun, but M1's *data-integrity*
+  risk is gone: plumb v1.1.0's `spans.attributes` now stores the raw four-field Codex
+  breakdown plus `CODEX_TOKEN_REDUCTION_RULE`, so a wrong Pending Decision #4 is
+  recomputable rather than permanently corrupting history. T-L1.1 is now about
+  measurement accuracy, not data loss — still worth running, no longer urgent.
 - **The L1 code review's cwd-vs-`--sandbox` ambiguity (L1 finding L1)** — whether
   Codex's `-C <worktree>` genuinely wins over `SubprocessStageRunner`'s
   `cwd=atlas_root`. Still needs T-L1.8's manual smoke check specifically. Not touched
   by L2; flagged again here so it isn't lost between phases.
+  → **RESOLVED (2026-07-25):** settled empirically against a local `codex-cli 0.144.4`
+  rather than waiting for T-L1.8. An **absolute** `-C` wins over the inherited cwd
+  (agent read the `-C` directory's file, not the cwd's); a **relative** `-C` resolves
+  against the inherited cwd and exits 1. atlas always passes absolute paths, so the
+  existing code was correct — now pinned by
+  `test_codex_backend_build_argv_paths_are_absolute`.
 - **The branch-safety exact-match nit (L1 finding L3, `deliverer.py:62`)** —
   `if branch == "main"` doesn't cover `master`/`refs/heads/main`/other default
   branches. Not touched by L2 (Decision #3); still worth a BACKLOG line for whichever
   phase picks it up.
+  → **RESOLVED (2026-07-25):** `_PROTECTED_BRANCHES` (`main`/`master`/`trunk`/`develop`)
+  matched after `refs/heads/` strip + lowercase + trim, plus a fail-open
+  `git symbolic-ref origin/HEAD` probe catching unusually-named default branches.

@@ -68,6 +68,7 @@ def test_record_span_real_mode_passes_tokens_to_add_span() -> None:
             "status": "success",
             "error_type": None,
             "tokens": (10, 20),
+            "attributes": None,
         }
     ]
 

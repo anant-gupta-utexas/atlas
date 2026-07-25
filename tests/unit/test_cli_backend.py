@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import pytest
 
 from atlas.cli_backend import (
     _KNOWN_BACKENDS,
+    CODEX_TOKEN_REDUCTION_RULE,
     AntigravityBackend,
     ClaudeCodeBackend,
     CliBackend,
@@ -16,6 +18,7 @@ from atlas.cli_backend import (
     CodexUsageStats,
     UnknownBackendError,
     UsageStats,
+    codex_usage_attributes,
     codex_usage_to_tokens,
     make_backend,
     resolve_backend,
@@ -471,6 +474,38 @@ def test_codex_backend_build_argv_single_dir_no_add_dir() -> None:
     assert "--add-dir" not in argv
 
 
+def test_codex_backend_build_argv_paths_are_absolute() -> None:
+    """L1 code review finding L1 — load-bearing, do not loosen.
+
+    SubprocessStageRunner spawns every backend with cwd=atlas_root (chosen so
+    Claude's workspace-scoped plugins resolve), which is NOT where a Codex run
+    should write. `-C <dir>` is what redirects Codex to the worktree.
+
+    Verified empirically against codex-cli 0.144.4 (2026-07-25): with an
+    ABSOLUTE `-C` path, the agent's working root is the `-C` directory and the
+    inherited cwd is irrelevant. With a RELATIVE `-C` path, codex resolves it
+    against the inherited cwd and exits 1 ("No such file or directory") — i.e.
+    relative paths silently couple the run to atlas_root.
+
+    add_dirs reach build_argv as absolute paths today (orchestrator builds them
+    from ctx.repo_root / ctx.worktree_path). This test pins that invariant so a
+    future refactor passing relative paths fails here rather than in a live run
+    that edits the wrong repo.
+    """
+    argv = CodexBackend().build_argv(
+        prompt="p",
+        model="m",
+        add_dirs=[_DIR_A, _DIR_B],
+        timeout_s=60,
+        extra_flags={},
+    )
+    cd_path = Path(argv[argv.index("-C") + 1])
+    assert cd_path.is_absolute(), f"-C must be absolute, got {cd_path!r}"
+    for i, token in enumerate(argv):
+        if token == "--add-dir":
+            assert Path(argv[i + 1]).is_absolute()
+
+
 def test_codex_backend_build_argv_never_bypasses_sandbox() -> None:
     argv = CodexBackend().build_argv(
         prompt="p",
@@ -567,7 +602,6 @@ def test_codex_backend_parse_usage_success() -> None:
     stdout = (_CODEX_FIXTURES / "success.jsonl").read_text(encoding="utf-8")
     usage = CodexBackend().parse_usage(stdout)
     assert usage == CodexUsageStats(
-        total_cost_usd=None,
         input_tokens=16668,
         output_tokens=5,
         cached_input_tokens=13056,
@@ -575,11 +609,12 @@ def test_codex_backend_parse_usage_success() -> None:
     )
 
 
-def test_codex_backend_parse_usage_cost_is_always_none() -> None:
-    stdout = (_CODEX_FIXTURES / "success.jsonl").read_text(encoding="utf-8")
-    usage = CodexBackend().parse_usage(stdout)
-    assert usage is not None
-    assert usage.total_cost_usd is None
+def test_codex_usage_stats_has_no_cost_field() -> None:
+    """L1 code review finding N1: the Codex CLI reports no cost figure, so the
+    dataclass carries no permanently-None total_cost_usd field to invite a
+    downstream `if usage.total_cost_usd:`. Engine A/B in v3 is tokens-only."""
+    assert not hasattr(CodexUsageStats(1, 2, 3, 4), "total_cost_usd")
+    assert "total_cost_usd" not in CodexUsageStats.__dataclass_fields__
 
 
 def test_codex_backend_parse_usage_no_turn_completed() -> None:
@@ -601,7 +636,6 @@ def test_codex_backend_parse_usage_skips_blank_lines() -> None:
 
 def test_codex_backend_usage_to_plumb_tokens() -> None:
     usage = CodexUsageStats(
-        total_cost_usd=None,
         input_tokens=16668,
         output_tokens=5,
         cached_input_tokens=13056,
@@ -610,6 +644,50 @@ def test_codex_backend_usage_to_plumb_tokens() -> None:
     in_tokens, out_tokens = codex_usage_to_tokens(usage)
     assert in_tokens == usage.input_tokens + usage.cached_input_tokens
     assert out_tokens == usage.output_tokens + usage.reasoning_output_tokens
+
+
+def test_codex_usage_attributes_preserves_raw_breakdown() -> None:
+    """L1 code review finding M1 — load-bearing, do not loosen.
+
+    plumb collapses tokens=(in, out) into one summed spans.tokens column, so
+    neither the in/out split nor the cached/reasoning breakdown survives there.
+    If Pending Decision #4's cached-as-addend assumption proves backwards, the
+    ONLY thing that makes stored history recomputable rather than permanently
+    corrupt is this raw breakdown plus the rule name that produced the total.
+    """
+    usage = CodexUsageStats(
+        input_tokens=16668,
+        output_tokens=5,
+        cached_input_tokens=13056,
+        reasoning_output_tokens=0,
+    )
+    attrs = codex_usage_attributes(usage)
+
+    # Every raw field survives, unreduced.
+    assert attrs["input_tokens"] == 16668
+    assert attrs["cached_input_tokens"] == 13056
+    assert attrs["output_tokens"] == 5
+    assert attrs["reasoning_output_tokens"] == 0
+    # The reduction rule is stamped, so a later correction knows what to undo.
+    assert attrs["token_reduction_rule"] == CODEX_TOKEN_REDUCTION_RULE
+    assert attrs["engine"] == "codex"
+
+    # The recorded breakdown must actually reproduce the reduced total, or the
+    # "recomputable" claim above is false.
+    in_tokens, out_tokens = codex_usage_to_tokens(usage)
+    assert attrs["input_tokens"] + attrs["cached_input_tokens"] == in_tokens
+    assert attrs["output_tokens"] + attrs["reasoning_output_tokens"] == out_tokens
+
+
+def test_codex_usage_attributes_is_json_serializable() -> None:
+    """plumb validates attributes as JSON-serializable and fail-closes if not."""
+    usage = CodexUsageStats(
+        input_tokens=None,
+        output_tokens=None,
+        cached_input_tokens=None,
+        reasoning_output_tokens=None,
+    )
+    assert json.loads(json.dumps(codex_usage_attributes(usage)))["engine"] == "codex"
 
 
 # ---------------------------------------------------------------------------

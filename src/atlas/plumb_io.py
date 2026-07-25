@@ -132,16 +132,24 @@ class PlumbIO:
         latency_ms: float,
         error_type: str | None,
         tokens: tuple[int, int] | None = None,
+        attributes: dict[str, object] | None = None,
     ) -> str:
         """Buffer a span in plumb. Returns span_id.
 
         ``tokens``, when given, is an ``(input, output)`` pair threaded to
-        plumb's ``RunHandle.add_span(tokens=(in, out))`` (``plumb/api.py:264``).
-        Plumb persists it *summed* into a single ``spans.tokens`` column — the
-        in/out split is lost at the DB layer until plumb v1.1. ``None``
-        (every pre-Phase-L0 call site) preserves today's exact behavior.
-        Run-level ``dollar_cost``/token roll-up is not writable from this
-        path — see docs/1_product_and_research/BACKLOG.md (plumb P1-a).
+        plumb's ``RunHandle.add_span(tokens=(in, out))``. Plumb persists it
+        *summed* into a single ``spans.tokens`` column — the in/out split is
+        not durable there. ``None`` (every pre-Phase-L0 call site) preserves
+        today's exact behavior.
+
+        ``attributes`` is a JSON-serializable dict written to plumb's
+        ``spans.attributes`` column (landed in plumb v1.1.0). Loop mode uses
+        it to persist the *raw* per-engine token breakdown alongside the
+        reduced ``tokens`` total, so a reduction rule that later proves wrong
+        (see ``cli_backend.codex_usage_to_tokens`` and L1 code review finding
+        M1) can be recomputed from stored data instead of silently corrupting
+        history. Run-level ``dollar_cost``/token roll-up is still not writable
+        from this path — see docs/1_product_and_research/BACKLOG.md (plumb P1-a).
         """
         if self._real and self._run_handle is not None:
             span_id: str = self._run_handle.add_span(
@@ -151,6 +159,7 @@ class PlumbIO:
                 status=status,
                 error_type=error_type,
                 tokens=tokens,
+                attributes=attributes,
             )
             return span_id
 
@@ -165,6 +174,7 @@ class PlumbIO:
                 "latency_ms": latency_ms,
                 "error_type": error_type,
                 "tokens": tokens,
+                "attributes": attributes,
             }
         )
         return span_id

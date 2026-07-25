@@ -89,18 +89,16 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
       by the v2 workflow-namespacing convention (`<workflow>.<gate_label>` in
       `metric_name`, `task_id` prefixing) — revisit only if that convention
       proves insufficient. *(from system_design.md, TRD.md Resolved Decisions)*
-- [ ] **`GhPrDeliverer`'s branch-safety check is exact-match only.**
-      `if branch == "main"` in `deliverer.py` doesn't cover `master`,
-      `refs/heads/main`, or a repo whose default branch is something else
-      entirely. The hardcoded-argv defense (no `--force`, explicit `-u origin
-      <branch>`) is the real protection and is solid — this is defense-in-depth
-      only. Fix: either query the repo's actual default branch via
-      `GhPrDeliverer`'s existing `repo_root`, or minimally extend to a small
-      frozenset (`{"main", "master"}`) plus a `refs/heads/` strip. The
-      existing security test (`test_deliver_never_pushes_main_or_force`)
-      is the right shape to extend. *(L1 code review action #5, carried
-      forward at T-L2.12 — see
-      [`loop-mode-code-review.md`](../../dev/active/loop-mode-phase-L1/loop-mode-code-review.md))*
+- [x] **DONE (2026-07-25) — `GhPrDeliverer`'s branch-safety check is exact-match
+      only.** Fixed both ways the entry proposed: `_PROTECTED_BRANCHES`
+      (`main`/`master`/`trunk`/`develop`) compared after a `refs/heads/` strip,
+      lowercase, and whitespace trim, *plus* a `git symbolic-ref` probe of
+      `origin/HEAD` that catches an unusually-named default branch (e.g.
+      `production`). The probe is local, read-only, and **fails open** — a
+      missing `origin/HEAD` is common in fresh clones and must not block
+      delivery. Covered by a 10-case parametrized rejection test, an
+      unusual-default-branch test, a fail-open test, and an empty-branch test.
+      *(L1 code review action #5)*
 
 ## `job` workflow — adapter re-targeting
 
@@ -173,6 +171,15 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
       the only durable home for the breakdown while `tokens_in/out` carry
       billable totals. If the migration ships without it, this waits a whole
       release. *(Phase L1, 2026-07-24)*
+      **UPDATE 2026-07-25 — item (2) is DONE: `spans.attributes` shipped in
+      plumb v1.1.0** (`ALTER TABLE spans ADD COLUMN attributes TEXT`, schema
+      v2 migration) and atlas now writes it: `PlumbIO.record_span()` takes an
+      `attributes` kwarg, and `cli_backend.codex_usage_attributes()` supplies
+      the raw Codex breakdown + reduction-rule stamp (closes L1 code review
+      finding M1). **Item (1), the P1-a premise correction, is still open** —
+      run-level `dollar_cost`/token roll-up remains unwritable from the online
+      path. The `engine`/`lane`/`issue`/`attempt_n`/`failure_mode` attributes
+      L2/L3 want are now unblocked but not yet written.
 - [ ] **`runs.workflow` provenance column.** Today "which workflow produced
       this run" is only recoverable via `task_id` prefix convention
       (`job.<slug>` vs `dev.<slug>`). A first-class `runs.workflow TEXT`

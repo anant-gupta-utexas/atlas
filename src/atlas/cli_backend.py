@@ -231,15 +231,18 @@ class CodexUsageStats:
     """Token telemetry parsed from a `codex exec --json` turn.completed event.
 
     VERIFIED against codex-cli 0.144.4. Note the asymmetry with Claude's
-    UsageStats: Codex reports NO dollar figure at all, so total_cost_usd is
-    always None here (it exists on the dataclass only for call-site symmetry
-    with UsageStats). Codex additionally reports cached_input_tokens and
-    reasoning_output_tokens, which Claude's envelope does not carry in the
-    same shape — captured here because reasoning tokens are billable output
-    on reasoning models and dropping them would understate usage.
+    UsageStats: Codex reports NO dollar figure at all, so there is deliberately
+    no ``total_cost_usd`` field here (L1 code review finding N1 — a field that
+    is structurally always None invites ``if usage.total_cost_usd:`` downstream,
+    and the call-site symmetry it bought was notional: no caller consumes
+    UsageStats and CodexUsageStats polymorphically). Engine A/B comparison in
+    v3 is tokens-only — Resolved Decision #10. Codex additionally reports
+    cached_input_tokens and reasoning_output_tokens, which Claude's envelope
+    does not carry in the same shape — captured here because reasoning tokens
+    are billable output on reasoning models and dropping them would
+    understate usage.
     """
 
-    total_cost_usd: float | None
     input_tokens: int | None
     output_tokens: int | None
     cached_input_tokens: int | None
@@ -355,7 +358,8 @@ class CodexBackend:
         )
 
         return CodexUsageStats(
-            total_cost_usd=None,  # Codex reports no cost figure — VERIFIED
+            # No total_cost_usd — the Codex CLI reports no cost figure at all
+            # (VERIFIED, 0.144.4). Not a gap to fill later; see the dataclass.
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
             cached_input_tokens=usage.get("cached_input_tokens"),
@@ -379,17 +383,50 @@ class CodexBackend:
         )
 
 
+# Bumped whenever the reduction rule below changes, so stored spans record
+# which convention produced their `tokens` total (L1 code review finding M1).
+CODEX_TOKEN_REDUCTION_RULE = "cached_input_as_addend_v1"
+
+
 def codex_usage_to_tokens(usage: CodexUsageStats) -> tuple[int, int]:
     """Reduce CodexUsageStats to the (in, out) tuple plumb's record_span expects.
 
-    Per Pending Decision #4: cached_input_tokens is treated as an addend to
-    input_tokens (Anthropic's convention — Claude's input_tokens excludes its
-    own cache fields), not a subset. Getting this backwards double-counts
-    cached tokens on every Codex span. Revisit here only, per T-L1.1 findings.
+    Per Pending Decision #4, ``cached_input_tokens`` is **assumed** to be an
+    addend to ``input_tokens`` rather than a subset of it. This is an
+    inference from Anthropic's convention (Claude's ``input_tokens`` excludes
+    its own cache fields), **not** a verified fact about OpenAI's schema —
+    T-L1.1's cold/warm-cache capture pair is what settles it.
+
+    If the assumption is backwards, every Codex span's input count is inflated
+    (~78% on the `success.jsonl` fixture's real figures). That error is
+    recoverable rather than silent: ``codex_usage_attributes()`` persists the
+    raw four-field breakdown plus ``CODEX_TOKEN_REDUCTION_RULE`` into
+    ``spans.attributes``, so history can be recomputed. Change the rule here
+    and bump the constant — do not edit stored spans.
     """
     in_tokens = (usage.input_tokens or 0) + (usage.cached_input_tokens or 0)
     out_tokens = (usage.output_tokens or 0) + (usage.reasoning_output_tokens or 0)
     return (in_tokens, out_tokens)
+
+
+def codex_usage_attributes(usage: CodexUsageStats) -> dict[str, object]:
+    """Raw Codex token breakdown for durable storage in ``spans.attributes``.
+
+    plumb collapses ``tokens=(in, out)`` into one summed ``spans.tokens``
+    column, so neither the in/out split nor the cached/reasoning breakdown
+    survives there. Persisting the raw fields — and the name of the reduction
+    rule that produced the total — is what makes an incorrect Pending
+    Decision #4 a recomputable error instead of permanently corrupt data
+    (L1 code review finding M1).
+    """
+    return {
+        "engine": "codex",
+        "token_reduction_rule": CODEX_TOKEN_REDUCTION_RULE,
+        "input_tokens": usage.input_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+    }
 
 
 def resolve_backend(
