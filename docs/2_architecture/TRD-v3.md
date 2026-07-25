@@ -117,23 +117,60 @@ Engine per run resolves through the existing 4-tier cascade (per-stage `StageSpe
 class CodexBackend:            # codex exec ...
     name = "codex"
     def build_argv(self, *, prompt, model, add_dirs, timeout_s, extra_flags) -> list[str]:
-        # ["codex", "exec", prompt, "--json", "-C", <worktree>, "--sandbox", "workspace-write", ...]
+        # ["codex", "exec", prompt, "--json", "-C", <primary-dir>,
+        #  "--sandbox", "workspace-write", "--model", <model>,
+        #  "--add-dir", <each-additional-dir>...]
     def parse_result(self, stdout, stderr, returncode) -> StageOutcome:
-        # consume JSONL event stream → final `result` event → status/text + token/latency stats
+        # exit-code-driven status; assert a `turn.completed` event exists;
+        # output text joined from `item.completed` events whose
+        # item.type == "agent_message"  (there is NO status field in the stream)
+    def parse_usage(self, stdout) -> CodexUsageStats | None:
+        # `turn.completed`.usage → four token fields; NO cost field exists
     def preflight(self) -> str | None:
-        # verify auth (OPENAI_API_KEY / codex login); fail closed with a typed error, no silent hang
+        # verify auth (OPENAI_API_KEY / $CODEX_HOME/auth.json); fail closed
+        # with a typed error, no subprocess spawned, no silent hang
 ```
+
+**Verified event schema (`codex-cli 0.144.4`, captured 2026-07-24).** A real read-only run emits:
+
+```jsonl
+{"type":"thread.started","thread_id":"019f96b7-..."}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hi"}}
+{"type":"turn.completed","usage":{"input_tokens":16668,"cached_input_tokens":13056,"output_tokens":5,"reasoning_output_tokens":0}}
+```
+
+> **⚠ Correction (2026-07-24).** This section previously described a final **`result`** event carrying *"status + stats"* and a *"`result` event subtype"* failure signal, written before Codex had ever been exercised in this stack (§12 flags it as *"never exercised in this stack before"*). **Codex 0.144.4 emits no such event.** Four corrections, all load-bearing for `parse_result`:
+> 1. The terminal event is **`turn.completed`**, and it carries **only `usage`** — no status, no text.
+> 2. There is **no status field anywhere in the stream**; success/failure is **exit-code-only**.
+> 3. Agent output text lives in **`item.completed`** events where `item.type == "agent_message"` (field `item.text`) — a *different* event type from the terminal one, so extraction is a two-pass scan.
+> 4. There is **no `total_cost_usd`** (or any cost field). Codex reports four token counts: `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`.
+>
+> Implementation detail and the resulting parse algorithm live in the Phase L1 TRS ([`dev/active/loop-mode-phase-L1/`](../../dev/active/loop-mode-phase-L1/loop-mode-phase-L1-plan.md)).
 
 **Per-CLI contract (extends TRD-v2 §3.4 table):**
 
 | Dimension | `CodexBackend` |
 |---|---|
 | Command | `codex exec` |
-| Workspace dir | `-C <worktree>` (also satisfies codex's git-repo requirement) |
-| Output format | `--json` → JSONL event stream; final `result` event carries status + stats |
-| Autonomy/sandbox | `--sandbox workspace-write` (edits confined to the worktree) |
-| Failure signal | exit codes + `result` event subtype |
-| Auth (headless) | `OPENAI_API_KEY` (or `codex login` session); validated in `preflight()` |
+| Workspace dir | `-C <worktree>` (also satisfies codex's git-repo requirement); `--add-dir <repo_root>` keeps repo context readable/writable alongside it |
+| Model selection | `-m/--model <MODEL>` |
+| Output format | `--json` → JSONL event stream; terminal **`turn.completed`** event carries `usage` only |
+| Agent output text | `item.completed` events with `item.type == "agent_message"` → `item.text` (joined across events) |
+| Autonomy/sandbox | `--sandbox workspace-write` (edits confined to the worktree). **Never** `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-bypass-hook-trust` |
+| Failure signal | **Exit code only** — the event stream carries no status field |
+| Cost telemetry | **None reported by the CLI** (see §3.6 asymmetry note) |
+| Token telemetry | `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens` |
+| Auth (headless) | `OPENAI_API_KEY` or `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`, written by `codex login`); validated in `preflight()` |
+
+**Consequence for the engine A/B objective (§2 KPIs, §13 #12).** Cost comparison between engines is **not symmetric and not merely blocked on plumb**:
+
+| Engine | Cost reported by CLI? | Durable sink? | Net |
+|---|---|---|---|
+| `claude` | Yes (`total_cost_usd`) | No — blocked on plumb P1-a (§3.6) | Recoverable when plumb v1.1 lands |
+| `codex` | **No — never emitted** | N/A | Requires atlas to *derive* cost from tokens × a per-model price table |
+
+Until such a price table exists (not in v3 scope), **cross-engine comparison is tokens-only**. `dollar_cost` for Codex runs is unobtainable, not merely unstored. Resolve in the L2 TRS (which owns cost-per-landed-PR) — see §12's risk row.
 
 `ClaudeCodeBackend` gains `--output-format json` in loop mode (see §3.6). `AntigravityBackend` (`agy`) remains experimental and is not used by the loop.
 
@@ -204,6 +241,30 @@ Loop runs require two things attended runs don't:
 | `total_cost_usd` | **Run-level only** — there is **no per-span cost column** in plumb (not in v1.0.1, and not in v1.1: `spans.attributes` is JSON, and P1-a's `set_usage` is deliberately run-level) | **Blocked on plumb P1-a.** Parsed and surfaced in-memory (logs, PR-comment body) but has **no durable sink** until `set_usage` + `finalize_run` threading land. |
 
 The `runs.tokens_in` / `tokens_out` / `dollar_cost` columns exist in plumb's schema, but **the online `with run()` path does not write them** — `finalize_run` (`plumb/storage_sqlite.py:431`, `_FINALIZE_RUN` SQL) sets none of them and `RunHandle` exposes no cost/usage setter. A live run today therefore produces a `runs` row with `dollar_cost = NULL`. Do **not** design against those columns before plumb P1-a; do **not** go looking for a per-span cost sink, as none exists.
+
+**Per-engine asymmetry (verified 2026-07-24).** The table above describes `claude`. `codex` differs at the *source*, not just the sink:
+
+| | `claude` | `codex` |
+|---|---|---|
+| Cost emitted by CLI | `total_cost_usd` | **Nothing** — no cost field exists |
+| Path to durable cost | plumb P1-a (`set_usage`) | plumb P1-a **plus** a per-model price table atlas does not have |
+| Uncached input tokens | `input_tokens` | — |
+| Cache-read tokens | `cache_read_input_tokens` | `cached_input_tokens` |
+| Cache-**write** tokens | `cache_creation_input_tokens` | *(not reported)* |
+| Output tokens | `output_tokens` | `output_tokens` |
+| Reasoning tokens | *(not reported — folded into output)* | `reasoning_output_tokens` |
+
+**Neither CLI's token schema is a superset of the other**, which is why the two backends keep separate usage dataclasses rather than sharing one.
+
+**How this collapses at the span level.** plumb's `spans` table has a **single `tokens INTEGER` column** (`plumb/adapters/_schema.py:47`); `add_span(tokens=(in, out))` sums the pair on write, and `Span`'s docstring states the in/out split *"is not durable"* (`plumb/core/entities.py:123-127`). So per-span token storage answers only one question — **total tokens billed for this span** — and every backend's usage fields reduce to that sum:
+
+```
+tokens = (uncached input + all cache fields) + (output + reasoning)
+```
+
+⚠ **One open ambiguity, tracked in the L1 TRS (Pending Decision #4):** whether Codex's `cached_input_tokens` is an *addend* to `input_tokens` (Anthropic's convention) or a *subset breakdown* of it. The captured sample fits both readings; choosing wrong mis-states Codex spans by ~4×. Settled by a cold-cache/warm-cache capture pair in L1.
+
+**Decision (maintainer, 2026-07-24): v3 measures tokens, not dollars, for cross-engine comparison.** No per-model price table is built in v3. If cost synthesis is added later, the durable shape is prices in a **dated** config (`as_of`), cost computed at **query time not write time** (so a corrected table retroactively fixes history), and derived figures labeled *estimated* — never written into the same column as a CLI-reported figure.
 
 **Permissions.** Loop runs use a non-interactive profile: **not** `--bare` (the pipeline needs plugin/skill discovery), but `--permission-mode acceptEdits` + a curated `--allowedTools` allowlist (stored in the *target repo's* `.claude/settings.json`, checked in) + a `--max-turns` cap. **No `--dangerously-skip-permissions`** — the worktree is a directory boundary, not a filesystem sandbox. `CodexBackend` uses `--sandbox workspace-write` for the equivalent confinement.
 
@@ -402,7 +463,7 @@ Same as v1/v2 — no deployed surface; the repo is the artifact. The loop runs o
 | Dependency | Type | Risk |
 |---|---|---|
 | `gh` CLI | External CLI | Low — stable, already authenticated. Network-bound; failures handled as recoverable ticks. |
-| Codex CLI (`codex exec`) | External CLI | **Medium** — never exercised in this stack before. Headless auth + JSONL parsing are the unknowns. Mitigated: `CodexBackend` is opt-in via `engine:codex`; the loop defaults to `claude`; if L1 auth is fiddly, ship the loop on Claude first and land Codex a beat later (clean deferral, no rewrite). |
+| Codex CLI (`codex exec`) | External CLI | **Low–Medium (downgraded 2026-07-24)** — schema and flag surface now **verified against `codex-cli 0.144.4`** (§3.3); auth path (`$CODEX_HOME/auth.json`) confirmed present. Residual risk is version drift (the JSONL schema is undocumented and unversioned, so a CLI upgrade can silently change event shapes — mitigated by pinning the observed version in `headless-clis-reference.md` and by `parse_result` failing loudly with `codex_no_turn_completed` rather than mis-parsing). Still opt-in via `engine:codex`; the loop defaults to `claude`. |
 | tmux | External CLI | Low — observability only; `atlas loop run` works without it. |
 
 ### Risks
@@ -410,9 +471,11 @@ Same as v1/v2 — no deployed surface; the repo is the artifact. The loop runs o
 | Risk | Impact | Probability | Mitigation |
 |---|---|---|---|
 | Loop mode becomes a framework (schedulers, DAGs, plugin system) | High | Medium | The loop is a `while` over `tick()`; `tick()` is a linear state machine. New code = queue adapter + loop + deliverer + one backend. No scheduler, no DAG engine. If it grows one, it has drifted from scope — same vow as v1/v2. |
-| Runaway cost / infinite loop | High | Medium | Dual bound: per-day cost cap **and** no-progress circuit breaker. Both required; neither alone is sufficient. ⚠ **`max_dollars_per_day` cannot read `runs.dollar_cost` until plumb P1-a** (that column is never written — §3.6). Until then L2 must enforce the cap from the **in-memory `total_cost_usd`** each backend returns per run, accumulated by the loop process itself (and reset/persisted across restarts), or fall back to `max_runs_per_day` as the hard bound. Resolve in the L2 TRS. |
+| Runaway cost / infinite loop | High | Medium | Dual bound: per-day cost cap **and** no-progress circuit breaker. Both required; neither alone is sufficient. ⚠ **Two independent gaps, not one.** (a) `max_dollars_per_day` cannot read `runs.dollar_cost` until plumb P1-a (that column is never written — §3.6); until then L2 must accumulate the **in-memory `total_cost_usd`** each backend returns, persisted across restarts. (b) **That fallback does not work for `codex` at all** — the Codex CLI returns no cost figure (§3.3, verified 2026-07-24), so a Codex-heavy day is bounded only by `max_runs_per_day`. **`max_runs_per_day` is therefore the load-bearing cap, not the backstop**, and must be set conservatively enough to bound spend on its own. Resolve in the L2 TRS. |
 | Prompt injection via issue body | High | Low (private repo) → High (if public) | Private single-author assumption in v3; `trusted_authors` allowlist becomes mandatory the moment a repo is public/multi-author (§4). |
-| Codex headless auth blocks `engine:codex` | Medium | Medium | Opt-in; default `claude`; `preflight()` fails closed with a clear error; Claude-only fallback is a config change, not a rewrite. |
+| Codex headless auth blocks `engine:codex` | Medium | **Low (was Medium)** | Auth path verified 2026-07-24 (`$CODEX_HOME/auth.json` present after `codex login`; `OPENAI_API_KEY` also accepted). Opt-in; default `claude`; `preflight()` fails closed with a clear error; Claude-only fallback is a config change, not a rewrite. |
+| Codex CLI upgrade silently changes the undocumented JSONL schema | Medium | Medium | The event schema is undocumented and unversioned — a `codex` upgrade can change it without notice. `parse_result` is written to fail **loudly** (`codex_no_turn_completed`) rather than silently mis-parse; the observed version is pinned in `headless-clis-reference.md`; fixtures are real captures, so a schema change surfaces as a test failure on the next capture refresh, not as corrupted telemetry. |
+| Cost-per-landed-PR is undefined for `codex` runs | Medium | **High (certain, pre-mitigation)** | Codex emits no cost figure at all (§3.3, §3.6) — unlike Claude, where cost exists but lacks a sink. Cross-engine cost comparison therefore requires deriving dollars from tokens × a per-model price table, which atlas does not have and which is **not in v3 scope**. Until then §13 #12's report is **tokens-per-landed-PR** for Codex and (post-P1-a) dollars for Claude. Resolve in the L2 TRS. |
 | Crash strands an `atlas:working` issue | Medium | Medium | `reconcile_orphans()` on startup resets stale labels + prunes worktrees. |
 | Double-scoring on sync re-tick | Low | Medium | Idempotent sync via local dedupe (`issue+pr+outcome`); durable once plumb v1.1 lands idempotent scoring. |
 | Planned-lane multi-PR bookkeeping confuses issue state | Medium | Low | `Refs #n` on task PRs, `Closes #n` only on the last; issue closes on final merge; `atlas loop status` shows in-flight planned issues. |
@@ -455,7 +518,7 @@ v3 milestones ship when the following hold.
 
 ### v3.3 — Scale-out (Phase L4 exit)
 11. **Second repo + concurrency.** The plumb repo runs as a second target; `concurrency > 1` works with per-run state keys.
-12. **Weekly report.** `plumb run stats` yields a cost-per-landed-PR + intervention-rate summary. **Requires plumb P1-a** for the cost dimension (§3.6); pre-P1-a the report is tokens-per-landed-PR + intervention rate.
+12. **Weekly report.** `plumb run stats` yields a cost-per-landed-PR + intervention-rate summary. **Requires plumb P1-a** for the cost dimension (§3.6); pre-P1-a the report is tokens-per-landed-PR + intervention rate. **For `codex` runs the cost dimension requires more than P1-a** — the Codex CLI emits no cost figure at all (§3.3), so dollars must be derived from tokens × a per-model price table that does not exist in v3. Cross-engine comparison is therefore **tokens-only** unless that table is built.
 
 ### Cross-cutting
 13. **LoC discipline.** Loop-mode code (loop + queue adapter + deliverer + CodexBackend) stays small — a state machine, not a framework. Target ≤ ~500 lines net across the new modules.
@@ -491,7 +554,7 @@ v3 milestones ship when the following hold.
 **Dependencies:** L0.
 
 **Engineering scope summary:**
-- `CodexBackend` (§3.3) per the v2 `CliBackend` Protocol; register in `_KNOWN_BACKENDS` / `make_backend()`. `build_argv` = `codex exec … --json -C <worktree> --sandbox workspace-write`; `parse_result` consumes JSONL → final `result` event; `preflight` fails closed on missing auth.
+- `CodexBackend` (§3.3) per the v2 `CliBackend` Protocol; register in `_KNOWN_BACKENDS` / `make_backend()`. `build_argv` = `codex exec … --json -C <worktree> --sandbox workspace-write --model <m> [--add-dir <repo_root>]`; `parse_result` derives status from the **exit code** (the stream has no status field), asserts a `turn.completed` event, and joins agent text from `item.completed`/`agent_message` events; `preflight` fails closed on missing auth (`OPENAI_API_KEY` or `$CODEX_HOME/auth.json`) with no subprocess spawned. **Schema verified against `codex-cli 0.144.4` — see §3.3's correction box.**
 - `loop_dev.yaml` (§3.4): ungated `plan → code_gen(isolate) → verify`, distinct from `dev.yaml`. Finalize guardrail "signs".
 - Add a Codex section to `headless-clis-reference.md`.
 - Tests: `CodexBackend` argv/parse (captured JSONL fixtures) + preflight; `loop_dev` in the loader tests. Manual smoke: `atlas run "<task>" --workflow loop_dev --backend codex`.

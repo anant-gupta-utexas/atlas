@@ -128,6 +128,39 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
       through `finalize_run`. Blocks atlas's L2 exit criterion (cost-per-
       landed-PR) and `max_dollars_per_day` budget enforcement (TRD-v3 §12).
       *(from Phase L0 TRS, T-L0.5, plumb spike resolved 2026-07-21)*
+      **⚠ Amended 2026-07-24 (Phase L1 Codex verification) — P1-a's stated
+      premise is now falsified.** plumb's `atlas-unblock-v1.1-scope.md`
+      justifies an explicit `set_usage` setter over auto-derivation because it
+      *"matches how backends report a single authoritative `total_cost_usd`"*.
+      Verified against `codex-cli 0.144.4`: **Codex emits no cost field at
+      all** (terminal `turn.completed` carries only `usage`). So atlas has one
+      backend that can supply a dollar figure and one that structurally cannot
+      — ever, not pending anything. Two consequences for plumb to resolve
+      **before the v1.1 TRS is cut**: (a) `plumb run stats` sums
+      `runs.dollar_cost`, so with mixed-engine runs that total silently
+      represents an unknown *subset* of spend while presenting as complete —
+      decide whether to report coverage alongside the sum, add a
+      `cost_source` discriminator, or document the caveat; (b) re-open D-a1
+      (explicit vs auto-sum) — the "dollars have no other source" argument
+      doesn't apply to *tokens*, which every backend reports, so
+      auto-deriving `runs.tokens_*` from spans is more attractive than when
+      the doc was written. **atlas's position: plumb should NOT compute cost
+      from tokens** — that turns a recorder into a calculator with a silent
+      staleness failure mode. Worth recording as an explicit plumb non-goal.
+      *(see the ready-to-use prompt in this entry's sibling below)*
+- [ ] **Send plumb the L1 Codex findings before v1.1's migration freezes.**
+      Two time-sensitive items for the plumb session: (1) the P1-a premise
+      correction above; (2) **`spans.attributes` (P1-b) sign-off** — plumb's
+      own scope doc flags it as *"proposal needing sign-off"* that must ride
+      the v1.1 `user_version` 1→2 migration **or wait a full release**. atlas
+      L2/L3 wants per-span `engine` / `lane` / `issue` / `attempt_n` /
+      `failure_mode`, and L1 adds a new need: **neither CLI's token breakdown
+      fits a two-column `tokens_in`/`tokens_out` split without loss** (Claude:
+      `input`/`output`/`cache_creation`/`cache_read`; Codex:
+      `input`/`cached_input`/`output`/`reasoning_output`), so `attributes` is
+      the only durable home for the breakdown while `tokens_in/out` carry
+      billable totals. If the migration ships without it, this waits a whole
+      release. *(Phase L1, 2026-07-24)*
 - [ ] **`runs.workflow` provenance column.** Today "which workflow produced
       this run" is only recoverable via `task_id` prefix convention
       (`job.<slug>` vs `dev.<slug>`). A first-class `runs.workflow TEXT`
