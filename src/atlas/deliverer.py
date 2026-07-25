@@ -108,7 +108,21 @@ class GhPrDeliverer:
 
 
 def _parse_pr_url(stdout: str) -> PrRef:
+    """Parse `gh pr create`'s stdout URL into a PrRef.
+
+    Raises DeliveryError rather than sentinel-ing to number=0 on a match
+    failure (L1 code review finding L2, T-L2.12): 0 is not a valid PR number
+    anywhere, and a caller reading it back (comment/label/close by PR number)
+    would fail much later, further from the cause, via a confusing
+    `gh api /pulls/0` 404. The PR itself was already created successfully by
+    this point (gh pr create returned exit 0) — a malformed URL means gh's
+    output format changed, not that delivery failed outright, but atlas has
+    no way to safely resume without a parsed PR number, so failing loudly
+    here (caught by loop.tick()'s existing DeliveryError handler, which
+    leaves the issue atlas:working for manual triage) is the safer default.
+    """
     url = stdout.strip().splitlines()[-1].strip() if stdout.strip() else ""
     match = _PR_URL_RE.search(url)
-    number = int(match.group(1)) if match else 0
-    return PrRef(number=number, url=url)
+    if match is None:
+        raise DeliveryError(f"could not parse a PR number out of `gh pr create` output: {stdout!r}")
+    return PrRef(number=int(match.group(1)), url=url)

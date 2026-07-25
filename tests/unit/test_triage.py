@@ -49,9 +49,7 @@ def test_triage_wf_planned_label_wins() -> None:
 def test_triage_both_labels_planned_wins() -> None:
     plumb = PlumbIO(real=False)
     with patch("atlas.triage.subprocess.run") as mock_run:
-        result = triage(
-            _issue(frozenset({"wf:quick", "wf:planned"})), plumb=plumb, run_id="r1"
-        )
+        result = triage(_issue(frozenset({"wf:quick", "wf:planned"})), plumb=plumb, run_id="r1")
     mock_run.assert_not_called()
     assert result.lane == "planned"
     assert result.source == "label"

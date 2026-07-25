@@ -131,12 +131,12 @@ The "code-complete, manual verification pending" framing in both tasks.md files 
 
 ## Recommended actions
 
-| # | Action | Severity | Owner phase |
-|---|---|---|---|
-| 1 | Treat T-L1.1's cache-semantics capture as a hard gate before any analyzed Codex run; or persist the raw 4-field breakdown | Medium | L1 (before L2 data collection) |
-| 2 | Add "confirm Codex writes into the worktree, not atlas_root" to T-L1.8's checklist | Low | L1 |
-| 3 | Soften the `codex_usage_to_tokens` docstring's confidence about OpenAI's convention | Nit | L1 |
-| 4 | BACKLOG: `PrRef.number == 0` sentinel → raise or `int \| None` when L2 first consumes it | Low | L2 |
-| 5 | Extend the branch-safety assertion beyond exact `"main"` | Low | L1 or L2 |
+| # | Action | Severity | Owner phase | Status |
+|---|---|---|---|---|
+| 1 | Treat T-L1.1's cache-semantics capture as a hard gate before any analyzed Codex run; or persist the raw 4-field breakdown | Medium | L1 (before L2 data collection) | Open — T-L1.1 still not run |
+| 2 | Add "confirm Codex writes into the worktree, not atlas_root" to T-L1.8's checklist | Low | L1 | Open — T-L1.8 still not run |
+| 3 | Soften the `codex_usage_to_tokens` docstring's confidence about OpenAI's convention | Nit | L1 | Open |
+| 4 | BACKLOG: `PrRef.number == 0` sentinel → raise or `int \| None` when L2 first consumes it | Low | L2 | **Closed (T-L2.12, 2026-07-25)** — `_parse_pr_url` now raises `DeliveryError` on a malformed `gh pr create` URL instead of sentinel-ing to `number=0`; see [`deliverer.py`](../../src/atlas/deliverer.py) and `test_deliver_malformed_pr_url_raises_instead_of_number_zero_sentinel` in `tests/unit/test_deliverer.py` |
+| 5 | Extend the branch-safety assertion beyond exact `"main"` | Low | L1 or L2 | Open — carried to `docs/1_product_and_research/BACKLOG.md` v1.1-era carryforward (T-L2.12 bookkeeping) |
 
-Per the Code Reviewer persona's operating principle, **no fixes have been applied** — these await your approval.
+Per the Code Reviewer persona's operating principle, **no fixes have been applied except where a later phase's own TRS explicitly closed the item** (action #4, closed by T-L2.12) — the rest await maintainer approval.

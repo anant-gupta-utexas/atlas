@@ -89,6 +89,16 @@ class Config:
         )
 
 
+def _int_field(section: dict[str, object], key: str, default: int) -> int:
+    raw = section.get(key, default)
+    return int(raw) if isinstance(raw, (int, float, str)) else default
+
+
+def _float_field(section: dict[str, object], key: str, default: float) -> float:
+    raw = section.get(key, default)
+    return float(raw) if isinstance(raw, (int, float, str)) else default
+
+
 def _parse_loop_config(section: dict[str, object]) -> LoopConfig:
     defaults = LoopConfig()
     raw_repos = section.get("repos", defaults.repos)
@@ -101,16 +111,18 @@ def _parse_loop_config(section: dict[str, object]) -> LoopConfig:
     )
     return LoopConfig(
         repos=repos,
-        poll_interval_s=int(section.get("poll_interval_s", defaults.poll_interval_s)),  # type: ignore[arg-type]
-        max_runs_per_day=int(section.get("max_runs_per_day", defaults.max_runs_per_day)),  # type: ignore[arg-type]
-        max_dollars_per_day=float(section.get("max_dollars_per_day", defaults.max_dollars_per_day)),  # type: ignore[arg-type]
-        max_turns=int(section.get("max_turns", defaults.max_turns)),  # type: ignore[arg-type]
-        no_progress_limit=int(section.get("no_progress_limit", defaults.no_progress_limit)),  # type: ignore[arg-type]
-        identical_error_limit=int(
-            section.get("identical_error_limit", defaults.identical_error_limit)
-        ),  # type: ignore[arg-type]
-        cooldown_min=int(section.get("cooldown_min", defaults.cooldown_min)),  # type: ignore[arg-type]
-        concurrency=int(section.get("concurrency", defaults.concurrency)),  # type: ignore[arg-type]
+        poll_interval_s=_int_field(section, "poll_interval_s", defaults.poll_interval_s),
+        max_runs_per_day=_int_field(section, "max_runs_per_day", defaults.max_runs_per_day),
+        max_dollars_per_day=_float_field(
+            section, "max_dollars_per_day", defaults.max_dollars_per_day
+        ),
+        max_turns=_int_field(section, "max_turns", defaults.max_turns),
+        no_progress_limit=_int_field(section, "no_progress_limit", defaults.no_progress_limit),
+        identical_error_limit=_int_field(
+            section, "identical_error_limit", defaults.identical_error_limit
+        ),
+        cooldown_min=_int_field(section, "cooldown_min", defaults.cooldown_min),
+        concurrency=_int_field(section, "concurrency", defaults.concurrency),
         trusted_authors=trusted_authors,
     )
 

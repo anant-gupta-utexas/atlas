@@ -358,6 +358,39 @@ def test_trusted_authors_all_untrusted_returns_none(tmp_path: Path) -> None:
     assert result is None
 
 
+def test_trusted_authors_enforced_at_tick_claim_boundary(tmp_path: Path) -> None:
+    """T-L2.12 checkpoint: trusted_authors enforcement must be wired into the
+    actual tick()/claim()/dispatch path, not just present as a config field
+    and a helper-level unit test (_pull_next_ready above) — this is the test
+    the TRD's §4 Security section asks for. An untrusted-author issue must
+    never reach claim() or a dispatch function; it must be silently skipped
+    (idle tick), per Decision #16 (skipped, not relabeled to an error state).
+    _pull_next_ready is intentionally NOT mocked here — it's the real
+    enforcement point tick() calls into."""
+    cfg = _cfg(tmp_path, trusted_authors=("trusted-user",))
+    state = _state()
+    untrusted = _issue(number=1, author="random", labels=frozenset({"wf:quick"}))
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.queue_gh.list_ready", return_value=[untrusted]),
+        patch("atlas.loop.current_gh_user") as current_user_mock,
+        patch("atlas.queue_gh.claim") as claim_mock,
+        patch("atlas.loop.run_one_shot") as run_one_shot_mock,
+        patch("atlas.loop.run_planned_first_pass") as run_planned_mock,
+        patch("atlas.queue_gh.comment") as comment_mock,
+    ):
+        result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert result.action == "idle"
+    assert result.issue_number is None
+    current_user_mock.assert_not_called()
+    claim_mock.assert_not_called()
+    run_one_shot_mock.assert_not_called()
+    run_planned_mock.assert_not_called()
+    comment_mock.assert_not_called()
+
+
 def test_engine_label_selects_backend(tmp_path: Path) -> None:
     issue = _issue(labels=frozenset({"engine:codex"}))
     assert loop._engine_for_issue(issue) == "codex"

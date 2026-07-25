@@ -10,33 +10,177 @@ notes live in [`loop-mode-phase-L2-context.md`](./loop-mode-phase-L2-context.md)
 ## Current
 
 ```
-phase: in progress — T-L2.1 through T-L2.8 code-complete + tested; T-L2.9 in progress
+phase: code-complete — T-L2.1 through T-L2.12 and T-L2.14 done;
+       T-L2.13 blocked (needs a human operator + a maintainer fix first)
 gate:  none
-next:  T-L2.9 (atlas loop CLI surface) — resume at the exact point noted below
+next:  T-L2.13 (manual smoke tests, off-CI — needs a human operator; blocked, see note below)
 ```
 
 ### Resume point (2026-07-25)
 
-Stopped mid-T-L2.9, right after re-reading `cli.py`'s existing command pattern
-(the `hook` command, `_slugify` helper) to match style before writing the
-`loop_app` Typer sub-app. **Nothing has been written into `cli.py` for T-L2.9
-yet** — the `loop_app` sub-app, `loop run/start/stop/status/attach` commands
-do not exist. Next action: add them per the plan's Detailed Component Design
-(`loop-mode-phase-L2-plan.md` "cli.py — additions" section) and T-L2.9's
-acceptance criteria in `loop-mode-phase-L2-tasks-detail.md`.
+T-L2.10 is done: `tests/integration/test_loop_e2e.py` (5 tests) exercises
+the real `tick()` -> `run_one_shot()`/`run_planned_first_pass()` ->
+`make_pipeline()` -> `Pipeline`/`WorktreeManager`/`GhPrDeliverer` stack
+against a real temporary git repo — `gh` is mocked at the `queue_gh`
+function boundary; the backend subprocess (`claude -p ...`) and delivery's
+`git push`/`gh pr create` are mocked via one `subprocess.run` patch (see
+`_FakeSubprocess` in that file — `atlas.orchestrator`, `atlas.deliverer`,
+`atlas.loop`, and `atlas.worktree` all import the literal same `subprocess`
+module object, not separate copies, so one patch covers all of them; real
+`git` calls other than `push` are delegated through to the actual
+`subprocess.run` so `WorktreeManager` genuinely exercises git). All four
+scenarios from the plan's Testing Strategy table pass: one-shot lane
+end-to-end, planned-lane stops after the plan PR (no `code_gen`/`verify`
+dispatch), crash recovery via `reconcile_orphans` (both the relabel-to-ready
+and orphaned-worktree-pruning halves, as two tests), and the zero-touch
+smoke shape (`Closes #n` + `run_id` comment). Full suite at 398 passed,
+1 xfailed. `ruff check`/`ruff format --check` clean;
+`mypy --strict src tests` shows zero errors attributable to the new file
+(the 167 errors it surfaces elsewhere are all pre-existing, in files this
+session didn't touch — confirmed by diffing against `mypy --strict src`
+alone, which shows the same 14 pre-existing `config.py` errors whether or
+not `test_loop_e2e.py` exists).
+
+T-L2.11 is also done — full gate run:
+
+- `ruff check .`: clean (no changes needed).
+- `ruff format --check .`: found one pre-existing drift, `tests/unit/test_triage.py`
+  (a committed file this session never touched, one over-long line collapsed
+  by an older ruff version than the one now in use) — reformatted, now clean.
+- `mypy --strict src`: found 14 real, fixable errors in `src/atlas/config.py`,
+  all in `_parse_loop_config()` (T-L2.3's own code). Root cause: `int(section.get(key,
+  default))` where `section.get()` returns `object` — the `# type: ignore[arg-type]`
+  comments guarding these calls were on the wrong error code (mypy raises
+  `call-overload` for `int(object)`, not `arg-type`), so they never actually
+  suppressed anything; strict mode was catching real, unsuppressed errors that
+  had been sitting there since T-L2.3. Fixed by extracting `_int_field()`/
+  `_float_field()` helpers that `isinstance`-narrow before calling
+  `int()`/`float()`, no `type: ignore` needed. `mypy --strict src` is now
+  clean (0 errors, 22 files) — verified the fix didn't change parsing
+  behavior (all `[loop]`-config tests in `test_config.py` still pass
+  unchanged).
+- `mypy --strict tests` (whole directory, not just `src`) is NOT clean — 167
+  pre-existing errors across `test_remediation.py`, `test_pipeline.py`,
+  `test_shell_runner.py`, `test_cli_backend_dispatch.py`, and
+  `test_job_workflow_e2e.py`, none introduced this session, none in any file
+  T-L2.1–T-L2.10 touched or added. The plan's T-L2.11 acceptance criteria
+  only name `mypy --strict src`, so this is out of scope — noted so it isn't
+  mistaken for a new regression by whoever runs this gate next.
+- Coverage (`pytest --cov=atlas --cov-report=term-missing`, `cli.py` and
+  `post_commit_hook.py` excluded per `pyproject.toml`'s existing
+  `[tool.coverage.run] omit`): **95.10% repo-wide**, comfortably above the
+  actual CI gate (`fail_under = 80`) but **below the 96% figure L1's
+  STATUS.md cited** (301 tests, before `loop.py`/`queue_gh.py`/`triage.py`
+  existed) — this is expected dilution, not a quality drop: L2 added ~500
+  new statements at 91–95% coverage each (below the pre-L2 average, which
+  skewed toward smaller, more-exhaustively-tested modules), which pulls the
+  blended repo-wide average down even though **every individual module,
+  including every new L2 module, meets or clears its own T-L2.11-specified
+  target**: `loop.py` 91% (target ≥85%), `queue_gh.py` 92% (target ≥90%),
+  `triage.py` 95% (target ≥85%), `config.py` 100% (target ≥90% for the new
+  `[loop]` lines). Per-module targets are what T-L2.11's acceptance criteria
+  actually specify; the "no regression below L1's 96%" framing in the plan's
+  prose was written before L2's module count/size was known and should be
+  read as directional, not a hard gate — flagging the exact number rather
+  than silently reporting "no regression" so a maintainer can judge it.
+  One genuine coverage gap worth naming: `loop.py:421-427`, the
+  `current_gh_user()`-raises-`GhCliError` branch inside `tick()` (the "can't
+  even ask GitHub who I am" failure path), is untested — not fixed here
+  since T-L2.11 is scoped as verification-only (no files to create/modify
+  per its own task spec), but a reasonable target for a T-L2.10 follow-up
+  test if a maintainer wants to close it.
 
 **Load-bearing implementation note not yet in the plan text:** `loop.py`
 imports `make_pipeline` from `cli.py` (module-level `from atlas.cli import
 make_pipeline`). This means `cli.py` must NOT import `atlas.loop` at module
-level — it would create a circular import. Import `atlas.loop` lazily inside
-each `loop_run`/`loop_start`/`loop_stop`/`loop_status`/`loop_attach` command
-function body (same lazy-import pattern `cli.py` already uses for
-`atlas.post_commit_hook` in the `hook` command, `cli.py:295`).
+level — it would create a circular import. `cli.py` imports `atlas.loop`
+lazily inside each `loop_run`/`loop_status` command body (same lazy-import
+pattern `cli.py` already uses for `atlas.post_commit_hook` in the `hook`
+command). `loop_start`/`loop_stop`/`loop_attach` don't need `atlas.loop` at
+all — they're pure `tmux` subprocess wrappers.
 
-Everything through T-L2.8 is implemented, tested, and passing (381 passed,
-1 xfailed as of this checkpoint — up from the L0/L1 baseline of 301/1). See
-the Implementation notes section at the bottom of this file for the full
-per-task rundown of what shipped and what's left.
+**Second load-bearing note, surfaced by T-L2.10:** `loop_dev.yaml`'s three
+stage `tool` strings (`RAW:...` x2, `/verify`) are not present in
+`plugin_resolver.PLUGIN_COMMANDS` — that table is dev-pipeline-only per its
+own docstring, and despite the docstring's claim that `RAW:`-prefixed tools
+"bypass resolution entirely," `resolve()`'s actual code does a literal dict
+lookup with no such special case. A real `atlas run --workflow loop_dev` (or
+`atlas loop run`) will raise `RoutingDriftError` today unless the operator's
+`.atlas.toml` has a `[plugin_commands]` override mapping each of those three
+literal tool strings to themselves (or repo_root `.atlas.toml` equivalent).
+T-L2.10's tests reproduce this via `Config.plugin_commands` built from
+`loop_dev.yaml`'s own stage tool strings. **This is a real, live gap for
+T-L2.13's manual smoke test** — the operator will need a `.atlas.toml`
+`[plugin_commands]` block for `loop_dev`'s three stages before `atlas loop
+start` can dispatch anything, or `plugin_resolver.py`/`resolve()` needs a
+fix to actually special-case `RAW:`-prefixed tool strings as its docstring
+already claims. Flagging for a maintainer decision before T-L2.13.
+
+T-L2.12 is also done. Both halves:
+
+- **`PrRef.number` fix**: `deliverer.py::_parse_pr_url` now raises
+  `DeliveryError` when it can't parse a PR number out of `gh pr create`'s
+  stdout, instead of sentinel-ing to `PrRef(number=0, ...)`. Chose the
+  "raise in `deliverer.py`" branch of the L1 review's two suggested fixes
+  (over `int | None` + explicit `None`-handling in `loop.py`) because
+  `PrRef.number` turned out to have **zero real consumers** in `loop.py` —
+  only `.url` is read (in `_format_run_summary`) — so an `Optional` field
+  would only defer the same problem to some future caller, while raising at
+  the one place that actually knows parsing failed gives an immediate,
+  unambiguous signal. `tick()`'s existing `except (DeliveryError, ...)`
+  handler already catches this and posts a "run failed, left atlas:working
+  for manual triage" comment — no new exception-handling wiring needed.
+  New test: `test_deliver_malformed_pr_url_raises_instead_of_number_zero_sentinel`
+  in `test_deliverer.py`, pinning that `worktree.cleanup()` is correctly
+  *not* called in this path (the PR already exists on GitHub by the time
+  parsing fails; atlas has no confirmed PR number to attribute cleanup to).
+- **`trusted_authors` wiring checkpoint**: added
+  `test_trusted_authors_enforced_at_tick_claim_boundary` to `test_loop.py`
+  — the checkpoint test T-L2.12 asks for, at the `tick()`/`claim()`/dispatch
+  boundary rather than only at the `_pull_next_ready()` helper level (the
+  three existing `test_trusted_authors_*` tests from T-L2.5/T-L2.6 already
+  covered the helper in isolation, but T-L2.12's own spec calls this out as
+  "the explicit checkpoint tying it back to the L1 review's TRD §4 Security
+  ask," so a `tick()`-level test was the actual gap). Asserts an
+  untrusted-author issue never reaches `current_gh_user()`, `claim()`,
+  either dispatch function, or `comment()` — the tick resolves `idle`, per
+  Decision #16 (skipped, not relabeled to an error state). `_pull_next_ready`
+  is intentionally left unmocked in this test since it's the real
+  enforcement point.
+- **BACKLOG.md bookkeeping**: L1 code review action #4 (`PrRef.number`)
+  marked closed directly in
+  [`loop-mode-code-review.md`](../loop-mode-phase-L1/loop-mode-code-review.md)'s
+  own actions table (added a Status column rather than deleting the row —
+  the review doc is the historical record of what was found and when it was
+  fixed, so editing it in place keeps that provenance rather than
+  scattering it into a second BACKLOG.md entry that would need to stay in
+  sync). Action #5 (branch-safety exact-match, still open, not in T-L2.12's
+  closure scope) is now a proper BACKLOG.md carryforward entry under
+  "v1.1-era carryforward" — it wasn't previously tracked anywhere outside
+  the review doc, so this is the first time it's actually on the backlog
+  rather than just flagged in a phase-specific review file that's easy to
+  lose track of.
+
+Full suite: 400 passed, 1 xfailed (up from T-L2.11's 398 — the two new
+tests). `ruff check`/`ruff format --check`/`mypy --strict src` all clean.
+
+T-L2.14 (`STATUS.md`) is also done — L2 recorded with the same density/style
+as L0/L1's entries (shipped bullets, the L1-review closure, the
+`plugin_resolver` blocker, the `extract_cost` known limitation), the redundant
+"Module coverage" table dropped entirely (superseded by the per-module
+coverage figures now folded into each phase's own bullet, so the table was
+duplicating information rather than adding it), and front-matter
+(`status`/`next_gate`/`blocked_on`) updated to name the `plugin_resolver` fix
+as the actual blocker rather than leaving it implicit in prose. "Next" now
+names **Phase L3** per T-L2.14's acceptance criteria.
+
+Only T-L2.13 remains — manual smoke tests, off-CI, needs a human operator,
+and **blocked**: see the "Second load-bearing note" above
+(`plugin_resolver.resolve()` doesn't special-case `RAW:`-prefixed tool
+strings, so `atlas loop run`/`atlas loop start` will raise `RoutingDriftError`
+on `loop_dev.yaml`'s stages today without a `.atlas.toml` `[plugin_commands]`
+workaround). This needs a maintainer decision before T-L2.13 can proceed for
+real — every other task in this TRS is done.
 
 ## Status — no blocking dependency
 
@@ -58,12 +202,12 @@ their risk for Codex-lane token-cost trust specifically.
 - [x] **T-L2.6** — `loop.py`: budgets + circuit breaker (`LoopState`, `budget_exhausted`, `breaker_open`, `record_tick_outcome`, day rollover)
 - [x] **T-L2.7** — `loop.py`: `sync_prior_prs()` + idempotent scoring via `PlumbIO.reopen_run()`; relabel + close-on-merge
 - [x] **T-L2.8** — `loop.py`: `run_forever()` + `reconcile_orphans()`; outer exception safety net
-- [ ] **T-L2.9** — `atlas loop` CLI surface: `run`/`start`/`stop`/`status`/`attach` (tmux wrapper for the detached three) — **IN PROGRESS, not started writing code yet; see Resume point above**
-- [ ] **T-L2.10** — Integration tests: full-tick + zero-touch smoke (faked `gh`/`Pipeline`)
-- [ ] **T-L2.11** — Lint/type/coverage gate
-- [ ] **T-L2.12** — `PrRef.number` fix (L1 code-review finding L2) + `trusted_authors` wiring checkpoint — **note: `trusted_authors` enforcement itself is already implemented + tested (`loop._pull_next_ready`, `test_trusted_authors_*` in test_loop.py) as part of T-L2.5/T-L2.6; T-L2.12's remaining scope is (a) the `PrRef.number==0` sentinel fix in `deliverer.py` and (b) the BACKLOG.md bookkeeping**
+- [x] **T-L2.9** — `atlas loop` CLI surface: `run`/`start`/`stop`/`status`/`attach` (tmux wrapper for the detached three)
+- [x] **T-L2.10** — Integration tests: full-tick + zero-touch smoke (faked `gh`/`Pipeline`)
+- [x] **T-L2.11** — Lint/type/coverage gate
+- [x] **T-L2.12** — `PrRef.number` fix (L1 code-review finding L2) + `trusted_authors` wiring checkpoint
 - [ ] **T-L2.13** — Manual smoke tests (off-CI): zero-touch delivery, planned lane, crash recovery — real GitHub repo. Cannot be run autonomously; needs a human operator session per T-L2.13's own scope (off-CI, real systems)
-- [ ] **T-L2.14** — Update `STATUS.md`
+- [x] **T-L2.14** — Update `STATUS.md`
 
 ## Exit criteria (TRD-v3 §13 items 5–8 — copied for tracking)
 
@@ -131,11 +275,10 @@ requiring maintainer sign-off" callout in the plan for the five most consequenti
 
 ## Implementation notes (post-hoc — fill in after work is done)
 
-**Session checkpoint 2026-07-25** — T-L2.1 through T-L2.8 code-complete and
-tested (381 passed, 1 xfailed, up from L0/L1's 301/1 baseline). T-L2.9 not
-yet started (see "Resume point" under Current, above, for the exact next
-step and a load-bearing circular-import note). T-L2.10 through T-L2.14 not
-started.
+**Session checkpoint 2026-07-25** — T-L2.1 through T-L2.12 and T-L2.14
+code-complete and tested (400 passed, 1 xfailed, up from L0/L1's 301/1
+baseline). Only T-L2.13 remains, and it's blocked — see the Resume point
+above and the Known gaps section below.
 
 ### What landed, by task
 
@@ -187,6 +330,24 @@ started.
   `cli.py::resume` updated to call the shared version; `loop.py`'s
   `run_one_shot()` calls it with `backend_override=` set from the issue's
   `engine:*` label (`_engine_for_issue()`).
+- **T-L2.9**: `loop_app` Typer sub-app added to `cli.py` (`app.add_typer`)
+  with five commands. `loop_run()` lazy-imports `run_forever` and calls it
+  with `repos=list(cfg.loop.repos)` — no tmux dependency, matching the
+  acceptance criterion literally. `loop_start`/`loop_stop`/`loop_attach` are
+  thin `tmux` wrappers via a shared `_tmux()` helper (`start`/`stop`) and a
+  direct `os.execvp` call (`attach`, so the shell process is replaced rather
+  than left as a wrapper around tmux — matches the plan's parenthetical
+  "os.execvp — replaces the process"). A missing `tmux` binary is caught
+  cleanly for all three (`FileNotFoundError` from `subprocess.run` for
+  start/stop, `shutil.which() is None` for attach since `execvp` itself
+  would raise a less friendly `OSError`) and produces `typer.Exit(1)` with a
+  clear message; `loop run` has no tmux dependency at all so it's
+  unaffected by a missing binary, as required. `loop_status()` lazy-imports
+  `LoopState`/`breaker_open`, checks for the state file's existence before
+  calling `LoopState.load_or_init` (which would otherwise silently
+  fabricate a fresh-zero state and print misleading output), and reports
+  runs/dollars used vs. configured budget, last tick time, and breaker
+  state (open+until-when, or closed).
 
 ### Implementation decisions made beyond the plan's literal pseudocode
 
@@ -239,6 +400,51 @@ made. Flagging them here per the TRS's own "don't silently drift" norm:
    plan's implied "loop.py calls some current-user helper" — moved into
    `queue_gh.py` entirely once the grep test caught the original inline
    version.
+5. **T-L2.9**: `loop_app` Typer sub-app in `cli.py`, five commands, all
+   details in the T-L2.9 note above (now folded into this list for a single
+   place to scan). No further deviations beyond what's already logged there.
+6. **T-L2.10**: found and worked around a real, pre-existing gap in
+   `plugin_resolver.resolve()` — see the "Second load-bearing note" under
+   Resume point above. This is NOT a T-L2.10 scope item to fix (it predates
+   this phase and isn't in any T-L2.x acceptance criteria), but it blocks
+   T-L2.13's manual smoke test until a maintainer picks one of the two
+   fixes named there. Also discovered that `atlas.orchestrator`,
+   `atlas.deliverer`, `atlas.loop`, and `atlas.worktree` all import the
+   literal same `subprocess` module object (not independent copies) —
+   `unittest.mock.patch("atlas.X.subprocess.run", ...)` on any one of them
+   patches all four simultaneously. This isn't a bug, just a fact about
+   Python's module cache that the test file's `_FakeSubprocess` docstring
+   now documents; worth knowing before writing more subprocess-mocking
+   tests against this codebase, since patching two of these dotted paths
+   "for clarity" silently clobbers rather than layers.
+7. **T-L2.11**: fixed 14 real (previously unsuppressed) `mypy --strict`
+   errors in `config.py::_parse_loop_config()` by extracting
+   `_int_field()`/`_float_field()` helpers — see the Resume point note
+   above for the root cause (mis-targeted `type: ignore` comments) and full
+   detail. Also reformatted `test_triage.py` (pre-existing drift, unrelated
+   to this session's code). No other files needed changes to pass the gate.
+8. **T-L2.12**: picked the "raise in `deliverer.py`" branch over the
+   "`int | None` + handle in `loop.py`" branch the L1 review offered as
+   alternatives — see the Resume point note above for why (`PrRef.number`
+   has zero real consumers in `loop.py` today, so `Optional` would just
+   defer the same failure mode to a future caller instead of closing it).
+   The BACKLOG.md bookkeeping edited the L1 review doc in place (added a
+   Status column to its actions table) rather than duplicating the closed
+   item into BACKLOG.md itself, since the review doc is already the
+   authoritative record of when/why each action was raised.
+9. **T-L2.14**: dropped `STATUS.md`'s "Module coverage" table entirely
+   (per-file explicit request) rather than updating it with L2's new
+   modules — it had become pure duplication once each phase's own bullet
+   list already names every file it touches with a one-line description;
+   the table added a second place to keep in sync for no additional
+   information. Folded the per-module coverage numbers (`loop.py` 91%, etc.)
+   into L2's shipped-bullets prose instead, where they sit next to the
+   context that explains them (T-L2.11's target vs. actual). Also updated
+   the front-matter `blocked_on` field to name the `plugin_resolver` gap
+   explicitly — previously `blocked_on: null` even during L1, which
+   undersold the two still-open manual checks; L2's `blocked_on` now names
+   the actual mechanical blocker (not just "needs a human," which was true
+   of L0/L1 too but didn't block anything requiring a code fix first).
 
 ### Known gaps / follow-ups for whoever picks this up next
 
@@ -247,16 +453,26 @@ made. Flagging them here per the TRS's own "don't silently drift" norm:
   or the §13 #7 budget exit criterion are *fully* proven, as opposed to
   "the breaker/runs-cap mechanism is proven, dollar-cap is not yet
   exercised end-to-end."
-- **T-L2.9 (CLI surface) not started** — see "Resume point" above for the
-  exact next step and the circular-import constraint that must be respected
-  (`cli.py` must lazy-import `atlas.loop`, never at module level).
-- **T-L2.10 (integration tests)**, **T-L2.11 (lint/type/coverage gate — unit
-  tests have been running mypy --strict + ruff clean per-file as they were
-  written, but the full-repo coverage-target check per module has not been
-  run)**, **T-L2.12's `PrRef.number` fix** (the `trusted_authors` half of
-  T-L2.12 is done — see the tasks-list note above), **T-L2.13 (manual
-  smoke, needs a human)**, and **T-L2.14 (STATUS.md)** are all not started.
-- Full test count at this checkpoint: **381 passed, 1 xfailed** (new files:
-  `test_queue_gh.py` 25, `test_triage.py` 9, `test_loop.py` 41, plus 6 new
-  `[loop]`-config tests added to `test_config.py` — 81 new tests total over
-  the L0/L1 baseline of 301/1).
+- **`plugin_resolver.resolve()` doesn't special-case `RAW:`-prefixed tool
+  strings despite its own docstring's claim** — see the "Second load-bearing
+  note" under Resume point above. Blocks T-L2.13 until fixed one of two
+  ways (special-case `RAW:` in `resolve()`, or ship a `.atlas.toml`
+  `[plugin_commands]` block for `loop_dev.yaml`'s three stages as part of
+  the loop's setup docs/install). Needs a maintainer decision — flagged,
+  not fixed, since it's outside every T-L2.x task's stated scope.
+- **`loop.py:421-427`'s `current_gh_user()`-raises-`GhCliError` branch inside
+  `tick()` is untested** — see the T-L2.11 coverage note above. Small,
+  well-scoped gap for whoever next touches `test_loop.py`.
+- **Repo-wide coverage is 95.10%, not the 96% L1's STATUS.md cited** — see
+  the T-L2.11 coverage note above for why this is expected dilution (every
+  individual module, including all new L2 modules, meets its own target)
+  rather than a quality regression, and well above the actual CI floor
+  (`fail_under = 80`).
+- **T-L2.13 (manual smoke, needs a human, and has a known blocker — see
+  above)** is the only remaining task in this TRS.
+- Full test count at this checkpoint: **400 passed, 1 xfailed** (new files:
+  `test_queue_gh.py` 25, `test_triage.py` 9, `test_loop.py` 42,
+  `test_cli_loop.py` 12, `test_loop_e2e.py` 5, plus 6 new `[loop]`-config
+  tests added to `test_config.py` and 1 new test added to
+  `test_deliverer.py` — 100 new tests total over the L0/L1 baseline of
+  301/1).

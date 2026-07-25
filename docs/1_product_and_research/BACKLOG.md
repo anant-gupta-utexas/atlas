@@ -89,6 +89,18 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
       by the v2 workflow-namespacing convention (`<workflow>.<gate_label>` in
       `metric_name`, `task_id` prefixing) — revisit only if that convention
       proves insufficient. *(from system_design.md, TRD.md Resolved Decisions)*
+- [ ] **`GhPrDeliverer`'s branch-safety check is exact-match only.**
+      `if branch == "main"` in `deliverer.py` doesn't cover `master`,
+      `refs/heads/main`, or a repo whose default branch is something else
+      entirely. The hardcoded-argv defense (no `--force`, explicit `-u origin
+      <branch>`) is the real protection and is solid — this is defense-in-depth
+      only. Fix: either query the repo's actual default branch via
+      `GhPrDeliverer`'s existing `repo_root`, or minimally extend to a small
+      frozenset (`{"main", "master"}`) plus a `refs/heads/` strip. The
+      existing security test (`test_deliver_never_pushes_main_or_force`)
+      is the right shape to extend. *(L1 code review action #5, carried
+      forward at T-L2.12 — see
+      [`loop-mode-code-review.md`](../../dev/active/loop-mode-phase-L1/loop-mode-code-review.md))*
 
 ## `job` workflow — adapter re-targeting
 

@@ -1,18 +1,77 @@
 ---
 project: atlas
-status: v2.2 shipped; loop mode Phase L1 (CodexBackend + loop_dev.yaml) — code complete, manual off-CI verification pending
-last_updated: 2026-07-24
-next_gate: T-L0.8/T-L0.9 (Phase L0 manual checks) + T-L1.8 (Phase L1 manual smoke, both engines)
-blocked_on: null
+status: v2.2 shipped; loop mode Phase L2 (loop daemon) — code complete, manual off-CI verification pending (and currently blocked, see next_gate)
+last_updated: 2026-07-25
+next_gate: T-L2.13 (Phase L2 manual smoke) — blocked on a plugin_resolver.resolve() fix; also still open — T-L0.8/T-L0.9 (Phase L0) + T-L1.1/T-L1.8 (Phase L1)
+blocked_on: "plugin_resolver.resolve() doesn't special-case RAW:-prefixed tool strings (see Current, Phase L2 note) — atlas loop run/start raises RoutingDriftError on loop_dev.yaml without a .atlas.toml [plugin_commands] workaround; needs a maintainer decision before T-L2.13 can run for real"
 ---
 
 # atlas — status
 
 ## Current
 
-**v2.2 is complete.** `pyproject.toml` now reads `2.2.0` (was drifted at
-`1.0.0`); `git tag v2.2` remains a manual maintainer action (tracked in
-BACKLOG.md).
+**v2.2 is complete.** `pyproject.toml` reads `2.2.0`; `git tag v2.2` remains
+a manual maintainer action (tracked in BACKLOG.md).
+
+**Loop Mode Phase L2 (the loop daemon) is code-complete: 400 tests pass, 1
+xfail, 95.10% repo-wide coverage** (every individual module meets its own
+T-L2.11 target — `loop.py` 91%, `queue_gh.py` 92%, `triage.py` 95%,
+`config.py` 100% — the repo-wide figure sits below L1's 96% only because L2
+added ~500 new statements below the pre-L2 average; well above the CI floor
+of 80%). Completes `v3.1` (the loop daemon itself). Shipped this phase:
+
+- `src/atlas/queue_gh.py` — the sole `gh` CLI adapter (`list_ready`/`claim`/
+  `deliver_pr`/`comment`/`sync`/`relabel`/`current_user`/`find_run_id_comment`),
+  list-form argv only, timeout-wrapped, grep-enforced as the only caller of
+  `gh` in the loop path (`loop.py` never shells `gh` directly).
+- `src/atlas/triage.py` — label-wins-else-classify two-lane router
+  (`wf:quick`/`wf:planned`); both-labels-present resolves to `planned`;
+  an unparseable classifier response also defaults to `planned`.
+- `src/atlas/loop.py` (630 lines) — `tick()` (the core state machine: sync →
+  breaker → budget → pull → trust-check → triage → claim → dispatch →
+  comment → persist), `run_one_shot()`/`run_planned_first_pass()` (quick and
+  planned-lane dispatch), budgets + circuit breaker (`LoopState`, a new flat
+  `.atlas/loop-state.json` file), `sync_prior_prs()` (idempotent PR-outcome
+  scoring via `PlumbIO.reopen_run()`), `run_forever()` + `reconcile_orphans()`
+  (crash recovery — an orphaned `atlas:working` issue is relabeled back to
+  `atlas:ready` and its worktree pruned on the next startup).
+- `cli.py::_make_pipeline` promoted to a shared, un-prefixed `make_pipeline()`
+  (adds `backend_override`) so `cli.py::run`/`resume` and `loop.py`'s
+  quick-lane dispatch share one construction path instead of two that could
+  drift.
+- `atlas loop run|start|stop|status|attach` — `run` calls `run_forever()` in
+  the foreground (no tmux dependency); `start`/`stop`/`attach` are thin tmux
+  wrappers (`tmux new -d -s atlas-loop 'atlas loop run'` /
+  `kill-session` / `attach`, the last via `os.execvp`); `status` reads
+  `.atlas/loop-state.json` and reports budgets used, last tick, breaker state.
+- `[loop]` config: `LoopConfig` + `Config.loop` + TOML `[loop]` parsing,
+  exactly TRD-v3 §7's schema; `concurrency != 1` raises (frozen at 1 until
+  Phase L4).
+- **L1 code review finding closed**: `deliverer.py::_parse_pr_url` now
+  raises `DeliveryError` on a malformed `gh pr create` URL instead of a
+  `PrRef(number=0, ...)` sentinel — L2 is `PrRef`'s first real consumer, so
+  this is where the L1 review's flagged gap actually mattered.
+- **Real, live gap found and documented (not yet fixed)**:
+  `plugin_resolver.resolve()` does not special-case `RAW:`-prefixed tool
+  strings despite its own docstring's claim that it does — a literal dict
+  lookup, so `loop_dev.yaml`'s three stages (`RAW:` × 2, `/verify`) raise
+  `RoutingDriftError` under a real `atlas loop run` unless `.atlas.toml` has
+  a `[plugin_commands]` override for each. This is the current
+  `blocked_on` — see the top of this file. Full detail in
+  [`loop-mode-phase-L2-tasks.md`](dev/active/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md).
+- **Known limitation carried forward, not a regression**: cost extraction
+  (`extract_cost`) is unimplemented, so `run_one_shot()`'s `cost` is always
+  `0.0` — `max_dollars_per_day` is mechanically wired and tested (the
+  breaker/cooldown/runs-cap logic is correct) but never actually accumulates
+  from real runs yet; only `max_runs_per_day` has teeth today.
+
+**Not yet done (off-CI, manual, real external systems):** T-L2.13 (zero-touch
+delivery, planned-lane, and crash-recovery smoke tests against the real
+GitHub repo) — blocked on the `plugin_resolver` gap above. Everything else
+in the Phase L2 TRS
+([`dev/active/loop-mode-phase-L2/`](dev/active/loop-mode-phase-L2/)) is done.
+
+---
 
 **Loop Mode Phase L1 (`CodexBackend` + `loop_dev.yaml`) is code-complete: 301
 tests pass, 1 xfail, at 96% coverage.** Completes `v3.0` (measured baseline +
@@ -104,38 +163,20 @@ backend selection (`claude` / `agy`, 4-tier resolution). Full phase-by-phase
 build history lives in git log and in
 [`dev/archive/yaml-workflow-engine-phase-{1,2,3}/`](dev/archive/).
 
-## Module coverage
-
-| Module | File | Status |
-| --- | --- | --- |
-| CLI entry point | `src/atlas/cli.py` | ✅ |
-| Stage table + StageSpec | `src/atlas/stages.py` | ✅ |
-| State machine | `src/atlas/orchestrator.py` | ✅ |
-| State store | `src/atlas/state.py` | ✅ |
-| plumb wrapper | `src/atlas/plumb_io.py` | ✅ (+ per-span `tokens`, L0) |
-| Worktree manager | `src/atlas/worktree.py` | ✅ |
-| Plugin resolver | `src/atlas/plugin_resolver.py` | ✅ |
-| TOML config | `src/atlas/config.py` | ✅ |
-| Post-commit hook | `src/atlas/post_commit_hook.py` | ✅ |
-| CLI backend dispatch | `src/atlas/cli_backend.py` | ✅ (+ loop-mode telemetry L0, `CodexBackend` L1) |
-| YAML workflow loader | `src/atlas/workflow_loader.py` | ✅ |
-| Composite/library/shell runners | `composite_runner.py`, `library_runner.py`, `shell_runner.py` | ✅ |
-| Delivery primitive (new, L0) | `src/atlas/deliverer.py` | ✅ |
-| `loop_dev` workflow (new, L1) | `src/atlas/workflows/loop_dev.yaml` | ✅ |
-
 ## Next
 
 See [`docs/1_product_and_research/BACKLOG.md`](docs/1_product_and_research/BACKLOG.md)
-for the full pending list. Immediate: the manual off-CI checks carried by
-both loop-mode phases — T-L0.8/T-L0.9 (Phase L0) and T-L1.1/T-L1.8 (Phase
-L1, a write-heavy Codex capture and the both-engines `loop_dev` smoke test)
-— then **Phase L2** (`loop.py`, `queue_gh.py`, `atlas loop` CLI, `[loop]`
-config, budgets/breaker). Also open: tag `v2.2`, install plumb as a
-versioned (not path) dependency, add the `CONTENT_PIPELINE_TOKEN` CI secret,
-run the T3.8 `agy` manual smoke test, re-target the `score_jobs` adapter
-(`job`-workflow scope), correct TRD-v3 §3.3's `CodexBackend` contract table
-upstream (this TRS's Resolved Decision #7 — it describes a `result` event
-0.144.4 does not emit).
+for the full pending list. Immediate: resolve the `plugin_resolver.resolve()`
+gap blocking T-L2.13 (see Current, above), then run T-L2.13's manual smoke
+tests — then **Phase L3** (self-healing + routing: pre-PR plumb judge gate,
+diagnosis-injected single-retry, failed runs → plumb examples, score-informed
+routing). The manual off-CI checks carried by L0/L1 (T-L0.8/T-L0.9,
+T-L1.1/T-L1.8) remain open alongside L2's. Also open: tag `v2.2`, install
+plumb as a versioned (not path) dependency, add the `CONTENT_PIPELINE_TOKEN`
+CI secret, run the T3.8 `agy` manual smoke test, re-target the `score_jobs`
+adapter (`job`-workflow scope), wire `extract_cost` so `max_dollars_per_day`
+actually accumulates, extend `GhPrDeliverer`'s branch-safety check beyond
+exact `"main"`.
 
 ## Pointers
 

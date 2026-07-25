@@ -159,6 +159,35 @@ def test_deliver_pr_create_failure_raises_and_never_calls_cleanup(tmp_path: Path
     worktree.cleanup.assert_not_called()
 
 
+def test_deliver_malformed_pr_url_raises_instead_of_number_zero_sentinel(tmp_path: Path) -> None:
+    """L1 code review finding L2 (T-L2.12): a gh pr create exit-0 with stdout
+    that doesn't match the expected PR URL shape must raise DeliveryError,
+    not silently return PrRef(number=0, ...) — a caller reading .number back
+    (comment/label/close by PR number) would otherwise fail much later, via
+    a confusing `gh api /pulls/0` 404, further from the actual cause."""
+    deliverer, worktree = _deliverer(tmp_path)
+
+    def side_effect(args: list[str], **kwargs: object) -> MagicMock:
+        if args[:2] == ["git", "push"]:
+            return _completed()
+        if args[:3] == ["gh", "pr", "create"]:
+            return _completed(stdout="not a pr url\n")
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    with patch("atlas.deliverer.subprocess.run", side_effect=side_effect):
+        with pytest.raises(DeliveryError, match="could not parse a PR number"):
+            deliverer.deliver(
+                run_id=_RUN_ID,
+                branch=_BRANCH,
+                worktree_path=tmp_path / "wt",
+                title="t",
+                body="b",
+            )
+    # The PR was already created by this point (gh pr create returned exit 0);
+    # cleanup is skipped since deliver() can't confirm which PR it belongs to.
+    worktree.cleanup.assert_not_called()
+
+
 def test_deliver_gh_binary_missing_raises_clear_deliveryerror(tmp_path: Path) -> None:
     deliverer, worktree = _deliverer(tmp_path)
 

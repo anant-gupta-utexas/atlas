@@ -301,6 +301,97 @@ def hook(
 
 
 # ---------------------------------------------------------------------------
+# atlas loop — the autonomous loop driver (Phase L2)
+# ---------------------------------------------------------------------------
+
+loop_app = typer.Typer(name="loop", help="Run the autonomous loop driver.")
+app.add_typer(loop_app, name="loop")
+
+_TMUX_SESSION = "atlas-loop"
+
+
+def _tmux(*args: str) -> None:
+    """Run a tmux subprocess command, exiting cleanly if tmux isn't installed."""
+    import subprocess
+
+    try:
+        subprocess.run(["tmux", *args], check=True)
+    except FileNotFoundError:
+        typer.echo(
+            "Error: tmux is not installed. Install it to use loop start/stop/attach.", err=True
+        )
+        raise typer.Exit(1)
+    except subprocess.CalledProcessError as exc:
+        raise typer.Exit(exc.returncode)
+
+
+@loop_app.command("run")
+def loop_run() -> None:
+    """Run the loop daemon in this terminal (foreground, for debugging)."""
+    from atlas.loop import run_forever
+
+    repo_root = _find_repo_root()
+    cfg = Config.load(repo_root)
+    try:
+        run_forever(cfg, repos=list(cfg.loop.repos), repo_root=repo_root)
+    except KeyboardInterrupt:
+        typer.echo("\nLoop stopped.", err=True)
+        raise typer.Exit(0)
+
+
+@loop_app.command("start")
+def loop_start() -> None:
+    """Start the loop daemon detached, in a tmux session."""
+    _tmux("new", "-d", "-s", _TMUX_SESSION, "atlas loop run")
+    typer.echo(f"Loop started in tmux session '{_TMUX_SESSION}'. Attach with: atlas loop attach")
+
+
+@loop_app.command("stop")
+def loop_stop() -> None:
+    """Stop the detached loop daemon's tmux session."""
+    _tmux("kill-session", "-t", _TMUX_SESSION)
+    typer.echo("Loop stopped.")
+
+
+@loop_app.command("status")
+def loop_status() -> None:
+    """Print a human-readable summary of the loop's persisted state."""
+    from atlas.loop import LoopState, breaker_open
+
+    repo_root = _find_repo_root()
+    cfg = Config.load(repo_root)
+    state_path = repo_root / ".atlas" / "loop-state.json"
+    if not state_path.exists():
+        typer.echo("Loop has not run yet.")
+        return
+
+    state = LoopState.load_or_init(repo_root)
+    typer.echo(f"Day: {state.day}")
+    typer.echo(f"Runs today: {state.runs_today} / {cfg.loop.max_runs_per_day}")
+    typer.echo(f"Dollars today: ${state.dollars_today:.2f} / ${cfg.loop.max_dollars_per_day:.2f}")
+    typer.echo(f"Last tick: {state.last_tick_at or 'never'}")
+    if breaker_open(state, cfg.loop):
+        typer.echo(f"Breaker: OPEN until {state.breaker_open_until}")
+    else:
+        typer.echo("Breaker: closed")
+
+
+@loop_app.command("attach")
+def loop_attach() -> None:
+    """Attach to the detached loop daemon's tmux session (replaces this process)."""
+    import os
+    import shutil
+
+    tmux_path = shutil.which("tmux")
+    if tmux_path is None:
+        typer.echo(
+            "Error: tmux is not installed. Install it to use loop start/stop/attach.", err=True
+        )
+        raise typer.Exit(1)
+    os.execvp(tmux_path, ["tmux", "attach", "-t", _TMUX_SESSION])
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
