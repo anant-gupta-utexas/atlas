@@ -338,8 +338,9 @@ def test_run_to_completion_happy_path(tmp_path):
     ctx = pipeline.start(task="task", slug="slug")
 
     # run_to_completion will stop at awaiting_hook (stage 5)
-    returned_ctx = pipeline.run_to_completion(ctx)
-    assert returned_ctx.run_id == ctx.run_id
+    result = pipeline.run_to_completion(ctx)
+    assert result.ctx.run_id == ctx.run_id
+    assert result.status == "paused"
 
     # 5 spans for stages 0-4 (stage 5 is awaiting_hook)
     # Actually: stages 0-4 run (5 spans), stage 5 returns awaiting_hook

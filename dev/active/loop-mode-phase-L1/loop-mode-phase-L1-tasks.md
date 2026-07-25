@@ -8,9 +8,9 @@ Reference notes live in
 ## Current
 
 ```
-phase: not started
-gate:  none (T-L1.1 is a research sub-step, not a blocking gate)
-next:  T-L1.1 Codex CLI schema reconnaissance
+phase: engineering complete (T-L1.2-L1.7, L1.9, L1.10 done); manual off-CI checks open
+gate:  none
+next:  T-L1.1 (write-heavy Codex capture) + T-L1.8 (manual smoke, both engines) — off-CI, not run by this session
 ```
 
 ## Status — no blocking dependency
@@ -21,16 +21,16 @@ lists L1's dependency as simply "L0."
 
 ## Tasks (flat — Phase L1 only, no sub-phases)
 
-- [ ] **T-L1.1** — Capture a **write-heavy** Codex run + pin `codex --version`: read-only schema is already verified (0.144.4, 2026-07-24); what's missing is edit/command event types under `--sandbox workspace-write`, a deliberately-failed run (does a failure event type exist?), `--add-dir` writability (Pending Decision #3), a reasoning-model run where `reasoning_output_tokens > 0`, and — **the one that can silently corrupt a metric** — a **cold-cache/warm-cache capture pair** to settle whether `cached_input_tokens` adds to or is a subset of `input_tokens` (Pending Decision #4)
-- [ ] **T-L1.2** — `CodexBackend.build_argv` + `preflight`: register in `_KNOWN_BACKENDS`/`make_backend()`; `-C` = last `add_dirs` element, rest via `--add-dir`, plus `--model`/`--sandbox workspace-write`; no bypass flags ever; preflight fails closed on missing `OPENAI_API_KEY`/`$CODEX_HOME/auth.json` with **no subprocess spawned**
-- [ ] **T-L1.3** — `CodexBackend.parse_result` + `parse_usage` + `CodexUsageStats`: exit-code-driven status, `turn.completed` presence check, text joined from `item.completed`/`agent_message`, five-field usage with `total_cost_usd` always `None`; fixtures under `tests/fixtures/codex_jsonl/`
-- [ ] **T-L1.4** — `loop_dev.yaml`: ungated `plan → code_gen(isolate) → verify`, `span_kind: llm` for `code_gen` (Pending Decision #2 — flag before marking done if this should be `subagent` instead), `default_backend: claude`
-- [ ] **T-L1.5** — Codex section (Part E) in `headless-clis-reference.md`: matches existing Part B/C depth; every unconfirmed schema claim explicitly flagged as unverified in the doc text itself
-- [ ] **T-L1.6** — `Pipeline.run_to_completion()` status surfacing: new `RunResult(ctx, status)` dataclass; widen the 3 existing return statements; update `cli.py::run`/`resume`; grep-confirm no other call site exists
-- [ ] **T-L1.7** — Integration tests: mocked end-to-end Codex dispatch (`StageOutcome` → plumb span with `tokens`) + negative failure-status test + `RunResult` regression coverage
-- [ ] **T-L1.8** — Manual smoke test (off-CI): `atlas run "<task>" --workflow loop_dev --backend claude` (must complete) and `--backend codex` (attempt; explicitly record skip-with-reason if auth unavailable)
-- [ ] **T-L1.9** — Lint/type/coverage gate: `ruff check`, `ruff format --check`, `mypy --strict src`, coverage (repo-wide no regression below L0's 96%; `CodexBackend` ≥ 85%; `run_to_completion` changed lines ≥ 85%)
-- [ ] **T-L1.10** — Update `STATUS.md` with L1 completion
+- [ ] **T-L1.1** — Capture a **write-heavy** Codex run + pin `codex --version`: read-only schema is already verified (0.144.4, 2026-07-24); what's missing is edit/command event types under `--sandbox workspace-write`, a deliberately-failed run (does a failure event type exist?), `--add-dir` writability (Pending Decision #3), a reasoning-model run where `reasoning_output_tokens > 0`, and — **the one that can silently corrupt a metric** — a **cold-cache/warm-cache capture pair** to settle whether `cached_input_tokens` adds to or is a subset of `input_tokens` (Pending Decision #4). **NOT RUN this session** — requires a live `codex` CLI session; needs a human/off-CI environment. Everything downstream was built defensively against this gap instead (see Part E's "UNVERIFIED" flags).
+- [x] **T-L1.2** — `CodexBackend.build_argv` + `preflight`: register in `_KNOWN_BACKENDS`/`make_backend()`; `-C` = last `add_dirs` element, rest via `--add-dir`, plus `--model`/`--sandbox workspace-write`; no bypass flags ever; preflight fails closed on missing `OPENAI_API_KEY`/`$CODEX_HOME/auth.json` with **no subprocess spawned**
+- [x] **T-L1.3** — `CodexBackend.parse_result` + `parse_usage` + `CodexUsageStats`: exit-code-driven status, `turn.completed` presence check, text joined from `item.completed`/`agent_message`, five-field usage with `total_cost_usd` always `None`; fixtures under `tests/fixtures/codex_jsonl/`
+- [x] **T-L1.4** — `loop_dev.yaml`: ungated `plan → code_gen(isolate) → verify`, `span_kind: llm` for `code_gen` (Pending Decision #2 — resolved `llm`, per maintainer 2026-07-24), `default_backend: claude`
+- [x] **T-L1.5** — Codex section (Part E) in `headless-clis-reference.md`: matches existing Part B/C depth; every unconfirmed schema claim explicitly flagged as unverified in the doc text itself; added Part F (3-way comparison table)
+- [x] **T-L1.6** — `Pipeline.run_to_completion()` status surfacing: new `RunResult(ctx, status)` dataclass; widened the 3 existing return statements; `cli.py::run`/`resume` unaffected (bare-statement calls, grep-confirmed no other call site exists)
+- [x] **T-L1.7** — Integration tests: mocked end-to-end Codex dispatch (`StageOutcome` → plumb span with `tokens`) + negative failure-status test + `RunResult` regression coverage
+- [ ] **T-L1.8** — Manual smoke test (off-CI): `atlas run "<task>" --workflow loop_dev --backend claude` (must complete) and `--backend codex` (attempt; explicitly record skip-with-reason if auth unavailable). **NOT RUN this session** — real external dispatch, off-CI by design.
+- [x] **T-L1.9** — Lint/type/coverage gate: `ruff check`, `ruff format --check`, `mypy --strict src` all clean; coverage 96.16% repo-wide (no regression below L0's 96%); `CodexBackend` 100%; `run_to_completion`'s changed lines covered
+- [x] **T-L1.10** — Update `STATUS.md` with L1 completion
 
 ## Exit criteria (TRD-v3 §13 item 3 — copied for tracking)
 
@@ -65,4 +65,34 @@ lists L1's dependency as simply "L0."
 
 ## Implementation notes (post-hoc — fill in after work is done)
 
-_(Not yet started.)_
+- **T-L1.2/T-L1.3 landed together** — `CodexBackend`'s argv/preflight and
+  parse_result/parse_usage were implemented as one cohesive class addition to
+  `cli_backend.py`, since splitting them into separate commits would have
+  left an uncompilable intermediate state. Both tasks' acceptance criteria
+  are independently verified in `tests/unit/test_cli_backend.py` (75 tests
+  covering `CodexBackend`, 100% line coverage on `cli_backend.py`).
+- **Found and fixed a pre-existing bug in `Pipeline.step()` while writing
+  T-L1.7's `RunResult` regression tests**: the ungated-stage branch
+  unconditionally did `self._stages[stage.index + 1]`, which raises
+  `IndexError` whenever the workflow's *last* stage has no gate.
+  `dev.yaml`/`job.yaml` always gate their final stage, so this path was
+  never exercised in CI until `loop_dev.yaml` — whose last stage (`verify`)
+  is ungated by design (Resolved Decision #5) — hit it immediately. Fixed by
+  mirroring the guard the *gated* branch already had (`if stage.index <
+  len(self._stages) - 1`). This is in-scope for T-L1.4/T-L1.7, not scope
+  creep: `loop_dev.yaml` is what surfaced the bug, and no `loop_dev` run
+  (manual or automated) could ever complete without this fix.
+- **T-L1.1 and T-L1.8 were not run this session** — both require a live
+  external `codex`/`claude` CLI session (real subprocess dispatch, real
+  auth), which is off-CI, off-agent-session work by design, matching L0's
+  own T-L0.8/T-L0.9 posture. Everything downstream (T-L1.2/T-L1.3's
+  `CodexBackend`, T-L1.5's doc) was built defensively around the schema gaps
+  T-L1.1 would close — every such gap is explicitly flagged "UNVERIFIED" in
+  `headless-clis-reference.md` Part E rather than silently assumed. A human
+  with `codex`/`claude` CLI access needs to run these before Phase L1 is
+  fully closed; until then `next_gate` in `STATUS.md` names both.
+- **Coverage**: `CodexBackend` reached 100% (target was ≥85%); repo-wide
+  landed at 96.16% (target: no regression below L0's 96%). `mypy --strict
+  src`, `ruff check`, and `ruff format --check` all clean at phase close.
+  Full suite: 301 passed, 1 xfail (the pre-existing L0 `score_jobs` xfail,
+  unrelated to L1).

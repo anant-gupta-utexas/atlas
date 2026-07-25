@@ -1,0 +1,3 @@
+not json at all
+{"incomplete": true
+random garbage output from a crashed process

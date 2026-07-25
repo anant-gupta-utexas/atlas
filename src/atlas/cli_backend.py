@@ -8,6 +8,7 @@ SubprocessStageRunner owns the actual subprocess.run() call.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,9 @@ from typing import Protocol, runtime_checkable
 from atlas.stages import StageSpec
 from atlas.workflow_loader import LoadedWorkflow
 
-_KNOWN_BACKENDS: frozenset[str] = frozenset({"claude", "agy"})
+logger = logging.getLogger(__name__)
+
+_KNOWN_BACKENDS: frozenset[str] = frozenset({"claude", "agy", "codex"})
 
 
 @dataclass(frozen=True)
@@ -223,6 +226,172 @@ class AntigravityBackend:
         return None
 
 
+@dataclass(frozen=True)
+class CodexUsageStats:
+    """Token telemetry parsed from a `codex exec --json` turn.completed event.
+
+    VERIFIED against codex-cli 0.144.4. Note the asymmetry with Claude's
+    UsageStats: Codex reports NO dollar figure at all, so total_cost_usd is
+    always None here (it exists on the dataclass only for call-site symmetry
+    with UsageStats). Codex additionally reports cached_input_tokens and
+    reasoning_output_tokens, which Claude's envelope does not carry in the
+    same shape — captured here because reasoning tokens are billable output
+    on reasoning models and dropping them would understate usage.
+    """
+
+    total_cost_usd: float | None
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_input_tokens: int | None
+    reasoning_output_tokens: int | None
+
+
+class CodexBackend:
+    name = "codex"
+
+    def build_argv(
+        self,
+        *,
+        prompt: str,
+        model: str,
+        add_dirs: list[Path],
+        timeout_s: int,
+        extra_flags: dict[str, str],
+    ) -> list[str]:
+        # SubprocessStageRunner seeds add_dirs as [repo_root] or
+        # [repo_root, worktree_path] (orchestrator.py) — the worktree, when
+        # present, is always last. -C/--cd sets the single working root;
+        # --add-dir keeps every other directory writable alongside it, so
+        # repo_root (e.g. dev/active/<slug>/tasks.md) stays reachable even
+        # when code_gen isolates into a worktree.
+        primary = add_dirs[-1] if add_dirs else Path.cwd()
+        argv: list[str] = [
+            "codex",
+            "exec",
+            prompt,
+            "--json",
+            "-C",
+            str(primary),
+            "--sandbox",
+            "workspace-write",
+        ]
+        if model:
+            argv += ["--model", model]
+        for d in add_dirs:
+            if d != primary:
+                argv += ["--add-dir", str(d)]
+        return argv
+
+    def parse_result(
+        self, stdout: str, stderr: str, returncode: int
+    ) -> tuple[str, str, str | None]:
+        # The JSONL stream carries no status field — status is exit-code-only
+        # (VERIFIED against codex-cli 0.144.4). See Resolved Decision #8.
+        if returncode != 0:
+            return ("failure", stdout or stderr, "codex_nonzero_exit")
+
+        events: list[dict[str, object]] = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+
+        saw_turn_completed = any(e.get("type") == "turn.completed" for e in events)
+        if not saw_turn_completed:
+            return ("failure", stdout, "codex_no_turn_completed")
+
+        messages: list[str] = []
+        for e in events:
+            if e.get("type") != "item.completed":
+                continue
+            item = e.get("item")
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "agent_message":
+                continue
+            text = item.get("text")
+            if text:
+                messages.append(str(text))
+
+        return ("success", "\n".join(messages), None)
+
+    def parse_usage(self, stdout: str) -> CodexUsageStats | None:
+        """Extract token telemetry from the terminal turn.completed event.
+
+        Not a CliBackend Protocol member — same additive pattern as
+        ClaudeCodeBackend.parse_usage (L0 Resolved Decision #1).
+        """
+        turn_completed: dict[str, object] | None = None
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "turn.completed":
+                turn_completed = event
+
+        if turn_completed is None:
+            return None
+
+        usage = turn_completed.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+
+        logger.debug(
+            "codex usage: input_tokens=%r cached_input_tokens=%r "
+            "output_tokens=%r reasoning_output_tokens=%r",
+            usage.get("input_tokens"),
+            usage.get("cached_input_tokens"),
+            usage.get("output_tokens"),
+            usage.get("reasoning_output_tokens"),
+        )
+
+        return CodexUsageStats(
+            total_cost_usd=None,  # Codex reports no cost figure — VERIFIED
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cached_input_tokens=usage.get("cached_input_tokens"),
+            reasoning_output_tokens=usage.get("reasoning_output_tokens"),
+        )
+
+    def preflight(self) -> tuple[str, str | None] | None:
+        if os.environ.get("OPENAI_API_KEY"):
+            return None
+        codex_home = os.environ.get("CODEX_HOME")
+        if codex_home:
+            auth_path = Path(codex_home).expanduser() / "auth.json"
+        else:
+            auth_path = Path.home() / ".codex" / "auth.json"
+        if auth_path.exists():
+            return None
+        return (
+            "Codex (codex exec) requires OPENAI_API_KEY in the environment or a "
+            "`codex login` session. See docs/3_guides/cli_backends.md.",
+            "codex_missing_auth",
+        )
+
+
+def codex_usage_to_tokens(usage: CodexUsageStats) -> tuple[int, int]:
+    """Reduce CodexUsageStats to the (in, out) tuple plumb's record_span expects.
+
+    Per Pending Decision #4: cached_input_tokens is treated as an addend to
+    input_tokens (Anthropic's convention — Claude's input_tokens excludes its
+    own cache fields), not a subset. Getting this backwards double-counts
+    cached tokens on every Codex span. Revisit here only, per T-L1.1 findings.
+    """
+    in_tokens = (usage.input_tokens or 0) + (usage.cached_input_tokens or 0)
+    out_tokens = (usage.output_tokens or 0) + (usage.reasoning_output_tokens or 0)
+    return (in_tokens, out_tokens)
+
+
 def resolve_backend(
     *,
     stage: StageSpec,
@@ -255,4 +424,6 @@ def make_backend(name: str) -> CliBackend:
         return ClaudeCodeBackend()
     if name == "agy":
         return AntigravityBackend()
+    if name == "codex":
+        return CodexBackend()
     raise UnknownBackendError(f"Unknown backend {name!r}. Allowed: {sorted(_KNOWN_BACKENDS)}")

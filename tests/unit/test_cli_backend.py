@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -11,8 +12,11 @@ from atlas.cli_backend import (
     AntigravityBackend,
     ClaudeCodeBackend,
     CliBackend,
+    CodexBackend,
+    CodexUsageStats,
     UnknownBackendError,
     UsageStats,
+    codex_usage_to_tokens,
     make_backend,
     resolve_backend,
 )
@@ -414,6 +418,255 @@ def test_antigravity_backend_preflight_google_key_set(monkeypatch: pytest.Monkey
 
 
 # ---------------------------------------------------------------------------
+# CodexBackend — build_argv
+# ---------------------------------------------------------------------------
+
+_CODEX_FIXTURES = Path(__file__).parents[1] / "fixtures" / "codex_jsonl"
+
+
+def test_codex_backend_build_argv_shape() -> None:
+    argv = CodexBackend().build_argv(
+        prompt="do the task",
+        model="gpt-5-codex",
+        add_dirs=[_DIR_A],
+        timeout_s=60,
+        extra_flags={},
+    )
+    assert argv == [
+        "codex",
+        "exec",
+        "do the task",
+        "--json",
+        "-C",
+        str(_DIR_A),
+        "--sandbox",
+        "workspace-write",
+        "--model",
+        "gpt-5-codex",
+    ]
+
+
+def test_codex_backend_build_argv_uses_worktree_as_primary() -> None:
+    argv = CodexBackend().build_argv(
+        prompt="p",
+        model="m",
+        add_dirs=[_DIR_A, _DIR_B],
+        timeout_s=60,
+        extra_flags={},
+    )
+    assert argv[argv.index("-C") + 1] == str(_DIR_B)
+    assert "--add-dir" in argv
+    assert argv[argv.index("--add-dir") + 1] == str(_DIR_A)
+
+
+def test_codex_backend_build_argv_single_dir_no_add_dir() -> None:
+    argv = CodexBackend().build_argv(
+        prompt="p",
+        model="m",
+        add_dirs=[_DIR_A],
+        timeout_s=60,
+        extra_flags={},
+    )
+    assert argv[argv.index("-C") + 1] == str(_DIR_A)
+    assert "--add-dir" not in argv
+
+
+def test_codex_backend_build_argv_never_bypasses_sandbox() -> None:
+    argv = CodexBackend().build_argv(
+        prompt="p",
+        model="m",
+        add_dirs=[_DIR_A, _DIR_B],
+        timeout_s=60,
+        extra_flags={},
+    )
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "--dangerously-bypass-hook-trust" not in argv
+
+
+# ---------------------------------------------------------------------------
+# CodexBackend — parse_result
+# ---------------------------------------------------------------------------
+
+
+def test_codex_backend_parse_result_success() -> None:
+    stdout = (_CODEX_FIXTURES / "success.jsonl").read_text(encoding="utf-8")
+    status, output_text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert (status, output_text, error_type) == ("success", "hi", None)
+
+
+def test_codex_backend_parse_result_joins_multiple_agent_messages() -> None:
+    stdout = (_CODEX_FIXTURES / "multi_message.jsonl").read_text(encoding="utf-8")
+    status, output_text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert status == "success"
+    assert "first message" in output_text
+    assert "second message" in output_text
+    assert error_type is None
+
+
+def test_codex_backend_parse_result_nonzero_exit() -> None:
+    stdout = (_CODEX_FIXTURES / "success.jsonl").read_text(encoding="utf-8")
+    status, _, error_type = CodexBackend().parse_result(stdout, "", 1)
+    assert status == "failure"
+    assert error_type == "codex_nonzero_exit"
+
+
+def test_codex_backend_parse_result_no_turn_completed() -> None:
+    stdout = (_CODEX_FIXTURES / "truncated.jsonl").read_text(encoding="utf-8")
+    status, output_text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert status == "failure"
+    assert error_type == "codex_no_turn_completed"
+    assert output_text == stdout
+
+
+def test_codex_backend_parse_result_malformed_stream() -> None:
+    stdout = (_CODEX_FIXTURES / "malformed.txt").read_text(encoding="utf-8")
+    status, _, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert status == "failure"
+    assert error_type == "codex_no_turn_completed"
+
+
+def test_codex_backend_parse_result_skips_bad_lines() -> None:
+    stdout = "\n".join(
+        [
+            "not json",
+            '{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}',
+            '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+        ]
+    )
+    status, output_text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert status == "success"
+    assert output_text == "ok"
+    assert error_type is None
+
+
+def test_codex_backend_parse_result_tool_only_run_is_success() -> None:
+    stdout = '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+    status, output_text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert (status, output_text, error_type) == ("success", "", None)
+
+
+def test_codex_backend_parse_result_skips_blank_lines_and_non_dict_item() -> None:
+    stdout = "\n".join(
+        [
+            "",
+            "   ",
+            '{"type":"item.completed","item":"not-a-dict"}',
+            '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+        ]
+    )
+    status, output_text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert (status, output_text, error_type) == ("success", "", None)
+
+
+# ---------------------------------------------------------------------------
+# CodexBackend — parse_usage
+# ---------------------------------------------------------------------------
+
+
+def test_codex_backend_parse_usage_success() -> None:
+    stdout = (_CODEX_FIXTURES / "success.jsonl").read_text(encoding="utf-8")
+    usage = CodexBackend().parse_usage(stdout)
+    assert usage == CodexUsageStats(
+        total_cost_usd=None,
+        input_tokens=16668,
+        output_tokens=5,
+        cached_input_tokens=13056,
+        reasoning_output_tokens=0,
+    )
+
+
+def test_codex_backend_parse_usage_cost_is_always_none() -> None:
+    stdout = (_CODEX_FIXTURES / "success.jsonl").read_text(encoding="utf-8")
+    usage = CodexBackend().parse_usage(stdout)
+    assert usage is not None
+    assert usage.total_cost_usd is None
+
+
+def test_codex_backend_parse_usage_no_turn_completed() -> None:
+    stdout = (_CODEX_FIXTURES / "malformed.txt").read_text(encoding="utf-8")
+    assert CodexBackend().parse_usage(stdout) is None
+
+
+def test_codex_backend_parse_usage_skips_blank_lines() -> None:
+    stdout = "\n".join(
+        [
+            "",
+            '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}',
+        ]
+    )
+    usage = CodexBackend().parse_usage(stdout)
+    assert usage is not None
+    assert usage.input_tokens == 1
+
+
+def test_codex_backend_usage_to_plumb_tokens() -> None:
+    usage = CodexUsageStats(
+        total_cost_usd=None,
+        input_tokens=16668,
+        output_tokens=5,
+        cached_input_tokens=13056,
+        reasoning_output_tokens=0,
+    )
+    in_tokens, out_tokens = codex_usage_to_tokens(usage)
+    assert in_tokens == usage.input_tokens + usage.cached_input_tokens
+    assert out_tokens == usage.output_tokens + usage.reasoning_output_tokens
+
+
+# ---------------------------------------------------------------------------
+# CodexBackend — preflight
+# ---------------------------------------------------------------------------
+
+
+def test_codex_backend_preflight_missing_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    with patch("subprocess.run") as mock_run:
+        result = CodexBackend().preflight()
+        mock_run.assert_not_called()
+    assert result is not None
+    msg, error_type = result
+    assert error_type == "codex_missing_auth"
+    assert "OPENAI_API_KEY" in msg
+
+
+def test_codex_backend_preflight_env_var_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    assert CodexBackend().preflight() is None
+
+
+def test_codex_backend_preflight_auth_file_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "auth.json").write_text("{}", encoding="utf-8")
+    assert CodexBackend().preflight() is None
+
+
+def test_codex_backend_preflight_defaults_to_home_codex_dir_when_codex_home_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No $CODEX_HOME -> falls back to ~/.codex/auth.json (Path.home())."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "auth.json").write_text("{}", encoding="utf-8")
+    assert CodexBackend().preflight() is None
+
+
+# ---------------------------------------------------------------------------
+# CodexBackend — registration
+# ---------------------------------------------------------------------------
+
+
+def test_make_backend_codex() -> None:
+    assert isinstance(make_backend("codex"), CodexBackend)
+
+
+# ---------------------------------------------------------------------------
 # resolve_backend — 4-tier priority
 # ---------------------------------------------------------------------------
 
@@ -479,4 +732,4 @@ def test_make_backend_unknown_name_raises() -> None:
 
 
 def test_known_backends_set() -> None:
-    assert _KNOWN_BACKENDS == frozenset({"claude", "agy"})
+    assert _KNOWN_BACKENDS == frozenset({"claude", "agy", "codex"})

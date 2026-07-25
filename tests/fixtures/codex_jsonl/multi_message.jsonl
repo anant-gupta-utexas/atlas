@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"019f96b7-e404-7673-8853-2938007f2630"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"first message"}}
+{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"thinking..."}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"second message"}}
+{"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":0,"output_tokens":42,"reasoning_output_tokens":12}}

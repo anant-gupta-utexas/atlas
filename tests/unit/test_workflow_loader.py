@@ -19,6 +19,7 @@ from atlas.workflow_loader import (
 _DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
 _JOB_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "job.yaml"
 _JOB_CLI_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "job_cli.yaml"
+_LOOP_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "loop_dev.yaml"
 
 _VALID_YAML = """\
 name: test_wf
@@ -375,6 +376,31 @@ def test_load_job_cli_yaml_via_loader() -> None:
 
     gate_labels = [s.gate_label for s in loaded.stages if s.gate_label is not None]
     assert len(gate_labels) == len(set(gate_labels))
+
+
+def test_load_loop_dev_workflow() -> None:
+    loaded = load_workflow_file(_LOOP_DEV_YAML_PATH)
+    assert loaded.name == "loop_dev"
+    assert len(loaded.stages) == 3
+
+    by_name = {s.name: s for s in loaded.stages}
+    assert all(s.gate_label is None for s in loaded.stages)
+    assert by_name["plan"].isolate is False
+    assert by_name["code_gen"].isolate is True
+    assert by_name["verify"].isolate is False
+
+
+def test_loop_dev_default_backend_is_claude() -> None:
+    loaded = load_workflow_file(_LOOP_DEV_YAML_PATH)
+    assert loaded.default_backend == "claude"
+
+
+def test_loop_dev_tool_strings_are_raw_or_slash() -> None:
+    loaded = load_workflow_file(_LOOP_DEV_YAML_PATH)
+    by_name = {s.name: s for s in loaded.stages}
+    assert by_name["plan"].tool.startswith("RAW:")
+    assert by_name["code_gen"].tool.startswith("RAW:")
+    assert by_name["verify"].tool == "/verify"
 
 
 # ---------------------------------------------------------------------------

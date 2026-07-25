@@ -111,6 +111,20 @@ class StageOutcome:
     error_type: str | None
 
 
+@dataclass(frozen=True)
+class RunResult:
+    """Terminal outcome of a completed or paused run.
+
+    Wraps RunContext (unchanged) with the status Pipeline already computes
+    internally in run_to_completion()'s loop but previously discarded after
+    writing it to plumb. Additive: every existing call site that only reads
+    `ctx` fields continues to work via `.ctx`.
+    """
+
+    ctx: RunContext
+    status: str  # "success" | "failure" | "paused"  (paused = awaiting_hook timeout)
+
+
 # ---------------------------------------------------------------------------
 # Protocols
 # ---------------------------------------------------------------------------
@@ -335,13 +349,21 @@ class Pipeline:
         if stage.gate_label is None:
             # No gate; advance directly
             self._state.check_box(ctx, stage.name)
-            next_stage = self._stages[stage.index + 1]
-            self._state.update_current_block(
-                ctx,
-                phase=next_stage.name,
-                gate=f"none (entering {next_stage.name})",
-                next_action=f"run stage {next_stage.index} ({next_stage.name})",
-            )
+            if stage.index < len(self._stages) - 1:
+                next_stage = self._stages[stage.index + 1]
+                self._state.update_current_block(
+                    ctx,
+                    phase=next_stage.name,
+                    gate=f"none (entering {next_stage.name})",
+                    next_action=f"run stage {next_stage.index} ({next_stage.name})",
+                )
+            else:
+                self._state.update_current_block(
+                    ctx,
+                    phase=stage.name,
+                    gate="none",
+                    next_action="run complete",
+                )
             return StageOutcome(
                 stage=stage,
                 span_id=span_id,
@@ -425,14 +447,14 @@ class Pipeline:
             error_type=None,
         )
 
-    def run_to_completion(self, ctx: RunContext) -> RunContext:
+    def run_to_completion(self, ctx: RunContext) -> RunResult:
         """
         Loop: step() until all 7 stages done OR a gate rejects OR a stage fails.
 
         On ``awaiting_hook`` (code_gen gate): block until pending-scores.jsonl
-        contains a record for this run, then continue.  On timeout, return the
-        ctx so the user can ``atlas resume`` later.  Raises
-        ``AwaitingHookExceededError`` if awaiting_hook repeats more than
+        contains a record for this run, then continue.  On timeout, return a
+        ``RunResult(status="paused")`` so the user can ``atlas resume`` later.
+        Raises ``AwaitingHookExceededError`` if awaiting_hook repeats more than
         ``_AWAITING_HOOK_MAX_ATTEMPTS`` times (indicates a loop in the plugin).
 
         Reads ``self._latest_ctx`` after each step so updates made inside
@@ -448,11 +470,11 @@ class Pipeline:
             if outcome is None:
                 self._plumb.close_run(run_id=ctx.run_id, status="success")
                 self._state.delete_current_run()
-                return ctx
+                return RunResult(ctx=ctx, status="success")
             if outcome.status in ("failure", "rejected"):
                 self._plumb.close_run(run_id=ctx.run_id, status="failure")
                 self._state.delete_current_run()
-                return ctx
+                return RunResult(ctx=ctx, status="failure")
             if outcome.status == "awaiting_hook":
                 awaiting_attempts += 1
                 if awaiting_attempts > _AWAITING_HOOK_MAX_ATTEMPTS:
@@ -465,7 +487,7 @@ class Pipeline:
                     timeout_s=self._commit_wait_timeout_s,
                 ):
                     # Timed out waiting for the commit; leave the run open for resume.
-                    return ctx
+                    return RunResult(ctx=ctx, status="paused")
             # success: continue to next stage
 
     # ------------------------------------------------------------------

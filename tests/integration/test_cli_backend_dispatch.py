@@ -14,18 +14,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from atlas.cli_backend import ClaudeCodeBackend, UsageStats
+from atlas.cli_backend import ClaudeCodeBackend, CodexBackend, UsageStats, codex_usage_to_tokens
 from atlas.orchestrator import (
     GateDecision,
+    Pipeline,
     RunContext,
+    StageOutcome,
     SubprocessStageRunner,
 )
 from atlas.plumb_io import PlumbIO
 from atlas.stages import StageSpec
+from atlas.state import StateStore
 from atlas.workflow_loader import LoadedWorkflow, load_workflow_file
 
 _DEV_YAML = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
 _JOB_YAML = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "job.yaml"
+_LOOP_DEV_YAML = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "loop_dev.yaml"
+_CODEX_FIXTURES = Path(__file__).parents[1] / "fixtures" / "codex_jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -354,3 +359,176 @@ def test_claude_backend_loop_mode_telemetry_end_to_end(tmp_path: Path) -> None:
     assert plumb.spans[-1]["tokens"] == (1234, 567)
     # total_cost_usd stays in-memory only — no plumb write for it (plumb P1-a).
     assert not any("dollar_cost" in span for span in plumb.spans)
+
+
+# ---------------------------------------------------------------------------
+# test_codex_dispatch_end_to_end_mocked (T-L1.7 / TRD-v3 §13 #3)
+# ---------------------------------------------------------------------------
+
+
+def test_codex_dispatch_end_to_end_mocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stage with backend: codex dispatches codex and produces correct StageOutcome.
+
+    Also proves build_argv/parse_result/parse_usage/record_span compose
+    end-to-end, same pattern as test_claude_backend_loop_mode_telemetry_end_to_end
+    (no Pipeline.step() wiring for tokens exists yet — that's a future caller).
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    codex_stage = _stage("research", backend="codex")
+    codex_stdout = (_CODEX_FIXTURES / "success.jsonl").read_text(encoding="utf-8")
+
+    wf = LoadedWorkflow(name="codex-test", default_backend=None, stages=(codex_stage,))
+    runner = SubprocessStageRunner(
+        model="gpt-5-codex", default_backend="claude", loaded_workflow=wf
+    )
+
+    ctx = RunContext(
+        run_id="f" * 32,
+        slug="test-codex",
+        task="test codex dispatch",
+        repo_root=tmp_path,
+    )
+
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout=codex_stdout)
+        outcome = runner.run(ctx=ctx, stage=codex_stage)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "codex"
+    assert argv[1] == "exec"
+    assert "--sandbox" in argv
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+
+    assert outcome.status == "success"
+    assert outcome.output_text == "hi"
+    assert outcome.error_type is None
+
+    backend = CodexBackend()
+    usage = backend.parse_usage(codex_stdout)
+    assert usage is not None
+    in_tokens, out_tokens = codex_usage_to_tokens(usage)
+
+    plumb = PlumbIO(real=False)
+    run_id = plumb.open_run(task="codex-dispatch-test")
+    plumb.record_span(
+        run_id=run_id,
+        kind="code_gen",
+        name="code_gen",
+        status="success",
+        latency_ms=100.0,
+        error_type=None,
+        tokens=(in_tokens, out_tokens),
+    )
+    assert plumb.spans[-1]["tokens"] == (in_tokens, out_tokens)
+
+
+def test_codex_dispatch_failure_status_no_pr_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nonzero-exit Codex run surfaces StageOutcome.status == 'failure' cleanly."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    codex_stage = _stage("research", backend="codex")
+
+    wf = LoadedWorkflow(name="codex-fail-test", default_backend=None, stages=(codex_stage,))
+    runner = SubprocessStageRunner(
+        model="gpt-5-codex", default_backend="claude", loaded_workflow=wf
+    )
+
+    ctx = RunContext(
+        run_id="g" * 32,
+        slug="test-codex-fail",
+        task="test codex failure",
+        repo_root=tmp_path,
+    )
+
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(returncode=1, stdout="", stderr="boom")
+        outcome = runner.run(ctx=ctx, stage=codex_stage)
+
+    assert outcome.status == "failure"
+    assert outcome.error_type == "codex_nonzero_exit"
+
+
+# ---------------------------------------------------------------------------
+# RunResult regression (T-L1.6 / T-L1.7)
+# ---------------------------------------------------------------------------
+
+
+class _FakeGateRunner:
+    """Returns canned outcomes in order; used to script Pipeline stage results."""
+
+    def __init__(self, outcomes: list[StageOutcome]) -> None:
+        self._outcomes = list(outcomes)
+        self._idx = 0
+
+    def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        outcome = self._outcomes[self._idx]
+        self._idx += 1
+        return outcome
+
+
+def _loop_dev_pipeline(tmp_path: Path, runner: object) -> Pipeline:
+    state = StateStore(tmp_path)
+    plumb = PlumbIO(real=False)
+    stages = load_workflow_file(_LOOP_DEV_YAML).stages
+    return Pipeline(
+        repo_root=tmp_path,
+        state=state,
+        plumb=plumb,
+        runner=runner,  # type: ignore[arg-type]
+        prompter=_FakePrompter(),
+        stages=stages,
+        workflow_name="loop_dev",
+    )
+
+
+def test_run_to_completion_returns_run_result(tmp_path: Path) -> None:
+    stages = load_workflow_file(_LOOP_DEV_YAML).stages
+    success_outcomes = [
+        StageOutcome(stage=s, span_id="", status="success", output_text="ok", error_type=None)
+        for s in stages
+    ]
+    pipeline = _loop_dev_pipeline(tmp_path, _FakeGateRunner(success_outcomes))
+    ctx = pipeline.start(task="loop dev test", slug="loop-dev-test")
+    result = pipeline.run_to_completion(ctx)
+    assert result.status == "success"
+    assert result.ctx.run_id == ctx.run_id
+
+
+def test_run_to_completion_returns_failure_run_result(tmp_path: Path) -> None:
+    stages = load_workflow_file(_LOOP_DEV_YAML).stages
+    outcomes = [
+        StageOutcome(
+            stage=stages[0], span_id="", status="success", output_text="ok", error_type=None
+        ),
+        StageOutcome(
+            stage=stages[1],
+            span_id="",
+            status="failure",
+            output_text="verify failed",
+            error_type="codex_nonzero_exit",
+        ),
+    ]
+    pipeline = _loop_dev_pipeline(tmp_path, _FakeGateRunner(outcomes))
+    ctx = pipeline.start(task="loop dev failing test", slug="loop-dev-fail-test")
+    result = pipeline.run_to_completion(ctx)
+    assert result.status == "failure"
+    assert result.ctx.run_id == ctx.run_id
+
+
+def test_cli_run_and_resume_updated_for_run_result(tmp_path: Path) -> None:
+    """cli.py::run/resume discard run_to_completion()'s return value already —
+    this pins that the RunResult widening doesn't break that call shape."""
+    stages = load_workflow_file(_LOOP_DEV_YAML).stages
+    success_outcomes = [
+        StageOutcome(stage=s, span_id="", status="success", output_text="ok", error_type=None)
+        for s in stages
+    ]
+    pipeline = _loop_dev_pipeline(tmp_path, _FakeGateRunner(success_outcomes))
+    ctx = pipeline.start(task="cli regression test", slug="cli-regression-test")
+
+    # Mirrors cli.py::run's bare-statement call (no assignment).
+    pipeline.run_to_completion(ctx)
