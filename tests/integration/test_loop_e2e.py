@@ -198,10 +198,12 @@ def test_planned_lane_stops_after_plan_pr(tmp_path: Path) -> None:
     cfg = _cfg(repo_root)
     state = loop.LoopState(day=loop._today())
     issue = _issue(number=7, title="Redesign the queue", labels=frozenset({"wf:planned"}))
-    # backend_stdout is dev-docs-be's plain-text output; since planned-lane
-    # dispatches only dev-docs-be (never plan/code_gen/verify), any "claude"
-    # call this tick is that one call.
-    fake_subprocess = _FakeSubprocess(pr_number=43, backend_stdout="Wrote the TRS triad.")
+    # Writes a triad into the backend's cwd, as a real dev-docs-be run would;
+    # the planned lane commits it before delivering, so an inert fake would
+    # (correctly) fail at commit time with "nothing to commit".
+    # Since planned-lane dispatches only dev-docs-be (never plan/code_gen/
+    # verify), any "claude" call this tick is that one call.
+    fake_subprocess = _TriadWritingSubprocess(pr_number=43)
 
     with (
         patch("atlas.loop.sync_prior_prs", return_value=[]),
@@ -231,6 +233,115 @@ def test_planned_lane_stops_after_plan_pr(tmp_path: Path) -> None:
     assert "plumb run_id" in body_arg
 
     comment_mock.assert_called_once()
+
+
+class _TriadWritingSubprocess(_FakeSubprocess):
+    """_FakeSubprocess, but the faked `claude` call also writes a TRS triad
+    into the cwd it was invoked with — the way a real dev-docs-be run would.
+
+    This is what makes the planned lane's commit assertable: without files on
+    disk there is nothing to `git add`, and the empty-branch bug the ordering
+    fix addresses would be invisible.
+    """
+
+    def __init__(self, pr_number: int = 43) -> None:
+        super().__init__(pr_number=pr_number, backend_stdout="Wrote the TRS triad.")
+        self.backend_cwds: list[str] = []
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> MagicMock | CompletedProcess[str]:
+        if argv[0] == "claude":
+            cwd = str(kwargs.get("cwd", ""))
+            self.backend_cwds.append(cwd)
+            triad_dir = Path(cwd) / "dev" / "active" / "redesign-the-queue"
+            triad_dir.mkdir(parents=True, exist_ok=True)
+            (triad_dir / "plan.md").write_text("# plan\n")
+            (triad_dir / "tasks.md").write_text("# tasks\n")
+        return super().__call__(argv, **kwargs)
+
+
+def test_planned_lane_commits_triad_before_delivering(tmp_path: Path) -> None:
+    """C1 regression: the planned lane must run dev-docs-be *inside* the
+    worktree and commit the triad, so the delivered branch is ahead of main.
+
+    The pre-fix ordering ran dev-docs-be against repo_root and created an
+    empty worktree afterwards, so `git push` sent a branch identical to main
+    and `gh pr create` would fail with "No commits between main and ...".
+    """
+    repo_root = _init_repo(tmp_path / "repo")
+    cfg = _cfg(repo_root)
+    issue = _issue(number=7, title="Redesign the queue", labels=frozenset({"wf:planned"}))
+    fake_subprocess = _TriadWritingSubprocess(pr_number=43)
+
+    # Capture the branch name at the delivery boundary, before GhPrDeliverer
+    # cleans the worktree up. Delivery itself stays real (git push / gh pr
+    # create are faked inside _FakeSubprocess), so the branch is genuinely
+    # pushed from a genuinely committed worktree.
+    captured: dict[str, str] = {}
+    real_deliver_pr = loop.queue_gh.deliver_pr
+
+    def _capture_deliver_pr(*args: Any, **kwargs: Any) -> Any:
+        captured["branch"] = kwargs["branch"]
+        return real_deliver_pr(*args, **kwargs)
+
+    with (
+        patch("atlas.loop.subprocess.run", side_effect=fake_subprocess),
+        patch("atlas.loop.queue_gh.deliver_pr", side_effect=_capture_deliver_pr),
+    ):
+        pr_ref, _run_id, _cost = loop.run_planned_first_pass(issue, cfg, repo_root=repo_root)
+
+    assert pr_ref.number == 43
+
+    # dev-docs-be ran inside the worktree, not the main working tree.
+    assert len(fake_subprocess.backend_cwds) == 1
+    backend_cwd = Path(fake_subprocess.backend_cwds[0])
+    assert backend_cwd != repo_root
+    assert ".atlas/worktrees" in str(backend_cwd)
+
+    # The delivered branch has a real commit ahead of main — the actual C1 bug.
+    branch = captured["branch"]
+    ahead = subprocess.run(
+        ["git", "rev-list", "--count", f"main..{branch}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert int(ahead.stdout.strip()) >= 1, "delivered branch has no commits ahead of main"
+
+    # The triad is actually in that commit, and never landed in the main tree.
+    tree = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", branch],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "dev/active/redesign-the-queue/plan.md" in tree.stdout
+    assert not (repo_root / "dev" / "active" / "redesign-the-queue").exists()
+
+
+def test_planned_lane_raises_when_agent_produces_nothing(tmp_path: Path) -> None:
+    """An agent that writes no files must fail loudly at commit time rather
+    than pushing an empty branch and failing at `gh pr create`."""
+    repo_root = _init_repo(tmp_path / "repo")
+    cfg = _cfg(repo_root)
+    issue = _issue(number=8, title="Redesign the queue", labels=frozenset({"wf:planned"}))
+    # Plain _FakeSubprocess: the faked `claude` writes nothing to disk.
+    fake_subprocess = _FakeSubprocess(pr_number=44, backend_stdout="I did nothing.")
+
+    from atlas.worktree import WorktreeError
+
+    with (
+        patch("atlas.loop.subprocess.run", side_effect=fake_subprocess),
+        pytest.raises(WorktreeError, match="nothing to commit"),
+    ):
+        loop.run_planned_first_pass(issue, cfg, repo_root=repo_root)
+
+    # No PR was attempted, and the worktree was cleaned up on the failure path.
+    assert [c for c in fake_subprocess.calls if c[:2] == ["gh", "pr"]] == []
+    worktrees_dir = repo_root / ".atlas" / "worktrees"
+    if worktrees_dir.exists():
+        assert list(worktrees_dir.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +388,108 @@ def test_crash_recovery_prunes_orphaned_worktree(tmp_path: Path) -> None:
 
     assert not orphan_path.exists()
     assert any("worktree" in item for item in reconciled)
+
+
+def test_reconcile_retains_live_worktree_and_prunes_colliding_orphan(tmp_path: Path) -> None:
+    """I4 regression: the retain-check keys on .atlas/current-run's exact
+    worktree path, not on a re-slugified issue title.
+
+    _slugify truncates to 40 chars, so two long, similar issue titles produce
+    the same slug. Under the old title-slug matching an orphan sharing a live
+    issue's slug was retained forever, and — worse — a live run whose slug
+    didn't match had its uncommitted work deleted.
+    """
+    repo_root = _init_repo(tmp_path / "repo")
+    cfg = _cfg(repo_root)
+
+    from atlas.state import StateStore
+    from atlas.worktree import WorktreeManager
+
+    worktree_mgr = WorktreeManager(repo_root)
+    # Same 40-char-truncated slug, different runs: one live, one orphaned.
+    slug = loop._slugify("Refactor the authentication middleware layer for OAuth")
+    assert slug == loop._slugify("Refactor the authentication middleware layer for SAML")
+
+    live_path = worktree_mgr.create(slug=slug, run_id="1111111111111111")
+    orphan_path = worktree_mgr.create(slug=slug, run_id="2222222222222222")
+
+    StateStore(repo_root).write_current_run("1111111111111111", slug, live_path)
+
+    with (
+        patch("atlas.queue_gh.list_labeled", return_value=[]),
+        patch("atlas.queue_gh.sync", return_value=[]),
+    ):
+        reconciled = loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo_root)
+
+    assert live_path.exists(), "live run's worktree was deleted"
+    assert not orphan_path.exists(), "colliding orphan was retained"
+    assert any(orphan_path.name in item for item in reconciled)
+
+
+def test_reconcile_sweeps_nothing_when_current_run_unreadable(tmp_path: Path) -> None:
+    """Fail-safe: if .atlas/current-run can't be read we cannot tell which
+    worktree is live, so sweep nothing rather than risk deleting it."""
+    repo_root = _init_repo(tmp_path / "repo")
+    cfg = _cfg(repo_root)
+
+    from atlas.worktree import WorktreeManager
+
+    wt_path = WorktreeManager(repo_root).create(slug="some-issue", run_id="3333333333333333")
+
+    with (
+        patch("atlas.queue_gh.list_labeled", return_value=[]),
+        patch("atlas.queue_gh.sync", return_value=[]),
+        patch(
+            "atlas.state.StateStore.read_current_run_with_worktree",
+            side_effect=OSError("disk error"),
+        ),
+    ):
+        reconciled = loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo_root)
+
+    assert wt_path.exists()
+    assert not any("worktree" in item for item in reconciled)
+
+
+def test_loop_passes_max_turns_to_the_backend(tmp_path: Path) -> None:
+    """I3 regression: cfg.loop.max_turns must reach the backend argv as
+    --max-turns. It was parsed and documented but never threaded through, so
+    an unattended run had no turn cap at all."""
+    repo_root = _init_repo(tmp_path / "repo")
+    cfg = _cfg(repo_root, max_turns=7)
+    state = loop.LoopState(day=loop._today())
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    fake_subprocess = _FakeSubprocess(pr_number=77)
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.queue_gh.list_ready", return_value=[issue]),
+        patch("atlas.loop.current_gh_user", return_value="anant"),
+        patch("atlas.queue_gh.claim"),
+        patch("atlas.orchestrator.subprocess.run", side_effect=fake_subprocess),
+        patch("atlas.queue_gh.comment"),
+    ):
+        loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+
+    claude_calls = [c for c in fake_subprocess.calls if c[0] == "claude"]
+    assert claude_calls, "no backend call was made"
+    for argv in claude_calls:
+        assert "--max-turns" in argv
+        assert argv[argv.index("--max-turns") + 1] == "7"
+
+
+def test_atlas_run_leaves_max_turns_unset(tmp_path: Path) -> None:
+    """`atlas run` has a human watching, so it keeps the backend's own default
+    — make_pipeline's max_turns is opt-in, not a behavior change for stage 1-7."""
+    from atlas.cli import make_pipeline
+
+    repo_root = _init_repo(tmp_path / "repo")
+    cfg = _cfg(repo_root, max_turns=7)
+    _pipeline, _recorder = make_pipeline(repo_root, cfg, workflow="loop_dev")
+    # No max_turns argument passed -> runner leaves it None.
+    from atlas.orchestrator import SubprocessStageRunner
+
+    runner = SubprocessStageRunner(model=cfg.model)
+    assert runner._max_turns is None
 
 
 # ---------------------------------------------------------------------------

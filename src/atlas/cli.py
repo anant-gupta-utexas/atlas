@@ -11,48 +11,20 @@ except ModuleNotFoundError:  # pragma: no cover
     print("typer is required: pip install typer", file=sys.stderr)
     sys.exit(1)
 
-from atlas.composite_runner import CompositeStageRunner
+from atlas import loop as _loop
 from atlas.config import Config
-from atlas.library_runner import LibraryStageRunner
+from atlas.loop_budget import LoopState, breaker_open
 from atlas.orchestrator import (
     AbortedError,
-    AutoPrompter,
-    ClickPrompter,
     NoActiveRunError,
-    Pipeline,
     RoutingDriftError,
-    RunContext,
-    StageOutcome,
-    SubprocessStageRunner,
 )
-from atlas.plumb_io import PlumbIO
-from atlas.shell_runner import ShellStageRunner
-from atlas.stages import StageSpec
+from atlas.pipeline_factory import LastOutcomeRunner, make_pipeline
 from atlas.state import StateStore
 from atlas.workflow_loader import (
     WorkflowNotFoundError,
     WorkflowValidationError,
-    resolve_workflow,
 )
-from atlas.worktree import WorktreeManager
-
-
-class _LastOutcomeRunner:
-    """Records the last StageOutcome from each step so the CLI can inspect it.
-
-    Wraps CompositeStageRunner without touching Pipeline — the pipeline
-    only sees the StageRunner Protocol.  After run_to_completion() the CLI
-    checks ``last.error_type`` to surface actionable error messages.
-    """
-
-    def __init__(self, inner: CompositeStageRunner) -> None:
-        self._inner = inner
-        self.last: StageOutcome | None = None
-
-    def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
-        outcome = self._inner.run(ctx=ctx, stage=stage)
-        self.last = outcome
-        return outcome
 
 
 def _available_workflows() -> list[str]:
@@ -82,64 +54,7 @@ def _find_repo_root() -> Path:
     raise typer.Exit(1)
 
 
-def make_pipeline(
-    repo_root: Path,
-    cfg: Config,
-    *,
-    auto_approve: bool = False,
-    workflow: str | None = None,
-    workflow_file: Path | None = None,
-    backend_override: str | None = None,
-) -> tuple[Pipeline, _LastOutcomeRunner]:
-    """Construct a Pipeline + recorder exactly as `atlas run` does.
-
-    Shared by cli.py::run/resume and loop.py (Decision #11) so the two
-    construction paths cannot silently drift. ``backend_override``, when
-    given, takes priority over ``cfg.default_backend`` (but still below a
-    stage's own ``backend`` field or the workflow's ``default_backend`` —
-    the existing 4-tier order in `cli_backend.resolve_backend`) — used by
-    loop.py to honor an issue's `engine:*` label.
-    """
-    loaded = resolve_workflow(
-        workflow_file=workflow_file, workflow_name=workflow, repo_root=repo_root
-    )
-    plumb = PlumbIO(real=True)
-    state = StateStore(repo_root)
-    worktree = WorktreeManager(repo_root)
-    default_runner = SubprocessStageRunner(
-        timeout_overrides=cfg.timeout_overrides,
-        command_overrides=cfg.plugin_commands,
-        model=cfg.model,
-        default_backend=backend_override or cfg.default_backend,
-        loaded_workflow=loaded,
-    )
-    # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
-    # CompositeStageRunner is always used so dev.yaml's plain plugin-command
-    # stages (no LIB:/RAW: prefix) still fall through to SubprocessStageRunner.
-    library: LibraryStageRunner | None = None
-    if any(s.tool.startswith("LIB:") for s in loaded.stages):
-        library = LibraryStageRunner()
-    # ShellStageRunner handles SHELL: stages (direct CLI dispatch, e.g. job_cli).
-    shell: ShellStageRunner | None = None
-    if any(s.tool.startswith("SHELL:") for s in loaded.stages):
-        shell = ShellStageRunner(timeout_overrides=cfg.timeout_overrides)
-    composite = CompositeStageRunner(default=default_runner, library=library, shell=shell)
-    recorder = _LastOutcomeRunner(composite)
-    prompter: ClickPrompter | AutoPrompter = AutoPrompter() if auto_approve else ClickPrompter()
-    pipeline = Pipeline(
-        repo_root=repo_root,
-        state=state,
-        plumb=plumb,
-        runner=recorder,
-        prompter=prompter,
-        stages=loaded.stages,
-        workflow_name=loaded.name,
-        worktree=worktree,
-    )
-    return pipeline, recorder
-
-
-def _emit_content_pipeline_hint(recorder: _LastOutcomeRunner) -> None:
+def _emit_content_pipeline_hint(recorder: LastOutcomeRunner) -> None:
     """If the last stage failed with content_pipeline_not_installed, echo the fix hint."""
     if recorder.last is not None and recorder.last.error_type == "content_pipeline_not_installed":
         typer.echo(
@@ -328,12 +243,14 @@ def _tmux(*args: str) -> None:
 @loop_app.command("run")
 def loop_run() -> None:
     """Run the loop daemon in this terminal (foreground, for debugging)."""
-    from atlas.loop import run_forever
 
     repo_root = _find_repo_root()
     cfg = Config.load(repo_root)
     try:
-        run_forever(cfg, repos=list(cfg.loop.repos), repo_root=repo_root)
+        # Called through the module (not a `from ... import`) so tests can
+        # patch atlas.loop.run_forever — a direct name binding would capture
+        # the real daemon at import time and ignore the patch.
+        _loop.run_forever(cfg, repos=list(cfg.loop.repos), repo_root=repo_root)
     except KeyboardInterrupt:
         typer.echo("\nLoop stopped.", err=True)
         raise typer.Exit(0)
@@ -356,7 +273,6 @@ def loop_stop() -> None:
 @loop_app.command("status")
 def loop_status() -> None:
     """Print a human-readable summary of the loop's persisted state."""
-    from atlas.loop import LoopState, breaker_open
 
     repo_root = _find_repo_root()
     cfg = Config.load(repo_root)
@@ -368,7 +284,14 @@ def loop_status() -> None:
     state = LoopState.load_or_init(repo_root)
     typer.echo(f"Day: {state.day}")
     typer.echo(f"Runs today: {state.runs_today} / {cfg.loop.max_runs_per_day}")
-    typer.echo(f"Dollars today: ${state.dollars_today:.2f} / ${cfg.loop.max_dollars_per_day:.2f}")
+    # Don't print a confident "$0.00 / $10.00" — per-run cost is not yet
+    # extractable from RunResult (blocked on plumb P1-a, TRD-v3 §3.6), so
+    # max_dollars_per_day cannot trip. Reporting it as a working cap would
+    # read as a spend guarantee that doesn't exist.
+    typer.echo(
+        f"Dollars today: not tracked (cap ${cfg.loop.max_dollars_per_day:.2f} "
+        "NOT enforced — pending plumb P1-a cost data)"
+    )
     typer.echo(f"Last tick: {state.last_tick_at or 'never'}")
     if breaker_open(state, cfg.loop):
         typer.echo(f"Breaker: OPEN until {state.breaker_open_until}")

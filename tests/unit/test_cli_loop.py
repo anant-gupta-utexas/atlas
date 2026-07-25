@@ -132,9 +132,13 @@ def test_loop_status_populated_state_reports_summary(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "3" in result.output
     assert "20" in result.output
-    assert "1.42" in result.output
     assert "2026-07-24T18:03:11Z" in result.output
     assert "closed" in result.output.lower()
+    # The dollar cap is not enforced (no per-run cost data until plumb P1-a),
+    # so status must say so rather than printing a confident spend figure (I2).
+    assert "not tracked" in result.output.lower()
+    assert "not enforced" in result.output.lower()
+    assert "1.42" not in result.output
 
 
 def test_loop_status_reports_open_breaker(tmp_path: Path) -> None:

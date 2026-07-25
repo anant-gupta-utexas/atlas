@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from atlas import loop
+from atlas import loop, loop_budget
 from atlas.config import Config, LoopConfig
 from atlas.deliverer import DeliveryError, PrRef
 from atlas.queue_gh import Issue, PrStatus
@@ -307,8 +307,11 @@ def test_tick_failed_run_no_pr_but_comments(tmp_path: Path) -> None:
     ):
         result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
 
+    # action is "failed", not "dispatched" — nothing was delivered, and
+    # counting dispatches by action must not over-count (I1).
+    assert result.action == "failed"
     assert result.pr_ref is None
-    assert "failed" in result.detail
+    assert "boom" in result.detail
     comment_mock.assert_called_once()
     assert "failed" in comment_mock.call_args.kwargs["body"]
 
@@ -328,7 +331,7 @@ def test_tick_delivery_failure_leaves_issue_working_no_crash(tmp_path: Path) -> 
     ):
         result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
 
-    assert result.action == "dispatched"
+    assert result.action == "failed"
     assert result.pr_ref is None
     comment_mock.assert_called_once()
 
@@ -470,6 +473,65 @@ def test_sync_closed_writes_rejected_signal() -> None:
     decision = plumb_instance.record_user_signal.call_args.kwargs["decision"]
     assert decision.label == "rejected"
     plumb_instance.close_run.assert_called_once_with(run_id="run-xyz", status="failure")
+
+
+def test_sync_score_is_anchored_to_a_real_span() -> None:
+    """C2 regression: the user_signal score must carry a span_id from a real
+    record_span call, not an empty-string sentinel.
+
+    Uses a genuine stub-mode PlumbIO (not a MagicMock) so the recorded rows
+    are real dicts — a MagicMock would happily return a truthy mock for
+    record_span and hide the defect.
+    """
+    from atlas.plumb_io import PlumbIO
+
+    issue = _issue()
+    status = PrStatus(issue=issue, outcome="merged", pr_number=9)
+    state = _state()
+    real_stub = PlumbIO(real=False)
+
+    with (
+        patch("atlas.queue_gh.sync", return_value=[status]),
+        patch("atlas.queue_gh.find_run_id_comment", return_value="run-abc"),
+        patch("atlas.queue_gh.relabel"),
+        patch("atlas.loop.PlumbIO", return_value=real_stub),
+    ):
+        loop.sync_prior_prs(_REPO, state)
+
+    assert len(real_stub.scores) == 1
+    score = real_stub.scores[0]
+    assert score["span_id"], "user_signal score has a falsy span_id"
+    assert score["span_id"] in {s["span_id"] for s in real_stub.spans}
+    assert score["value_label"] == "approved"
+
+
+def test_sync_dedupe_list_is_bounded() -> None:
+    """C2 regression: loop-state.json is rewritten every tick, so the dedupe
+    list must not grow without limit in a long-running daemon."""
+    state = _state()
+    state.synced_pr_outcomes = [f"old-{i}" for i in range(loop_budget._MAX_SYNCED_OUTCOMES)]
+
+    loop_budget.remember_synced_outcome(state, "newest")
+
+    assert len(state.synced_pr_outcomes) == loop_budget._MAX_SYNCED_OUTCOMES
+    assert state.synced_pr_outcomes[-1] == "newest"
+    assert "old-0" not in state.synced_pr_outcomes  # oldest evicted
+
+
+def test_loop_state_load_trims_oversized_dedupe_list(tmp_path: Path) -> None:
+    """An already-oversized state file from before the bound was introduced
+    gets trimmed on load rather than persisting forever."""
+    import json
+
+    state_path = tmp_path / ".atlas" / "loop-state.json"
+    state_path.parent.mkdir(parents=True)
+    oversized = [f"k-{i}" for i in range(loop_budget._MAX_SYNCED_OUTCOMES + 250)]
+    state_path.write_text(json.dumps({"day": loop._today(), "synced_pr_outcomes": oversized}))
+
+    loaded = loop.LoopState.load_or_init(tmp_path)
+
+    assert len(loaded.synced_pr_outcomes) == loop_budget._MAX_SYNCED_OUTCOMES
+    assert loaded.synced_pr_outcomes[-1] == oversized[-1]  # newest retained
 
 
 def test_sync_open_outcome_skipped() -> None:
@@ -619,7 +681,14 @@ def test_run_forever_calls_reconcile_orphans_once_at_startup(tmp_path: Path) -> 
     reconcile_mock.assert_called_once()
 
 
-def test_run_forever_breaker_open_skips_tick(tmp_path: Path) -> None:
+def test_run_forever_breaker_open_dispatches_nothing_but_still_ticks(tmp_path: Path) -> None:
+    """An open breaker must not dispatch — but run_forever still calls tick(),
+    which reports action="breaker_open" and refreshes last_tick_at (m5).
+
+    Previously run_forever short-circuited before tick(), which froze
+    last_tick_at and logged nothing, making a cooling-down daemon look dead
+    in `atlas loop status`.
+    """
     cfg = _cfg(tmp_path)
     future = (datetime.now(tz=UTC) + timedelta(minutes=10)).isoformat()
     state = loop.LoopState(day=loop._today(), breaker_open_until=future)
@@ -627,13 +696,18 @@ def test_run_forever_breaker_open_skips_tick(tmp_path: Path) -> None:
     with (
         patch("atlas.loop.reconcile_orphans", return_value=[]),
         patch("atlas.loop.LoopState.load_or_init", return_value=state),
-        patch("atlas.loop.tick") as tick_mock,
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready") as pull_mock,
+        patch("atlas.loop.run_one_shot") as run_mock,
         patch("atlas.loop.time.sleep", side_effect=KeyboardInterrupt),
     ):
         with pytest.raises(KeyboardInterrupt):
             loop.run_forever(cfg, repos=[_REPO], repo_root=tmp_path)
 
-    tick_mock.assert_not_called()
+    # tick() ran, but bailed at the breaker check before pulling or dispatching.
+    pull_mock.assert_not_called()
+    run_mock.assert_not_called()
+    assert state.last_tick_at is not None
 
 
 # ---------------------------------------------------------------------------

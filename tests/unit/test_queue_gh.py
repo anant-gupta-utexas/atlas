@@ -412,15 +412,28 @@ def test_find_run_id_comment_gh_failure_returns_none() -> None:
 
 
 def test_loop_module_never_shells_gh_directly() -> None:
-    """loop.py must never construct a `gh` subprocess call itself — it goes
-    through queue_gh.py exclusively (TRD-v3 §6). Grep-based, not mock-based,
-    so it catches the boundary even if a future edit adds a raw call."""
-    loop_path = Path(__file__).parent.parent.parent / "src" / "atlas" / "loop.py"
-    if not loop_path.exists():
+    """No loop-daemon module may construct a `gh` subprocess call itself — they
+    go through queue_gh.py exclusively (TRD-v3 §6). Grep-based, not mock-based,
+    so it catches the boundary even if a future edit adds a raw call.
+
+    Covers every atlas module except queue_gh.py itself (the sanctioned caller)
+    and deliverer.py (which owns the `gh pr create` primitive queue_gh wraps),
+    so a module added in L3/L4 is in scope automatically rather than silently
+    escaping the boundary.
+    """
+    src_dir = Path(__file__).parent.parent.parent / "src" / "atlas"
+    if not (src_dir / "loop.py").exists():
         pytest.skip("loop.py not yet implemented")
-    content = loop_path.read_text()
+
+    sanctioned = {"queue_gh.py", "deliverer.py"}
     # Match subprocess.run/Popen/call/check_call/check_output invocations
     # whose argv list starts with "gh" — the pattern any raw gh shell-out
     # would use. queue_gh.* calls (imported functions) are fine.
     forbidden = re.compile(r'subprocess\.(run|Popen|call|check_call|check_output)\(\s*\[\s*"gh"')
-    assert not forbidden.search(content), "loop.py must not shell out to gh directly"
+
+    offenders = [
+        path.name
+        for path in sorted(src_dir.rglob("*.py"))
+        if path.name not in sanctioned and forbidden.search(path.read_text())
+    ]
+    assert not offenders, f"these modules must not shell out to gh directly: {offenders}"

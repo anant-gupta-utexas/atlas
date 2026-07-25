@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -78,7 +79,7 @@ def _classify(issue: Issue, *, plumb: PlumbIO, run_id: str) -> TriageResult:
         extra_flags={},
     )
 
-    latency_ms = 0.0
+    t0 = time.monotonic()
     try:
         result = subprocess.run(
             argv,
@@ -94,11 +95,12 @@ def _classify(issue: Issue, *, plumb: PlumbIO, run_id: str) -> TriageResult:
             kind="plan",
             name="triage",
             status="failure",
-            latency_ms=latency_ms,
+            latency_ms=(time.monotonic() - t0) * 1000.0,
             error_type="triage_timeout",
         )
         return TriageResult(lane="planned", source="classify", rationale="classify timed out")
 
+    latency_ms = (time.monotonic() - t0) * 1000.0
     status, output_text, error_type = backend.parse_result(
         result.stdout, result.stderr, result.returncode
     )

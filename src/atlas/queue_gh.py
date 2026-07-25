@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from atlas.deliverer import Deliverer, DeliveryError, PrRef
+from atlas.deliverer import Deliverer, PrRef
 
 _DEFAULT_TIMEOUT_S = 30
 
@@ -158,17 +158,18 @@ def deliver_pr(
     worktree_path: Path,
     deliverer: Deliverer,
 ) -> PrRef:
-    """Thin pass-through to Deliverer.deliver() — queue_gh does not reimplement PR creation."""
-    try:
-        return deliverer.deliver(
-            run_id=run_id,
-            branch=branch,
-            worktree_path=worktree_path,
-            title=title,
-            body=body,
-        )
-    except DeliveryError:
-        raise
+    """Thin pass-through to Deliverer.deliver() — queue_gh does not reimplement PR creation.
+
+    DeliveryError propagates to loop.tick(), which comments on the issue and
+    leaves it atlas:working for manual triage.
+    """
+    return deliverer.deliver(
+        run_id=run_id,
+        branch=branch,
+        worktree_path=worktree_path,
+        title=title,
+        body=body,
+    )
 
 
 def comment(issue: Issue, *, body: str, timeout_s: int = _DEFAULT_TIMEOUT_S) -> None:
@@ -189,12 +190,11 @@ def comment(issue: Issue, *, body: str, timeout_s: int = _DEFAULT_TIMEOUT_S) -> 
 def sync(repo: str, *, timeout_s: int = _DEFAULT_TIMEOUT_S) -> list[PrStatus]:
     """For every atlas:working issue with a linked PR, read the PR's outcome.
 
-    Issues are matched to PRs by number embedded in a `Closes #<n>` /
-    `#<n>` reference inside the PR body — resolved by the caller
-    (loop.sync_prior_prs) via the comment() body recorded at dispatch time,
-    not here. This function reads PR state for issues that ARE currently
-    linked (an issue's tracked PR number is supplied by the caller through
-    a follow-up gh pr view call per issue).
+    Two gh calls per issue: `gh issue view --json
+    closedByPullRequestsReferences` to find the linked PR (GitHub resolves the
+    link from the PR body's `Closes #<n>`), then `gh pr view --json
+    state,mergedAt,number` for its outcome. Issues with no linked PR yet are
+    omitted from the result entirely.
     """
     working = _list_labeled(repo, "atlas:working", timeout_s=timeout_s)
     statuses: list[PrStatus] = []
@@ -208,12 +208,12 @@ def sync(repo: str, *, timeout_s: int = _DEFAULT_TIMEOUT_S) -> list[PrStatus]:
 
 
 def _find_linked_pr_number(issue: Issue, *, timeout_s: int) -> int | None:
-    """Find a PR that references this issue via `gh issue view --json`.
+    """Return the number of the PR GitHub has linked to this issue, if any.
 
-    Uses `gh issue view <n> --json timelineItems` is unnecessarily heavy;
-    instead uses the simpler `gh pr list --search "linked:<n>"`-style lookup
-    via `gh issue view --json closedByPullRequestsReferences` when available,
-    falling back to None (caller then has nothing to sync for this issue yet).
+    Reads `closedByPullRequestsReferences` — GitHub populates it from the
+    PR body's `Closes #<n>`, which loop.run_one_shot always writes. Returns
+    None (rather than raising) when the field is absent, empty, or the gh
+    call fails: the caller treats "no linked PR yet" as nothing to sync.
     """
     argv = [
         "gh",

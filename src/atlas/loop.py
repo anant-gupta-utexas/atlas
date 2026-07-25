@@ -9,22 +9,35 @@ enforced by ``tests/unit/test_queue_gh.py::test_loop_module_never_shells_gh_dire
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from atlas import queue_gh
-from atlas.cli import make_pipeline
 from atlas.cli_backend import UnknownBackendError, make_backend
 from atlas.config import Config, LoopConfig
 from atlas.deliverer import DeliveryError, GhPrDeliverer, PrRef
+
+# Re-exported so `from atlas.loop import LoopState, breaker_open, ...` keeps
+# working after the budget/breaker split into loop_budget.py.
+from atlas.loop_budget import (
+    LoopState,
+    _now_iso,
+    _reset_daily_counters_if_new_day,
+    _today,  # noqa: F401 — re-exported; tests and callers use loop._today()
+    breaker_open,
+    budget_exhausted,
+    record_tick_outcome,
+)
+from atlas.loop_budget import error_signature as _error_signature
+from atlas.loop_budget import remember_synced_outcome as _remember_synced_outcome
+from atlas.loop_budget import warn_on_unenforced_budget as _warn_on_unenforced_budget
 from atlas.orchestrator import AbortedError, GateDecision, RunResult
+from atlas.pipeline_factory import make_pipeline
 from atlas.plumb_io import PlumbIO
 from atlas.queue_gh import GhCliError, Issue
 from atlas.triage import TriageResult, triage
@@ -32,7 +45,6 @@ from atlas.worktree import WorktreeError, WorktreeManager
 
 _logger = logging.getLogger("atlas.loop")
 
-_LOOP_STATE_RELATIVE_PATH = Path(".atlas") / "loop-state.json"
 _WORKFLOW_NAME = "loop_dev"
 
 
@@ -47,125 +59,19 @@ class AbortedRunError(Exception):
 
 @dataclass(frozen=True)
 class TickResult:
-    action: Literal["idle", "dispatched", "synced", "breaker_open", "budget_exhausted"]
+    """Outcome of one tick.
+
+    ``action`` is the machine-readable field — count dispatches by it, never
+    by string-matching ``detail``. ``"dispatched"`` means a run was dispatched
+    and delivered; a run that failed (or never started) is ``"failed"``, so
+    callers can't over-count dispatches.
+    """
+
+    action: Literal["idle", "dispatched", "failed", "synced", "breaker_open", "budget_exhausted"]
     issue_number: int | None
     lane: Literal["quick", "planned"] | None
     pr_ref: PrRef | None
     detail: str
-
-
-@dataclass
-class LoopState:
-    """Mutable, persisted-to-disk loop state — survives process restarts.
-
-    Distinct from RunContext/RunResult (per-run) — this is per-loop-process
-    (Decision #6). Persisted as .atlas/loop-state.json.
-    """
-
-    runs_today: int = 0
-    dollars_today: float = 0.0
-    day: str = ""
-    consecutive_no_progress: int = 0
-    consecutive_identical_errors: int = 0
-    last_error_signature: str | None = None
-    breaker_open_until: str | None = None
-    last_tick_at: str | None = None
-    synced_pr_outcomes: list[str] = field(default_factory=list)
-
-    @classmethod
-    def load_or_init(cls, repo_root: Path) -> LoopState:
-        path = repo_root / _LOOP_STATE_RELATIVE_PATH
-        if not path.exists():
-            return cls(day=_today())
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            return cls(
-                runs_today=int(raw.get("runs_today", 0)),
-                dollars_today=float(raw.get("dollars_today", 0.0)),
-                day=str(raw.get("day", _today())),
-                consecutive_no_progress=int(raw.get("consecutive_no_progress", 0)),
-                consecutive_identical_errors=int(raw.get("consecutive_identical_errors", 0)),
-                last_error_signature=raw.get("last_error_signature"),
-                breaker_open_until=raw.get("breaker_open_until"),
-                last_tick_at=raw.get("last_tick_at"),
-                synced_pr_outcomes=list(raw.get("synced_pr_outcomes", [])),
-            )
-        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
-            _logger.warning("loop-state.json corrupted at %s; initializing fresh state", path)
-            return cls(day=_today())
-
-    def persist(self, repo_root: Path) -> None:
-        path = repo_root / _LOOP_STATE_RELATIVE_PATH
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
-        tmp.replace(path)
-
-
-def _today() -> str:
-    return datetime.now(tz=UTC).date().isoformat()
-
-
-def _now_iso() -> str:
-    return datetime.now(tz=UTC).isoformat()
-
-
-# ---------------------------------------------------------------------------
-# Budget / breaker
-# ---------------------------------------------------------------------------
-
-
-def _reset_daily_counters_if_new_day(state: LoopState) -> None:
-    today = _today()
-    if state.day != today:
-        state.day = today
-        state.runs_today = 0
-        state.dollars_today = 0.0
-
-
-def budget_exhausted(state: LoopState, cfg: LoopConfig) -> bool:
-    return (
-        state.runs_today >= cfg.max_runs_per_day or state.dollars_today >= cfg.max_dollars_per_day
-    )
-
-
-def breaker_open(state: LoopState, cfg: LoopConfig) -> bool:
-    if state.breaker_open_until is None:
-        return False
-    try:
-        until = datetime.fromisoformat(state.breaker_open_until)
-    except ValueError:
-        return False
-    return datetime.now(tz=UTC) < until
-
-
-def record_tick_outcome(
-    state: LoopState, cfg: LoopConfig, *, made_progress: bool, error_signature: str | None
-) -> None:
-    if made_progress:
-        state.consecutive_no_progress = 0
-        state.consecutive_identical_errors = 0
-        state.last_error_signature = None
-        return
-
-    state.consecutive_no_progress += 1
-
-    if error_signature is not None and error_signature == state.last_error_signature:
-        state.consecutive_identical_errors += 1
-    else:
-        state.consecutive_identical_errors = 1 if error_signature is not None else 0
-    state.last_error_signature = error_signature
-
-    if (
-        state.consecutive_no_progress >= cfg.no_progress_limit
-        or state.consecutive_identical_errors >= cfg.identical_error_limit
-    ):
-        deadline = datetime.now(tz=UTC).timestamp() + cfg.cooldown_min * 60
-        state.breaker_open_until = datetime.fromtimestamp(deadline, tz=UTC).isoformat()
-
-
-def _error_signature(exc: Exception) -> str:
-    return f"{type(exc).__name__}:{exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +120,7 @@ def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, 
         auto_approve=True,
         workflow=_WORKFLOW_NAME,
         backend_override=engine,
+        max_turns=cfg.loop.max_turns,
     )
     ctx = pipeline.start(task=prompt_context, slug=_slugify(issue.title))
     try:
@@ -249,23 +156,80 @@ def _pr_body(issue: Issue, run_id: str) -> str:
     return f"Closes #{issue.number}\n\nplumb run_id: `{run_id}`"
 
 
+def _commit_all(worktree_path: Path, *, message: str) -> None:
+    """Stage and commit everything in ``worktree_path``.
+
+    Raises WorktreeError if the agent produced no changes — an empty branch
+    would make `gh pr create` fail with "No commits between main and ..."
+    much further from the cause.
+    """
+    add = subprocess.run(
+        ["git", "add", "-A"], cwd=worktree_path, capture_output=True, check=False, text=True
+    )
+    if add.returncode != 0:
+        raise WorktreeError(f"git add failed (exit {add.returncode}): {add.stderr.strip()}")
+
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=worktree_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if staged.returncode == 0:
+        raise WorktreeError(f"nothing to commit in {worktree_path}: agent produced no changes")
+
+    commit = subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=worktree_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if commit.returncode != 0:
+        raise WorktreeError(
+            f"git commit failed (exit {commit.returncode}): {commit.stderr.strip()}"
+        )
+
+
+def _cleanup_quietly(worktree: WorktreeManager, worktree_path: Path) -> None:
+    """Best-effort worktree cleanup on a failure path — never masks the original error."""
+    try:
+        worktree.cleanup(worktree_path)
+    except WorktreeError as exc:
+        _logger.warning("cleanup failed for %s: %s", worktree_path, exc)
+
+
 def run_planned_first_pass(
     issue: Issue, cfg: Config, *, repo_root: Path
 ) -> tuple[PrRef, str, float]:
     """Planned lane, first-pass-only (Decision #2): produce the TRS triad via
-    dev-docs-be, open a plan-only PR, stop. No code_gen dispatch this tick."""
+    dev-docs-be, open a plan-only PR, stop. No code_gen dispatch this tick.
+
+    Ordering mirrors the quick lane (Pipeline creates the worktree *before*
+    the isolated stage runs): create the worktree, run dev-docs-be inside it,
+    commit the triad, then deliver. Running dev-docs-be against ``repo_root``
+    and creating the worktree afterwards would write the triad into the main
+    working tree and push a branch with zero commits ahead of main.
+    """
     prompt_context = build_issue_prompt(issue)
 
     plumb = PlumbIO(real=True)
     run_id = plumb.open_run(task=prompt_context)
     ctx_slug = _slugify(issue.title)
 
-    t0 = time.monotonic()
     try:
         backend = make_backend(_engine_for_issue(issue) or cfg.default_backend)
     except UnknownBackendError as exc:
         plumb.close_run(run_id=run_id, status="failure")
         raise AbortedRunError(f"planned-lane dispatch failed: {exc}") from exc
+
+    worktree = WorktreeManager(repo_root)
+    try:
+        wt_path = worktree.create(slug=ctx_slug, run_id=run_id)
+    except WorktreeError:
+        plumb.close_run(run_id=run_id, status="failure")
+        raise
 
     argv = backend.build_argv(
         prompt=(
@@ -273,12 +237,13 @@ def run_planned_first_pass(
             f"dev/active/{ctx_slug}/. Issue:\n\n{prompt_context}"
         ),
         model=cfg.model,
-        add_dirs=[repo_root],
+        add_dirs=[wt_path],
         timeout_s=1800,
-        extra_flags={},
+        extra_flags={"max_turns": str(cfg.loop.max_turns)},
     )
+    t0 = time.monotonic()
     result_proc = subprocess.run(
-        argv, cwd=str(repo_root), capture_output=True, check=False, timeout=1800, text=True
+        argv, cwd=str(wt_path), capture_output=True, check=False, timeout=1800, text=True
     )
     latency_ms = (time.monotonic() - t0) * 1000.0
     status, output_text, error_type = backend.parse_result(
@@ -295,12 +260,18 @@ def run_planned_first_pass(
 
     if status != "success":
         plumb.close_run(run_id=run_id, status="failure")
+        _cleanup_quietly(worktree, wt_path)
         raise AbortedRunError(f"planned-lane dev-docs-be dispatch failed: {output_text}")
+
+    try:
+        _commit_all(wt_path, message=f"docs(plan): TRS triad for #{issue.number}")
+    except WorktreeError:
+        plumb.close_run(run_id=run_id, status="failure")
+        _cleanup_quietly(worktree, wt_path)
+        raise
 
     plumb.close_run(run_id=run_id, status="success")
 
-    worktree = WorktreeManager(repo_root)
-    wt_path = worktree.create(slug=ctx_slug, run_id=run_id)
     branch = f"atlas/{ctx_slug}-{run_id[:8]}"
     deliverer = GhPrDeliverer(repo_root=repo_root, worktree=worktree)
     pr_ref = queue_gh.deliver_pr(
@@ -343,9 +314,20 @@ def sync_prior_prs(repo: str, state: LoopState) -> list[queue_gh.PrStatus]:
         if run_id is not None:
             plumb = PlumbIO(real=True)
             active_run_id = plumb.reopen_run(run_id)
+            # Anchor the score to a real span. Every other record_user_signal
+            # call site passes a span_id from record_span; an empty string is a
+            # dangling foreign key into plumb's scores.span_id.
+            span_id = plumb.record_span(
+                run_id=active_run_id,
+                kind="deliver",
+                name="pr_outcome",
+                status="success" if s.outcome == "merged" else "failure",
+                latency_ms=0.0,
+                error_type=None,
+            )
             plumb.record_user_signal(
                 run_id=active_run_id,
-                span_id="",
+                span_id=span_id,
                 metric="user_signal",
                 decision=GateDecision(label=label, turn_count=1, reason=None),
             )
@@ -354,7 +336,7 @@ def sync_prior_prs(repo: str, state: LoopState) -> list[queue_gh.PrStatus]:
             )
 
         queue_gh.relabel(s.issue, state="done" if s.outcome == "merged" else "rejected")
-        state.synced_pr_outcomes.append(dedupe_key)
+        _remember_synced_outcome(state, dedupe_key)
         results.append(s)
 
     return results
@@ -425,11 +407,11 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
         state.last_tick_at = _now_iso()
         state.persist(repo_root)
         return TickResult(
-            action="dispatched",
+            action="failed",
             issue_number=issue.number,
             lane=triage_result.lane,
             pr_ref=None,
-            detail=f"failed: could not resolve gh identity: {exc}",
+            detail=f"could not resolve gh identity: {exc}",
         )
 
     queue_gh.claim(issue, assignee=assignee)
@@ -440,7 +422,7 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
         else:
             pr_ref, run_id, cost = run_planned_first_pass(issue, cfg, repo_root=repo_root)
 
-        queue_gh.comment(issue, body=_format_run_summary(run_id, pr_ref, cost))
+        queue_gh.comment(issue, body=_format_run_summary(run_id, pr_ref))
 
         record_tick_outcome(state, cfg.loop, made_progress=True, error_signature=None)
         state.runs_today += 1
@@ -465,11 +447,11 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
         state.last_tick_at = _now_iso()
         state.persist(repo_root)
         return TickResult(
-            action="dispatched",
+            action="failed",
             issue_number=issue.number,
             lane=triage_result.lane,
             pr_ref=None,
-            detail=f"failed: {exc}",
+            detail=str(exc),
         )
 
 
@@ -493,7 +475,9 @@ def _triage_issue(issue: Issue, *, plumb: PlumbIO, run_id: str) -> TriageResult:
     return triage(issue, plumb=plumb, run_id=run_id)
 
 
-def _format_run_summary(run_id: str, pr_ref: PrRef, cost: float) -> str:
+def _format_run_summary(run_id: str, pr_ref: PrRef) -> str:
+    # No cost line: per-run cost is unavailable until plumb P1-a (TRD-v3
+    # §3.6). Add one here when run_one_shot returns a real figure.
     return f"atlas loop dispatched this issue.\n\nplumb run_id: `{run_id}`\nPR: {pr_ref.url}"
 
 
@@ -503,13 +487,16 @@ def _format_run_summary(run_id: str, pr_ref: PrRef, cost: float) -> str:
 
 
 def run_forever(cfg: Config, *, repos: list[str], repo_root: Path) -> None:
+    _warn_on_unenforced_budget(cfg.loop)
     state = LoopState.load_or_init(repo_root)
     reconcile_orphans(cfg, repos=repos, repo_root=repo_root)
 
     while True:
-        if breaker_open(state, cfg.loop):
-            time.sleep(cfg.loop.poll_interval_s)
-            continue
+        # No outer breaker check: tick() handles the breaker itself (returns
+        # action="breaker_open", updates last_tick_at, persists). Short-
+        # circuiting here instead would freeze last_tick_at and log nothing,
+        # so `atlas loop status` during a cooldown would look like a dead
+        # daemon rather than one deliberately waiting.
         try:
             result: TickResult | None = tick(cfg, state, repos=repos, repo_root=repo_root)
         except Exception:
@@ -548,46 +535,63 @@ def reconcile_orphans(cfg: Config, *, repos: list[str], repo_root: Path) -> list
                 queue_gh.relabel(issue, state="ready")
                 reconciled.append(f"issue #{issue.number}")
 
-    worktrees_dir = repo_root / ".atlas" / "worktrees"
-    if worktrees_dir.is_dir():
-        active_issue_slugs = _active_issue_slugs(repos)
-        worktree_manager = WorktreeManager(repo_root)
-        for worktree_dir in worktrees_dir.glob("*"):
-            if not worktree_dir.is_dir():
-                continue
-            if _is_worktree_for_active_issue(worktree_dir, active_issue_slugs):
-                continue
-            try:
-                worktree_manager.cleanup(worktree_dir)
-                reconciled.append(f"worktree {worktree_dir.name}")
-            except WorktreeError as exc:
-                _logger.warning("cleanup failed for orphaned worktree %s: %s", worktree_dir, exc)
-
+    reconciled += _sweep_orphaned_worktrees(repo_root)
     return reconciled
 
 
-def _active_issue_slugs(repos: list[str]) -> set[str]:
-    slugs: set[str] = set()
-    for repo in repos:
-        for issue in queue_gh.list_labeled(repo, "atlas:working"):
-            slugs.add(_slugify(issue.title))
-    return slugs
+def _sweep_orphaned_worktrees(repo_root: Path) -> list[str]:
+    """Delete worktrees left behind by a crashed run, retaining the live one.
 
+    The retain-check must be exact, because this deletes directories that may
+    hold uncommitted agent work. Matching on re-slugified issue titles (the
+    previous approach) was lossy twice over: _slugify truncates to 40 chars,
+    so two similar titles collide and an orphan is retained forever; and a
+    live run whose slug didn't match would have its work deleted. The
+    run_id-keyed path recorded in .atlas/current-run is unambiguous.
+    """
+    worktrees_dir = repo_root / ".atlas" / "worktrees"
+    if not worktrees_dir.is_dir():
+        return []
 
-def _is_worktree_for_active_issue(worktree_dir: Path, active_slugs: set[str]) -> bool:
-    name = worktree_dir.name
-    return any(name.startswith(f"{slug}-") for slug in active_slugs)
+    from atlas.state import StateStore
+
+    try:
+        current = StateStore(repo_root).read_current_run_with_worktree()
+    except OSError as exc:
+        # Fail safe: without a readable state file we cannot tell which
+        # worktree is live, so sweep nothing rather than risk deleting it.
+        _logger.warning("could not read .atlas/current-run; skipping worktree sweep: %s", exc)
+        return []
+
+    live: Path | None = None
+    if current is not None and current[2] is not None:
+        live = current[2].resolve()
+
+    swept: list[str] = []
+    worktree_manager = WorktreeManager(repo_root)
+    for worktree_dir in sorted(worktrees_dir.glob("*")):
+        if not worktree_dir.is_dir():
+            continue
+        if live is not None and worktree_dir.resolve() == live:
+            continue
+        try:
+            worktree_manager.cleanup(worktree_dir)
+            swept.append(f"worktree {worktree_dir.name}")
+        except WorktreeError as exc:
+            _logger.warning("cleanup failed for orphaned worktree %s: %s", worktree_dir, exc)
+    return swept
 
 
 __all__ = [
     "AbortedRunError",
+    # Re-exported from loop_budget for backwards compatibility.
     "LoopState",
     "TickResult",
-    "budget_exhausted",
     "breaker_open",
+    "budget_exhausted",
     "build_issue_prompt",
-    "record_tick_outcome",
     "reconcile_orphans",
+    "record_tick_outcome",
     "run_forever",
     "run_one_shot",
     "run_planned_first_pass",

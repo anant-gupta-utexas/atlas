@@ -572,12 +572,18 @@ class SubprocessStageRunner:
         model: str = "haiku",
         default_backend: str = "claude",
         loaded_workflow: object = None,  # LoadedWorkflow | None; typed as object to avoid cycle
+        max_turns: int | None = None,
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
         self._model = model
         self._default_backend = default_backend
         self._workflow = loaded_workflow
+        # Per-run turn cap, passed through to the backend as --max-turns.
+        # None (the default for `atlas run`) leaves the backend's own default
+        # in place; the loop daemon sets it from cfg.loop.max_turns so an
+        # unattended run can't spin indefinitely.
+        self._max_turns = max_turns
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
         from atlas.cli_backend import UnknownBackendError, make_backend, resolve_backend
@@ -635,12 +641,16 @@ class SubprocessStageRunner:
         if ctx.worktree_path is not None:
             add_dirs.append(ctx.worktree_path)
 
+        extra_flags: dict[str, str] = {}
+        if self._max_turns is not None:
+            extra_flags["max_turns"] = str(self._max_turns)
+
         argv = backend.build_argv(
             prompt=prompt,
             model=self._model,
             add_dirs=add_dirs,
             timeout_s=timeout_s,
-            extra_flags={},
+            extra_flags=extra_flags,
         )
 
         try:

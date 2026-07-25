@@ -208,11 +208,12 @@ their risk for Codex-lane token-cost trust specifically.
 - [x] **T-L2.12** — `PrRef.number` fix (L1 code-review finding L2) + `trusted_authors` wiring checkpoint
 - [ ] **T-L2.13** — Manual smoke tests (off-CI): zero-touch delivery, planned lane, crash recovery — real GitHub repo. Cannot be run autonomously; needs a human operator session per T-L2.13's own scope (off-CI, real systems)
 - [x] **T-L2.14** — Update `STATUS.md`
+- [x] **T-L2.15** — Phase L2 code review (`/consult-experts` Code Reviewer) + fix pass. Verdict **Approve with changes**: 2 Critical, 4 Important, 5 Minor, all fixed; both architecture recommendations also applied (`loop_budget.py` split, `pipeline_factory.py` extraction). See [`loop-mode-phase-L2-code-review.md`](./loop-mode-phase-L2-code-review.md) → "Resolution (applied 2026-07-25)". Suite 400 → 424 tests.
 
 ## Exit criteria (TRD-v3 §13 items 5–8 — copied for tracking)
 
 - [ ] **§13 #5** — Zero-touch delivery (headline): one `atlas:ready` issue → `atlas loop start` → a PR appears (`Closes #n`) with a plumb `run_id` comment, zero keystrokes between labeling and reviewing; merging writes `user_signal` + closes the issue. Cost half requires plumb P1-a — L2 reports tokens, not dollars, until then.
-- [ ] **§13 #6** — Two-lane routing works: `wf:quick` → one PR; `wf:planned` → plan-only PR (triad + Pending Decisions) and the loop stops.
+- [ ] **§13 #6** — Two-lane routing works: `wf:quick` → one PR; `wf:planned` → plan-only PR (triad + Pending Decisions) and the loop stops. **Note (code review, 2026-07-25):** the planned lane could not open a PR at all before the C1 fix — `dev-docs-be` ran against `repo_root`, the worktree was created afterwards, and nothing was ever committed, so delivery pushed a branch identical to `main`. Now fixed and covered CI-side by `test_planned_lane_commits_triad_before_delivering`; the real proof still awaits T-L2.13.
 - [ ] **§13 #7** — Budgets & breaker: per-day cost/run caps halt dispatch; breaker opens on no-progress/identical-error thresholds, resumes after cooldown.
 - [ ] **§13 #8** — Crash recovery: killing the loop mid-run and restarting resets the stranded issue and prunes its worktree.
 

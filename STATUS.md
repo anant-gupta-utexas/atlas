@@ -13,12 +13,32 @@ blocked_on: "plugin_resolver.resolve() doesn't special-case RAW:-prefixed tool s
 **v2.2 is complete.** `pyproject.toml` reads `2.2.0`; `git tag v2.2` remains
 a manual maintainer action (tracked in BACKLOG.md).
 
-**Loop Mode Phase L2 (the loop daemon) is code-complete: 400 tests pass, 1
-xfail, 95.10% repo-wide coverage** (every individual module meets its own
-T-L2.11 target — `loop.py` 91%, `queue_gh.py` 92%, `triage.py` 95%,
-`config.py` 100% — the repo-wide figure sits below L1's 96% only because L2
-added ~500 new statements below the pre-L2 average; well above the CI floor
-of 80%). Completes `v3.1` (the loop daemon itself). Shipped this phase:
+**Loop Mode Phase L2 (the loop daemon) is code-complete and code-reviewed: 424
+tests pass, 1 xfail, 95.02% repo-wide coverage** (every individual module meets
+its own T-L2.11 target — `queue_gh.py` 92%, `triage.py` 95%, `config.py` 100% —
+the repo-wide figure sits below L1's 96% only because L2 added ~500 new
+statements below the pre-L2 average; well above the CI floor of 80%). Completes
+`v3.1` (the loop daemon itself).
+
+The Phase L2 code review
+([`loop-mode-phase-L2-code-review.md`](dev/active/loop-mode-phase-L2/loop-mode-phase-L2-code-review.md),
+verdict **Approve with changes**) found 2 Critical, 4 Important and 5 Minor
+issues; **all were fixed** in the same pass, along with both of its
+architecture recommendations. The Criticals are worth knowing about:
+
+- **The planned lane could not open a PR under any input.** `dev-docs-be` ran
+  against `repo_root` with the worktree created *afterwards* and nothing ever
+  committed, so delivery pushed a branch identical to `main`. Fixed by
+  mirroring the quick lane's ordering (worktree first, agent runs inside it,
+  triad committed, then deliver). Confirmed real: a pre-existing integration
+  test flipped red once the ordering was fixed, because its fake agent wrote
+  nothing to disk and nothing had checked for commits.
+- **`sync_prior_prs()` wrote `user_signal` scores with `span_id=""`** — a
+  dangling foreign key on the headline signal of the whole phase (§13 #5).
+  Now anchored to a real `record_span` id. Its dedupe list was also unbounded
+  in a file rewritten every tick; now capped at 500 entries.
+
+Shipped this phase:
 
 - `src/atlas/queue_gh.py` — the sole `gh` CLI adapter (`list_ready`/`claim`/
   `deliver_pr`/`comment`/`sync`/`relabel`/`current_user`/`find_run_id_comment`),
@@ -27,18 +47,24 @@ of 80%). Completes `v3.1` (the loop daemon itself). Shipped this phase:
 - `src/atlas/triage.py` — label-wins-else-classify two-lane router
   (`wf:quick`/`wf:planned`); both-labels-present resolves to `planned`;
   an unparseable classifier response also defaults to `planned`.
-- `src/atlas/loop.py` (630 lines) — `tick()` (the core state machine: sync →
+- `src/atlas/loop.py` (600 lines) — `tick()` (the core state machine: sync →
   breaker → budget → pull → trust-check → triage → claim → dispatch →
   comment → persist), `run_one_shot()`/`run_planned_first_pass()` (quick and
-  planned-lane dispatch), budgets + circuit breaker (`LoopState`, a new flat
-  `.atlas/loop-state.json` file), `sync_prior_prs()` (idempotent PR-outcome
+  planned-lane dispatch), `sync_prior_prs()` (idempotent PR-outcome
   scoring via `PlumbIO.reopen_run()`), `run_forever()` + `reconcile_orphans()`
   (crash recovery — an orphaned `atlas:working` issue is relabeled back to
-  `atlas:ready` and its worktree pruned on the next startup).
-- `cli.py::_make_pipeline` promoted to a shared, un-prefixed `make_pipeline()`
-  (adds `backend_override`) so `cli.py::run`/`resume` and `loop.py`'s
-  quick-lane dispatch share one construction path instead of two that could
-  drift.
+  `atlas:ready` and its worktree pruned on the next startup, keyed on
+  `.atlas/current-run`'s exact path so a live run is never swept).
+- `src/atlas/loop_budget.py` — `LoopState` (a new flat `.atlas/loop-state.json`
+  file), budgets and the circuit breaker. Split out of `loop.py` post-review so
+  the driver stays readable as L3 adds self-healing; `loop.py` re-exports the
+  public names, so `from atlas.loop import LoopState` still works.
+- `src/atlas/pipeline_factory.py` — `make_pipeline()` (was `cli.py::_make_pipeline`;
+  adds `backend_override` and `max_turns`) plus `LastOutcomeRunner`, so
+  `cli.py::run`/`resume` and `loop.py`'s quick-lane dispatch share one
+  construction path instead of two that could drift. Lives outside `cli.py` so
+  `loop.py` no longer imports the CLI entry point — that cycle previously forced
+  `cli.py`'s loop commands to import `loop` lazily inside function bodies.
 - `atlas loop run|start|stop|status|attach` — `run` calls `run_forever()` in
   the foreground (no tmux dependency); `start`/`stop`/`attach` are thin tmux
   wrappers (`tmux new -d -s atlas-loop 'atlas loop run'` /
@@ -63,7 +89,16 @@ of 80%). Completes `v3.1` (the loop daemon itself). Shipped this phase:
   (`extract_cost`) is unimplemented, so `run_one_shot()`'s `cost` is always
   `0.0` — `max_dollars_per_day` is mechanically wired and tested (the
   breaker/cooldown/runs-cap logic is correct) but never actually accumulates
-  from real runs yet; only `max_runs_per_day` has teeth today.
+  from real runs yet; only `max_runs_per_day` has teeth today. Post-review this
+  is now **surfaced at runtime instead of only in docs**: `atlas loop status`
+  prints "Dollars today: not tracked (cap $N NOT enforced — pending plumb
+  P1-a)" rather than a confident `$0.00 / $N`, and `run_forever()` logs a
+  startup WARNING when an operator has set a non-default cap. A spend control
+  that silently does nothing is worse than no control at all.
+- `cfg.loop.max_turns` was parsed and documented but never reached a backend
+  (a runaway-cost guard that did nothing); it is now threaded through
+  `make_pipeline(max_turns=...)` into both lanes. `atlas run` still leaves it
+  unset — a human is watching there.
 
 **Not yet done (off-CI, manual, real external systems):** T-L2.13 (zero-touch
 delivery, planned-lane, and crash-recovery smoke tests against the real
