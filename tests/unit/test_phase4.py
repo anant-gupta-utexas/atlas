@@ -176,6 +176,42 @@ def test_unknown_plugin_raises_routing_drift_error_before_subprocess(tmp_path: P
         mock_run.assert_not_called()
 
 
+def test_resolve_passes_raw_tool_strings_through_verbatim() -> None:
+    """RAW: strings are literal prompts from workflow YAML, not plugin names,
+    so there is no third-party command to allow-list. Regression guard for the
+    docstring/code mismatch that blocked `atlas run --workflow loop_dev`."""
+    from atlas.plugin_resolver import build_prompt, resolve
+
+    tool = "RAW:Implement the change per the acceptance criteria."
+    assert resolve(tool) == tool
+    # ...and build_prompt strips the same prefix downstream, so the round trip
+    # yields the literal prompt rather than a slash command.
+    assert build_prompt(resolve(tool), "task", "hint").startswith(
+        "Implement the change per the acceptance criteria.\n\n"
+    )
+
+
+def test_resolve_raw_tool_string_still_honors_explicit_override() -> None:
+    """The RAW: bypass must not shadow an explicit .atlas.toml override."""
+    from atlas.plugin_resolver import resolve
+
+    tool = "RAW:do the thing"
+    assert resolve(tool, overrides={tool: "custom-plugin"}) == "custom-plugin"
+
+
+def test_loop_dev_workflow_stages_all_resolve_without_overrides() -> None:
+    """Every loop_dev.yaml stage must dispatch with no [plugin_commands] block
+    in .atlas.toml — the precondition for T-L2.13's manual smoke test."""
+    from atlas.plugin_resolver import resolve
+
+    loop_dev_yaml = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "loop_dev.yaml"
+    stages = load_workflow_file(loop_dev_yaml).stages
+
+    assert [s.name for s in stages] == ["plan", "code_gen", "verify"]
+    for stage in stages:
+        resolve(stage.tool)  # must not raise RoutingDriftError
+
+
 # ---------------------------------------------------------------------------
 # T4.2 — ClickPrompter
 # ---------------------------------------------------------------------------

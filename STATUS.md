@@ -1,9 +1,9 @@
 ---
 project: atlas
-status: v2.2 shipped; loop mode Phase L2 (loop daemon) — code complete, manual off-CI verification pending (and currently blocked, see next_gate)
+status: v2.2 shipped; loop mode Phase L2 (loop daemon) — code complete, manual off-CI verification pending (unblocked 2026-07-25)
 last_updated: 2026-07-25
-next_gate: T-L2.13 (Phase L2 manual smoke) — blocked on a plugin_resolver.resolve() fix; also still open — T-L0.8/T-L0.9 (Phase L0) + T-L1.1/T-L1.8 (Phase L1)
-blocked_on: "plugin_resolver.resolve() doesn't special-case RAW:-prefixed tool strings (see Current, Phase L2 note) — atlas loop run/start raises RoutingDriftError on loop_dev.yaml without a .atlas.toml [plugin_commands] workaround; needs a maintainer decision before T-L2.13 can run for real"
+next_gate: T-L2.13 (Phase L2 manual smoke) — unblocked, needs a human operator session; also still open — T-L0.8/T-L0.9 (Phase L0) + T-L1.1/T-L1.8 (Phase L1)
+blocked_on: null
 ---
 
 # atlas — status
@@ -77,14 +77,22 @@ Shipped this phase:
   raises `DeliveryError` on a malformed `gh pr create` URL instead of a
   `PrRef(number=0, ...)` sentinel — L2 is `PrRef`'s first real consumer, so
   this is where the L1 review's flagged gap actually mattered.
-- **Real, live gap found and documented (not yet fixed)**:
-  `plugin_resolver.resolve()` does not special-case `RAW:`-prefixed tool
-  strings despite its own docstring's claim that it does — a literal dict
-  lookup, so `loop_dev.yaml`'s three stages (`RAW:` × 2, `/verify`) raise
-  `RoutingDriftError` under a real `atlas loop run` unless `.atlas.toml` has
-  a `[plugin_commands]` override for each. This is the current
-  `blocked_on` — see the top of this file. Full detail in
-  [`loop-mode-phase-L2-tasks.md`](dev/active/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md).
+- **T-L2.13's blocker found and fixed (2026-07-25)**:
+  `plugin_resolver.resolve()` did not special-case `RAW:`-prefixed tool
+  strings despite its own docstring's claim that it did — a literal dict
+  lookup, so `loop_dev.yaml`'s stages raised `RoutingDriftError` under a real
+  `atlas loop run` unless `.atlas.toml` carried a `[plugin_commands]`
+  override for each. `resolve()` now returns `RAW:` strings verbatim (they
+  are literal prompts from the workflow YAML, not plugin names, so there is
+  no third-party command to allow-list; an explicit override still wins).
+  The separate `verify` stage carried a literal `"/verify"` tool string that
+  `build_prompt` would have rendered as `//verify`; it is now the bare
+  `verify`, mapped in `PLUGIN_COMMANDS` to `DEV-ESSENTIALS:verify` like the
+  other dev-pipeline slash commands. The allow-list still rejects unknown
+  non-`RAW:` tool strings before any subprocess spawns. `loop_dev` now
+  dispatches with **no `.atlas.toml` workaround**, and
+  `test_loop_e2e.py`'s override was removed so its tests exercise the real
+  resolution path rather than passing regardless of it.
 - **Known limitation carried forward, not a regression**: cost extraction
   (`extract_cost`) is unimplemented, so `run_one_shot()`'s `cost` is always
   `0.0` — `max_dollars_per_day` is mechanically wired and tested (the
@@ -102,8 +110,9 @@ Shipped this phase:
 
 **Not yet done (off-CI, manual, real external systems):** T-L2.13 (zero-touch
 delivery, planned-lane, and crash-recovery smoke tests against the real
-GitHub repo) — blocked on the `plugin_resolver` gap above. Everything else
-in the Phase L2 TRS
+GitHub repo) — no longer blocked (see the `plugin_resolver` fix above); it
+now needs only a human operator session, since it drives real GitHub and
+spends real tokens. Everything else in the Phase L2 TRS
 ([`dev/active/loop-mode-phase-L2/`](dev/active/loop-mode-phase-L2/)) is done.
 
 ---
@@ -201,9 +210,9 @@ build history lives in git log and in
 ## Next
 
 See [`docs/1_product_and_research/BACKLOG.md`](docs/1_product_and_research/BACKLOG.md)
-for the full pending list. Immediate: resolve the `plugin_resolver.resolve()`
-gap blocking T-L2.13 (see Current, above), then run T-L2.13's manual smoke
-tests — then **Phase L3** (self-healing + routing: pre-PR plumb judge gate,
+for the full pending list. Immediate: run T-L2.13's manual smoke tests (the
+`plugin_resolver.resolve()` gap that blocked them is fixed — see Current,
+above) — then **Phase L3** (self-healing + routing: pre-PR plumb judge gate,
 diagnosis-injected single-retry, failed runs → plumb examples, score-informed
 routing). The manual off-CI checks carried by L0/L1 (T-L0.8/T-L0.9,
 T-L1.1/T-L1.8) remain open alongside L2's. Also open: tag `v2.2`, install

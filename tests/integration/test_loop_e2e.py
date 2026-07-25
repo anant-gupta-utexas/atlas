@@ -60,25 +60,15 @@ def _git_available() -> bool:
 pytestmark = pytest.mark.skipif(not _git_available(), reason="git not available")
 
 
-def _loop_dev_plugin_commands() -> dict[str, str]:
-    """loop_dev.yaml's RAW:/verify tool strings aren't in plugin_resolver's
-    PLUGIN_COMMANDS allow-list (that table is dev-pipeline-only); real `atlas
-    run --workflow loop_dev` needs a matching [plugin_commands] override in
-    .atlas.toml. Mirror that here via Config.plugin_commands so make_pipeline
-    dispatches instead of raising RoutingDriftError."""
-    from atlas.workflow_loader import load_workflow_file
-
-    loop_dev_yaml = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "loop_dev.yaml"
-    stages = load_workflow_file(loop_dev_yaml).stages
-    return {s.tool: s.tool for s in stages}
-
-
 def _cfg(repo_root: Path, **loop_kwargs: object) -> Config:
+    """No [plugin_commands] override: loop_dev.yaml's stages resolve natively —
+    its two RAW: stages bypass the allow-list in plugin_resolver.resolve(), and
+    its verify stage is in PLUGIN_COMMANDS. Passing an override here would make
+    these tests pass regardless of that, masking a regression."""
     loop_cfg = LoopConfig(repos=(_REPO,), **loop_kwargs)  # type: ignore[arg-type]
     return Config(
         repo_root=repo_root,
         plumb_db_path=repo_root / "plumb.db",
-        plugin_commands=_loop_dev_plugin_commands(),
         loop=loop_cfg,
     )
 

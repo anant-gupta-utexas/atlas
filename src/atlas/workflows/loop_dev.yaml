@@ -13,5 +13,5 @@ stages:
 
   - name: verify
     span_kind: verify
-    tool: "/verify"
+    tool: "verify"
     isolate: false

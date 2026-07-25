@@ -10,10 +10,10 @@ notes live in [`loop-mode-phase-L2-context.md`](./loop-mode-phase-L2-context.md)
 ## Current
 
 ```
-phase: code-complete — T-L2.1 through T-L2.12 and T-L2.14 done;
-       T-L2.13 blocked (needs a human operator + a maintainer fix first)
+phase: code-complete — T-L2.1 through T-L2.12, T-L2.14, T-L2.15 done;
+       T-L2.13 unblocked 2026-07-25 (needs a human operator session)
 gate:  none
-next:  T-L2.13 (manual smoke tests, off-CI — needs a human operator; blocked, see note below)
+next:  T-L2.13 (manual smoke tests, off-CI — needs a human operator)
 ```
 
 ### Resume point (2026-07-25)
@@ -99,22 +99,55 @@ pattern `cli.py` already uses for `atlas.post_commit_hook` in the `hook`
 command). `loop_start`/`loop_stop`/`loop_attach` don't need `atlas.loop` at
 all — they're pure `tmux` subprocess wrappers.
 
-**Second load-bearing note, surfaced by T-L2.10:** `loop_dev.yaml`'s three
-stage `tool` strings (`RAW:...` x2, `/verify`) are not present in
-`plugin_resolver.PLUGIN_COMMANDS` — that table is dev-pipeline-only per its
-own docstring, and despite the docstring's claim that `RAW:`-prefixed tools
-"bypass resolution entirely," `resolve()`'s actual code does a literal dict
-lookup with no such special case. A real `atlas run --workflow loop_dev` (or
-`atlas loop run`) will raise `RoutingDriftError` today unless the operator's
-`.atlas.toml` has a `[plugin_commands]` override mapping each of those three
-literal tool strings to themselves (or repo_root `.atlas.toml` equivalent).
-T-L2.10's tests reproduce this via `Config.plugin_commands` built from
-`loop_dev.yaml`'s own stage tool strings. **This is a real, live gap for
-T-L2.13's manual smoke test** — the operator will need a `.atlas.toml`
-`[plugin_commands]` block for `loop_dev`'s three stages before `atlas loop
-start` can dispatch anything, or `plugin_resolver.py`/`resolve()` needs a
-fix to actually special-case `RAW:`-prefixed tool strings as its docstring
-already claims. Flagging for a maintainer decision before T-L2.13.
+**Second load-bearing note, surfaced by T-L2.10 — RESOLVED 2026-07-25.**
+Originally: `loop_dev.yaml`'s three stage `tool` strings (`RAW:...` x2,
+`/verify`) were not present in `plugin_resolver.PLUGIN_COMMANDS` — that table
+is dev-pipeline-only per its own docstring, and despite the docstring's claim
+that `RAW:`-prefixed tools "bypass resolution entirely," `resolve()`'s actual
+code did a literal dict lookup with no such special case, so a real `atlas run
+--workflow loop_dev` (or `atlas loop run`) raised `RoutingDriftError` unless
+the operator's `.atlas.toml` carried a `[plugin_commands]` override mapping
+each literal tool string to itself.
+
+**Fix applied** (the "make `resolve()` match its docstring" branch of the two
+options, not the "ship a `.atlas.toml` block in the setup docs" branch — the
+docstring, `build_prompt`'s existing `RAW:` handling, and
+`CompositeStageRunner`'s explicit routing of `RAW:` to the default runner all
+already assumed the bypass existed; only `resolve()` disagreed, so this was a
+bug to fix rather than a design choice to document around):
+
+- `resolve()` now returns a `RAW:`-prefixed tool string verbatim instead of
+  raising. Rationale: the text after `RAW:` is a literal prompt authored in
+  the workflow YAML, not a plugin or slash-command name — there is no
+  third-party command to validate, so the allow-list has nothing to protect
+  against here. An explicit `overrides` entry still wins, so a repo can
+  redirect a `RAW:` stage via `.atlas.toml` if it wants to.
+- The allow-list's actual security property is unchanged: unknown
+  *non*-`RAW:` tool strings still raise `RoutingDriftError` before any
+  subprocess spawns (`test_unknown_plugin_raises_routing_drift_error_before_subprocess`
+  still passes untouched).
+- Separately, the `verify` stage's tool string was the literal `"/verify"`,
+  which `build_prompt` would have rendered as `//verify` (it prepends the
+  slash itself). Changed the YAML to the bare `verify` and added
+  `"verify": "DEV-ESSENTIALS:verify"` to `PLUGIN_COMMANDS`, matching how
+  `code-review` and the other namespaced dev-pipeline commands already work.
+  This was a second, latent bug that the `RoutingDriftError` was masking —
+  fixing only the `RAW:` half would have produced a malformed prompt at the
+  verify stage during T-L2.13 instead of a clean error.
+- T-L2.10's `_loop_dev_plugin_commands()` workaround in `test_loop_e2e.py`
+  was **removed**, not kept: with `resolve()` fixed, leaving the override in
+  would make those tests pass regardless of the resolution path and mask any
+  regression. `_cfg()` now passes no `plugin_commands` at all.
+- Three new regression tests in `test_phase4.py`: `RAW:` pass-through (incl.
+  the `resolve` → `build_prompt` round trip), `RAW:` still honoring an
+  explicit override, and every `loop_dev.yaml` stage resolving with no
+  overrides — the last being the literal precondition for T-L2.13.
+- `test_workflow_loader.py::test_loop_dev_tool_strings_are_raw_or_slash`
+  renamed to `..._raw_or_plugin_command` and updated for the bare `verify`.
+
+Suite 424 → 427 passed, 1 xfailed. `ruff check`/`ruff format --check`/
+`mypy --strict src` all clean. **T-L2.13 is no longer blocked** — it now
+needs only a human operator session (real GitHub, real tokens).
 
 T-L2.12 is also done. Both halves:
 
@@ -174,13 +207,13 @@ duplicating information rather than adding it), and front-matter
 as the actual blocker rather than leaving it implicit in prose. "Next" now
 names **Phase L3** per T-L2.14's acceptance criteria.
 
-Only T-L2.13 remains — manual smoke tests, off-CI, needs a human operator,
-and **blocked**: see the "Second load-bearing note" above
-(`plugin_resolver.resolve()` doesn't special-case `RAW:`-prefixed tool
-strings, so `atlas loop run`/`atlas loop start` will raise `RoutingDriftError`
-on `loop_dev.yaml`'s stages today without a `.atlas.toml` `[plugin_commands]`
-workaround). This needs a maintainer decision before T-L2.13 can proceed for
-real — every other task in this TRS is done.
+Only T-L2.13 remains — manual smoke tests, off-CI, needs a human operator.
+It is **no longer blocked**: the `plugin_resolver.resolve()` gap was fixed
+2026-07-25 (see the "Second load-bearing note" above), and `loop_dev`'s three
+stages now dispatch with no `.atlas.toml` workaround. What remains is
+irreducibly manual — it drives the real GitHub repo and spends real tokens,
+so it can't run autonomously or in CI. See the operator runbook at the bottom
+of this file.
 
 ## Status — no blocking dependency
 
@@ -206,7 +239,7 @@ their risk for Codex-lane token-cost trust specifically.
 - [x] **T-L2.10** — Integration tests: full-tick + zero-touch smoke (faked `gh`/`Pipeline`)
 - [x] **T-L2.11** — Lint/type/coverage gate
 - [x] **T-L2.12** — `PrRef.number` fix (L1 code-review finding L2) + `trusted_authors` wiring checkpoint
-- [ ] **T-L2.13** — Manual smoke tests (off-CI): zero-touch delivery, planned lane, crash recovery — real GitHub repo. Cannot be run autonomously; needs a human operator session per T-L2.13's own scope (off-CI, real systems)
+- [ ] **T-L2.13** — Manual smoke tests (off-CI): zero-touch delivery, planned lane, crash recovery — real GitHub repo. Cannot be run autonomously; needs a human operator session per T-L2.13's own scope (off-CI, real systems). **Prerequisite `plugin_resolver` fix landed 2026-07-25 — now runnable; see the operator runbook at the bottom of this file**
 - [x] **T-L2.14** — Update `STATUS.md`
 - [x] **T-L2.15** — Phase L2 code review (`/consult-experts` Code Reviewer) + fix pass. Verdict **Approve with changes**: 2 Critical, 4 Important, 5 Minor, all fixed; both architecture recommendations also applied (`loop_budget.py` split, `pipeline_factory.py` extraction). See [`loop-mode-phase-L2-code-review.md`](./loop-mode-phase-L2-code-review.md) → "Resolution (applied 2026-07-25)". Suite 400 → 424 tests.
 
@@ -276,10 +309,11 @@ requiring maintainer sign-off" callout in the plan for the five most consequenti
 
 ## Implementation notes (post-hoc — fill in after work is done)
 
-**Session checkpoint 2026-07-25** — T-L2.1 through T-L2.12 and T-L2.14
-code-complete and tested (400 passed, 1 xfailed, up from L0/L1's 301/1
-baseline). Only T-L2.13 remains, and it's blocked — see the Resume point
-above and the Known gaps section below.
+**Session checkpoint 2026-07-25** — T-L2.1 through T-L2.12, T-L2.14 and
+T-L2.15 code-complete and tested (427 passed, 1 xfailed, up from L0/L1's
+301/1 baseline). Only T-L2.13 remains; its `plugin_resolver` blocker was
+fixed in a later session the same day, so it is now runnable by a human
+operator — see the Resume point above and the runbook at the bottom.
 
 ### What landed, by task
 
@@ -454,13 +488,13 @@ made. Flagging them here per the TRS's own "don't silently drift" norm:
   or the §13 #7 budget exit criterion are *fully* proven, as opposed to
   "the breaker/runs-cap mechanism is proven, dollar-cap is not yet
   exercised end-to-end."
-- **`plugin_resolver.resolve()` doesn't special-case `RAW:`-prefixed tool
-  strings despite its own docstring's claim** — see the "Second load-bearing
-  note" under Resume point above. Blocks T-L2.13 until fixed one of two
-  ways (special-case `RAW:` in `resolve()`, or ship a `.atlas.toml`
-  `[plugin_commands]` block for `loop_dev.yaml`'s three stages as part of
-  the loop's setup docs/install). Needs a maintainer decision — flagged,
-  not fixed, since it's outside every T-L2.x task's stated scope.
+- ~~**`plugin_resolver.resolve()` doesn't special-case `RAW:`-prefixed tool
+  strings despite its own docstring's claim**~~ — **FIXED 2026-07-25.**
+  `resolve()` now passes `RAW:` strings through verbatim, and `loop_dev.yaml`'s
+  `verify` stage uses the bare `verify` tool string mapped in
+  `PLUGIN_COMMANDS` (the literal `"/verify"` would have rendered as
+  `//verify`). Full detail in the "Second load-bearing note" under Resume
+  point above. This was T-L2.13's blocker; T-L2.13 is now runnable.
 - **`loop.py:421-427`'s `current_gh_user()`-raises-`GhCliError` branch inside
   `tick()` is untested** — see the T-L2.11 coverage note above. Small,
   well-scoped gap for whoever next touches `test_loop.py`.
@@ -469,11 +503,84 @@ made. Flagging them here per the TRS's own "don't silently drift" norm:
   individual module, including all new L2 modules, meets its own target)
   rather than a quality regression, and well above the actual CI floor
   (`fail_under = 80`).
-- **T-L2.13 (manual smoke, needs a human, and has a known blocker — see
-  above)** is the only remaining task in this TRS.
-- Full test count at this checkpoint: **400 passed, 1 xfailed** (new files:
+- **T-L2.13 (manual smoke, needs a human operator)** is the only remaining
+  task in this TRS. Its blocker is fixed; see the runbook below.
+- Full test count at the original checkpoint: **400 passed, 1 xfailed** (new files:
   `test_queue_gh.py` 25, `test_triage.py` 9, `test_loop.py` 42,
   `test_cli_loop.py` 12, `test_loop_e2e.py` 5, plus 6 new `[loop]`-config
   tests added to `test_config.py` and 1 new test added to
   `test_deliverer.py` — 100 new tests total over the L0/L1 baseline of
   301/1).
+
+## T-L2.13 operator runbook (written 2026-07-25, after unblocking)
+
+Everything below needs a human: it drives the real GitHub repo, spends real
+tokens, and opens real PRs. Nothing here can run in CI or autonomously.
+
+### Step 0 — prerequisite config (do not skip)
+
+**There is currently no `.atlas.toml` in this repo and no `~/.atlas/config.toml`,
+so `cfg.loop.repos` is empty — the loop would start cleanly, poll nothing, and
+look "broken" for a non-obvious reason.** Create `.atlas.toml` at the repo root
+first:
+
+```toml
+[loop]
+repos = ["anant-gupta-utexas/atlas"]
+poll_interval_s = 60
+max_runs_per_day = 3      # keep low for a smoke test
+max_dollars_per_day = 5.0 # NOTE: currently inert — see the cost-extraction gap
+max_turns = 40
+```
+
+You do **not** need a `[plugin_commands]` block anymore — that was the
+workaround for the now-fixed `resolve()` bug. If you find yourself adding one
+to make `loop_dev` dispatch, something has regressed; run
+`test_loop_dev_workflow_stages_all_resolve_without_overrides` first.
+
+`trusted_authors` is intentionally omitted: it's fail-open (an empty tuple
+disables the check, per `_pull_next_ready`), so leaving it unset lets your own
+issues through. Set it only if you want to exercise the trust filter itself.
+
+The nine `atlas:*` / `wf:*` / `engine:*` labels already exist on the real repo
+(created permanently during T-L2.1) — no label setup needed.
+
+### Step 1 — zero-touch smoke (§13 #5)
+
+1. Open a real issue on the configured repo; label it `atlas:ready` + `wf:quick`.
+   Keep the task genuinely small — this commits and pushes real code.
+2. `atlas loop start`, then `atlas loop attach` to watch (or `atlas loop run`
+   in the foreground, which is easier to debug on a first run).
+3. Expect, with **zero further keystrokes**: label flips to `atlas:working`,
+   a PR appears whose body contains `Closes #n`, and a comment lands on the
+   issue carrying `plumb run_id: \`<id>\``.
+4. Merge the PR. On the next tick, confirm `sync_prior_prs()` writes a
+   `user_signal` score and closes the issue (label → `atlas:done`).
+
+### Step 2 — planned lane (§13 #6)
+
+Open a second issue labeled `atlas:ready` + `wf:planned`. Expect a **plan-only**
+PR (triad + Pending Decisions) and the loop to **stop** rather than continuing
+into `code_gen`. Verify the PR's branch actually carries committed triad files —
+this is exactly what the code review's C1 fix addressed, and T-L2.13 is its
+first real-systems proof.
+
+### Step 3 — crash recovery (§13 #8)
+
+While a run is mid-dispatch, kill the daemon hard (`atlas loop stop`, or
+`kill -9` the tmux pane for a more honest crash). Restart with
+`atlas loop start`. Confirm `reconcile_orphans()` relabels the stranded issue
+back to `atlas:ready` and prunes its orphaned worktree.
+
+### Step 4 — record findings
+
+Fold anything surprising into `loop-mode-phase-L2-context.md` and/or
+`BACKLOG.md`, tick the §13 exit-criteria boxes above, and flip T-L2.13's
+checkbox. Two known gaps will *not* be disproven by this run and should not be
+mistaken for smoke-test failures:
+
+- **`max_dollars_per_day` is inert** (cost extraction unimplemented) — the
+  runs-cap is what actually has teeth today. `atlas loop status` says so at
+  runtime.
+- **Codex-lane token costs aren't trustworthy** until L1's T-L1.1 closes
+  (Decision #1).

@@ -12,8 +12,9 @@ the workflow YAML's ``tool`` field (i.e. ``StageSpec.tool`` itself, already the
 primary source — there's no separate lookup for it) > ``PLUGIN_COMMANDS``.
 ``PLUGIN_COMMANDS`` below is the **dev-pipeline-only** fallback table; non-dev
 workflows are expected to either use a ``RAW:``-prefixed ``tool`` string
-(bypassing resolution entirely) or supply a ``.atlas.toml`` override — a tool
-string absent from both raises ``RoutingDriftError``.
+(bypassing resolution entirely — see ``resolve``) or supply a ``.atlas.toml``
+override — a non-``RAW:`` tool string absent from both raises
+``RoutingDriftError``.
 """
 
 from __future__ import annotations
@@ -37,6 +38,10 @@ PLUGIN_COMMANDS: dict[str, str] = {
     "code-gen-agent": "RAW:Implement the following task by writing and committing code:",
     # code-review is a DEV-ESSENTIALS plugin command (namespaced)
     "code-review": "DEV-ESSENTIALS:code-review",
+    # verify is a DEV-ESSENTIALS plugin command (namespaced); loop_dev.yaml's
+    # verify stage resolves through here rather than carrying a literal
+    # "/verify" tool string, which build_prompt would render as "//verify".
+    "verify": "DEV-ESSENTIALS:verify",
 }
 
 
@@ -47,10 +52,19 @@ def resolve(tool: str, *, overrides: dict[str, str] | None = None) -> str:
     Checks the optional *overrides* dict first (from .atlas.toml), then
     falls back to ``PLUGIN_COMMANDS``.  Raises ``RoutingDriftError`` if
     the tool is not in either mapping.
+
+    ``RAW:``-prefixed tool strings bypass the allow-list and are returned
+    verbatim: the text after ``RAW:`` is a literal prompt written in the
+    workflow YAML, not a plugin or slash-command name, so there is no
+    third-party command to validate — ``build_prompt`` consumes the same
+    ``RAW:`` prefix downstream.  An explicit ``overrides`` entry still wins,
+    so a repo can redirect a RAW: stage via ``.atlas.toml`` if it needs to.
     """
     mapping = dict(PLUGIN_COMMANDS)
     if overrides:
         mapping.update(overrides)
+    if tool.startswith("RAW:") and tool not in mapping:
+        return tool
     if tool not in mapping:
         raise RoutingDriftError(
             f"Tool {tool!r} is not in the plugin allow-list. "

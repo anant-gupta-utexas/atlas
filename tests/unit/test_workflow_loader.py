@@ -395,12 +395,15 @@ def test_loop_dev_default_backend_is_claude() -> None:
     assert loaded.default_backend == "claude"
 
 
-def test_loop_dev_tool_strings_are_raw_or_slash() -> None:
+def test_loop_dev_tool_strings_are_raw_or_plugin_command() -> None:
     loaded = load_workflow_file(_LOOP_DEV_YAML_PATH)
     by_name = {s.name: s for s in loaded.stages}
     assert by_name["plan"].tool.startswith("RAW:")
     assert by_name["code_gen"].tool.startswith("RAW:")
-    assert by_name["verify"].tool == "/verify"
+    # Bare "verify", not "/verify": plugin_resolver maps it to the namespaced
+    # plugin command and build_prompt adds the leading slash, so a literal
+    # "/verify" here would render as "//verify".
+    assert by_name["verify"].tool == "verify"
 
 
 # ---------------------------------------------------------------------------
