@@ -38,6 +38,7 @@ from atlas.loop_budget import remember_synced_outcome as _remember_synced_outcom
 from atlas.loop_budget import warn_on_unenforced_budget as _warn_on_unenforced_budget
 from atlas.orchestrator import AbortedError, GateDecision, RunResult
 from atlas.pipeline_factory import make_pipeline
+from atlas.plugin_resolver import build_prompt, resolve
 from atlas.plumb_io import PlumbIO
 from atlas.queue_gh import GhCliError, Issue
 from atlas.triage import TriageResult, triage
@@ -335,9 +336,17 @@ def run_planned_first_pass(
         raise
 
     argv = backend.build_argv(
-        prompt=(
-            f"/dev-docs-be Detail this GitHub issue into a TRS triad under "
-            f"dev/active/{ctx_slug}/. Issue:\n\n{prompt_context}"
+        # Resolved, not hardcoded. `/dev-docs-be` is not a real slash command
+        # — plugin_resolver maps the bare tool name to
+        # `DEV-ESSENTIALS:dev-docs-be`, and the quick lane has always gone
+        # through that mapping. This lane hardcoded the unresolved name, so
+        # the agent received an unknown command, wrote no triad, and still
+        # exited 0 (T-L2.13, 2026-07-27).
+        prompt=build_prompt(
+            resolve("dev-docs-be", overrides=cfg.plugin_commands),
+            f"Detail this GitHub issue into a TRS triad under "
+            f"dev/active/{ctx_slug}/. Issue:\n\n{prompt_context}",
+            f"Working directory: {wt_path}",
         ),
         # cfg.model is a Claude model name and is not portable across engines
         # (`codex exec --model haiku` is an HTTP 400) — see resolve_model.

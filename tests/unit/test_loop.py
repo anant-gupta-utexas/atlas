@@ -1098,3 +1098,19 @@ def test_startup_reconcile_prunes_the_worktree_current_run_still_names(tmp_path:
     assert not wt.exists()
     assert any("stranded" in item for item in reconciled)
     assert not (repo / ".atlas" / "current-run").exists()
+
+
+def test_planned_lane_resolves_the_dev_docs_be_command(tmp_path: Path) -> None:
+    """`/dev-docs-be` is not a real slash command.
+
+    plugin_resolver maps the bare tool name to `DEV-ESSENTIALS:dev-docs-be`;
+    the quick lane has always gone through that mapping, but the planned lane
+    hardcoded the unresolved name. The agent got an unknown command, wrote no
+    triad, and still exited 0 — so the run "succeeded" and delivered nothing
+    (T-L2.13, 2026-07-27).
+    """
+    from atlas.plugin_resolver import build_prompt, resolve
+
+    prompt = build_prompt(resolve("dev-docs-be"), "task", "hint")
+    assert prompt.startswith("/DEV-ESSENTIALS:dev-docs-be ")
+    assert not prompt.startswith("/dev-docs-be ")
