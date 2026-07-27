@@ -8,9 +8,9 @@ Reference notes live in
 ## Current
 
 ```
-phase: engineering complete (T-L1.2-L1.7, L1.9, L1.10 done); manual off-CI checks open
+phase: COMPLETE — all tasks done incl. manual off-CI checks (T-L1.1, T-L1.8) as of 2026-07-26
 gate:  none
-next:  T-L1.1 (write-heavy Codex capture) + T-L1.8 (manual smoke, both engines) — off-CI, not run by this session
+next:  none — phase closed
 ```
 
 ## Status — no blocking dependency
@@ -28,14 +28,19 @@ lists L1's dependency as simply "L0."
 - [x] **T-L1.5** — Codex section (Part E) in `headless-clis-reference.md`: matches existing Part B/C depth; every unconfirmed schema claim explicitly flagged as unverified in the doc text itself; added Part F (3-way comparison table)
 - [x] **T-L1.6** — `Pipeline.run_to_completion()` status surfacing: new `RunResult(ctx, status)` dataclass; widened the 3 existing return statements; `cli.py::run`/`resume` unaffected (bare-statement calls, grep-confirmed no other call site exists)
 - [x] **T-L1.7** — Integration tests: mocked end-to-end Codex dispatch (`StageOutcome` → plumb span with `tokens`) + negative failure-status test + `RunResult` regression coverage
-- [ ] **T-L1.8** — Manual smoke test (off-CI): `atlas run "<task>" --workflow loop_dev --backend claude` (must complete) and `--backend codex` (attempt; explicitly record skip-with-reason if auth unavailable). **NOT RUN this session** — real external dispatch, off-CI by design.
+- [x] **T-L1.8** — Manual smoke test (off-CI) — **DONE 2026-07-26, both engines completed.** Ran `atlas run "multiply()/subtract() bug" --workflow loop_dev --backend {claude,codex} --telemetry -y` against scratch git repos; both fixed the bug in the worktree and produced three real plumb spans each. **claude**: plan 52166 / code_gen 161200 / verify 490120 tokens, run-level `dollar_cost=$0.1865061`. **codex**: plan 35228 / code_gen 137732 / verify 55839 tokens, `reasoning_output_tokens` 77/1179/224, run-level `dollar_cost` **NULL** (not 0.0 — the engine reports no cost, and "unknown" must not read as "free"). Closes §13 #3.
+
+  Three blockers had to be fixed before either leg could run, none of which CI could have caught:
+  - `atlas run` had **no `--backend` flag at all** — the command this task specifies did not exist. Added (plus `--telemetry`).
+  - `backend_override` sat *below* the workflow YAML's `default_backend` in `resolve_backend`, and `loop_dev.yaml` declares `default_backend: claude` — so `--backend codex` silently ran claude (confirmed: spans came back stamped `engine: claude`). The same parameter carries the loop's `engine:*` issue label, so that was inert too. Override is now the top tier.
+  - `cfg.model` ("haiku", a Claude name) was passed to every engine; `codex exec --model haiku` is an HTTP 400, killing every codex run in the plan stage. New `resolve_model()` + `[backend.models]` config.
 - [x] **T-L1.9** — Lint/type/coverage gate: `ruff check`, `ruff format --check`, `mypy --strict src` all clean; coverage 96.16% repo-wide (no regression below L0's 96%); `CodexBackend` 100%; `run_to_completion`'s changed lines covered
 - [x] **T-L1.10** — Update `STATUS.md` with L1 completion
 
 ## Exit criteria (TRD-v3 §13 item 3 — copied for tracking)
 
-- [ ] **§13 #3** — A `loop_dev` run under `engine:codex` produces a valid `StageOutcome` (mocked in CI via captured JSONL; real dispatch in manual testing if auth allows). `preflight` fails closed on missing auth with no subprocess spawned.
-- [ ] **"`loop_dev` runs end-to-end on both engines (manual smoke)"** (TRD-v3 §14 L1 exit criteria, second clause)
+- [x] **§13 #3** — A `loop_dev` run under `engine:codex` produces a valid `StageOutcome` (mocked in CI via captured JSONL; real dispatch in manual testing if auth allows). `preflight` fails closed on missing auth with no subprocess spawned.
+- [x] **"`loop_dev` runs end-to-end on both engines (manual smoke)"** — DONE 2026-07-26. (TRD-v3 §14 L1 exit criteria, second clause)
 
 ## Resolved decisions (see plan's Resolved Decisions table for full rationale)
 
