@@ -1,8 +1,8 @@
 ---
 title: atlas loop mode — design note (autonomous, minimal-input development loop)
-status: design note — feeds TRD-v2 + system_design
+status: design note — fed TRD-v3 + system_design; corrected in place post-L2
 created: 2026-07-21
-last_reviewed: 2026-07-21
+last_reviewed: 2026-07-27
 tags: [loop, orchestrator, github-issues, claude-code, codex, worktree, plumb, autonomy]
 ---
 
@@ -19,14 +19,23 @@ detailed into its own per-phase TRS via the standard Tech-Lead workflow.
 > [`system_design.md`](../2_architecture/system_design.md) (component
 > architecture) are the authoritative homes — this note fed them.
 >
-> **⚠ Frozen research artifact (2026-07-21). Do not read it as current
-> behavior.** Phases L0–L2 shipped on 2026-07-27 and several assumptions in
-> this note turned out wrong under live execution — most notably backend
-> resolution (now 5-tier, with an explicit override on top), plumb's
-> writability (`runs.dollar_cost` is written today via v1.1's `set_usage()`),
-> and Codex's token semantics (`cached_input_tokens` is a subset, not an
-> addend). See TRD-v3's **"Where reality diverged from this contract"** table
-> for the full list. Where this note and TRD-v3 disagree, TRD-v3 wins.
+> **⚠ Research artifact, corrected in place (2026-07-27). Do not read it as
+> current behavior.** Phases L0–L2 shipped on 2026-07-27 and several
+> assumptions here turned out wrong under live execution. Rather than rewrite
+> the note — which would erase the fact that the assumption was ever made, and
+> that is the useful part of a design note — each wrong claim is kept in place
+> and annotated inline with a **⚡ Turned out:** correction. Seven wrong claims,
+> in six annotations: §2 (backend tiers; plumb writability), §5 L0 (the Claude
+> envelope), §5 L1 (the Codex `result` event *and* engine-label injection —
+> one annotation, two claims), §5 L2 (the dollar cap), and §7 (the tier count).
+>
+> The load-bearing lesson: the two claims that cost the most were the ones
+> phrased as *already true* — "plumb's `runs` table already carries
+> `dollar_cost`" and "per-run engine selection already resolves…". Both were
+> true of the schema and false of the code path, and neither was checked
+> against a live run until T-L0.8/T-L2.13. See TRD-v3's **"Where reality
+> diverged from this contract"** table for the same list from the contract's
+> side. Where this note and TRD-v3 disagree, TRD-v3 wins.
 
 ---
 
@@ -58,6 +67,14 @@ atlas is at v2.2. The following are built and tested, and the loop reuses them:
   default → `.atlas.toml [backend]` → hard default `claude`). The prior phase's
   own notes name a third backend (e.g. `codex`) as the explicit extension point:
   a one-file change to `cli_backend.py`, zero changes elsewhere by construction.
+  > **⚡ Turned out:** the resolver is **5-tier** as of L2 — an explicit
+  > override (CLI `--backend`, or a loop issue's `engine:*` label) sits *above*
+  > the per-stage pin. The 4-tier order described here is exactly what broke
+  > engine-label injection: `loop_dev.yaml` sets `default_backend: claude`, and
+  > under this ordering that quietly outranked the label, so `engine:codex`
+  > issues ran on Claude and reported success. The "zero changes elsewhere"
+  > prediction held for adding `CodexBackend` itself, but not for *selecting*
+  > it.
 - **`WorktreeManager`** (`worktree.py`) — one git worktree per run under
   `.atlas/worktrees/`, branch `atlas/<slug>-<shortid>` off `main`; `create()` is
   wired for `isolate` stages. (`merge_back()`/`cleanup()` exist but have no
@@ -66,6 +83,15 @@ atlas is at v2.2. The following are built and tested, and the loop reuses them:
   runs via `parent_run_id`, gate rejection → `examples` row. plumb's `runs` table
   already carries `tokens_in`/`tokens_out`/`dollar_cost`; judge scoring exists
   (`plumb judge run`).
+  > **⚡ Turned out:** "already carries" was true of the *schema* and false of
+  > the *write path*. In plumb v1.0.1 those three columns existed but were
+  > unreachable from the online `with run()` API — `finalize_run` set none of
+  > them and `RunHandle` exposed no setter — so L0 could write per-span tokens
+  > and nothing else. This is the single assumption that cascaded furthest: it
+  > is why `max_dollars_per_day` shipped inert through all of L2. Closed by
+  > **plumb v1.1's `RunHandle.set_usage()`** (adopted 2026-07-27), which also
+  > made `spans.tokens_in`/`tokens_out` durable — the in/out split used to be
+  > summed away on write.
 - **Compaction-safe run state** — `tasks.md` + `.atlas/current-run` (`state.py`).
 
 ### What's missing (what loop mode adds)
@@ -175,6 +201,18 @@ No loop yet.*
   JSON — same shape. **Guard behind a per-run flag** so attended `dev` runs keep
   human-readable stdout (the byte-identity gate-parity constraint still holds for
   attended mode).
+  > **⚡ Turned out:** three corrections. (1) `claude -p --output-format json`
+  > emits a **JSON array** of stream events terminated by a `type: "result"`
+  > element, not the single object `--help` implies; the shipped
+  > `startswith("{")` sniff therefore routed every real envelope into the
+  > plain-text branch. (2) Anthropic's token fields are **disjoint** — billed
+  > input is `input_tokens + cache_creation_input_tokens +
+  > cache_read_input_tokens`; reading `input_tokens` alone recorded a real
+  > 159,896-token span as **50 tokens**. (3) "Thread these into plumb" was
+  > blocked on the `dollar_cost` writability gap above, and the guard flag
+  > became `atlas run --telemetry`, deliberately *separable* from the
+  > `acceptEdits` permission mode so measuring an attended run does not
+  > silently widen its permissions.
 - Headless permission profile (loop runs only): **not** `--bare` (the pipeline
   needs plugin/skill discovery), but `--permission-mode acceptEdits` + a curated
   `--allowedTools` allowlist (stored in the target repo's `.claude/settings.json`)
@@ -194,6 +232,17 @@ No loop yet.*
   error (mirroring `AntigravityBackend.preflight`). Register in `_KNOWN_BACKENDS`
   / `make_backend()`. Per-run engine selection already resolves stage → workflow
   → toml → default; the loop injects the backend from an `engine:*` label.
+  > **⚡ Turned out:** `codex-cli 0.144.4` emits **no `result` event at all**
+  > (verified against a real captured stream, 2026-07-24). There is no status
+  > field and no cost field; status is **exit-code-only**, and output text
+  > arrives on separate `item.completed` events. Following this paragraph
+  > literally produces a backend that parses nothing. Also: `cached_input_tokens`
+  > is a **subset** of `input_tokens`, not an addend (settled by a cold/warm
+  > capture pair in T-L1.1) — atlas had it backwards and inflated every Codex
+  > span's input by ~70–90%. And "already resolves … the loop injects the
+  > backend from an `engine:*` label" was the false-because-of-tier-order claim:
+  > see §2's ⚡ note. `--model` is engine-specific too — `codex exec --model
+  > haiku` is an HTTP 400, which is why `[backend.models]` now exists.
 - `loop_dev.yaml` (`workflows/`): an ungated `plan → code_gen(isolate) → verify`
   workflow, distinct from the 7-gate attended `dev.yaml`.
 - Add a codex section to `headless-clis-reference.md`.
@@ -214,6 +263,16 @@ No loop yet.*
   `max_dollars_per_day` (checked against summed `total_cost_usd`), `max_turns`,
   breaker thresholds (`no_progress_limit=3`, `identical_error_limit=5`,
   `cooldown_min=30`), `concurrency=1`.
+  > **⚡ Turned out:** `max_dollars_per_day` shipped **inert** through all of
+  > L2 — there was no `total_cost_usd` to sum, because of the plumb
+  > writability gap in §2. The mechanism (breaker, cooldown, caps) was correct
+  > and tested; only the input was missing, which is the failure mode worth
+  > naming: a spend control that silently does nothing is worse than no spend
+  > control, because it is trusted. It is live as of 2026-07-27 and
+  > `atlas loop status` reports real accumulated spend. One honest caveat
+  > remains: the **Codex CLI reports no cost at all**, so a Codex-only day
+  > advances `max_runs_per_day` but not `max_dollars_per_day` — on that lane
+  > the runs cap is the load-bearing bound, not the backstop.
 - CLI (`cli.py`, Typer): `atlas loop run` (foreground, for debugging) · `start`
   (`tmux new -d -s atlas-loop 'atlas loop run'`) · `stop` · `status` (budgets
   used, last tick, in-flight issue) · `attach` (`tmux attach -t atlas-loop`).
@@ -248,7 +307,7 @@ No loop yet.*
 |---|---|
 | Worktree isolation / cleanup | `WorktreeManager.create()` / `cleanup()` (`worktree.py`) |
 | Engine abstraction + registration | `CliBackend` protocol + `_KNOWN_BACKENDS` (`cli_backend.py`) |
-| Backend/workflow selection | 4-tier resolver + workflow loader (already label-ready) |
+| Backend/workflow selection | 4-tier resolver + workflow loader (already label-ready) — **⚡ 5-tier as of L2, and it was *not* label-ready; see §2** |
 | Deferred gate | `gate_is_async` path in `Pipeline.step()` (`orchestrator.py`) |
 | Measurement / child runs / examples | `PlumbIO` (`plumb_io.py`); `plumb.run(parent_run_id=…)`; `plumb judge run` |
 | Compaction-safe run state | `StateStore` + `tasks.md` (`state.py`) |
