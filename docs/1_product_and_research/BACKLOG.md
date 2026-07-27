@@ -17,21 +17,49 @@ Grouped by theme, not by origin doc. Each item notes where it came from.
 
 ## Release / process
 
-- [ ] Tag `v2.2` in git — all v2.2 acceptance criteria are met (per `STATUS.md`).
-      `pyproject.toml` now reads `2.2.0` (Phase L0, T-L0.2); the tag itself
-      stays a manual maintainer action.
+- [ ] **Re-enable CI triggers.** `.github/workflows/ci.yml` is
+      `workflow_dispatch`-only on both `origin/main` (`dd299d8`) and the
+      loop-mode branch, so no job runs on push or PR. Restoring
+      `on: [push, pull_request]` is a one-line decision, deferred to the
+      maintainer. *(found 2026-07-27)*
+
+- [ ] **`origin/main` is ~45 commits behind the local loop-mode work.**
+      `origin/main` sits at the pre-Phase-2 commit `bc4a6aa` plus two small
+      commits; every Phase 2 / Phase 3 / L0 / L1 / L2 commit exists only on
+      the local branch, now proposed as PR #6 (47 commits). Two consequences
+      worth knowing before merging: the loop daemon bases its worktrees on
+      **local `main`**, so the T-L2.13 smoke PRs were cut against that stale
+      base; and the `LIB: ` YAML bug (from `53359e4`) is likewise absent from
+      `origin/main`, which is why GitHub only started reporting "Invalid
+      workflow file" once the branch was pushed. *(found 2026-07-27)*
+
+- [ ] Tag `v2.2` in git — **created locally 2026-07-27** at `bc4a6aa`
+      (annotated). **Not pushed** — run `git push origin v2.2` to publish.
+      `pyproject.toml` reads `2.2.0` (Phase L0, T-L0.2).
 - [ ] Consider CI-automated release tagging (create/push `git tag vX.Y` on
       merge to `main` when `pyproject.toml`'s version changes), instead of the
       current manual-tag process. Not built in Phase L0 — flagged as a future
       convenience, not a requirement. *(from Phase L0 TRS, T-L0.2)*
 - [ ] Install plumb as a versioned dependency instead of a local path
       dependency, to unlock durable span/score writes outside the author's
-      machine. *(from STATUS.md v1.1 backlog)*
+      machine. *(from STATUS.md v1.1 backlog)* — **Blocked on plumb-side
+      release work, checked 2026-07-27:** plumb is not published to any
+      index, and its git tags stop at `v1.0.1` even though its
+      `pyproject.toml` reads `1.1.0`. So the two candidate forms are both
+      unavailable today: PyPI (`plumb==1.1.0`) needs a publish, and a git-ref
+      pin (`plumb @ git+https://…@v1.1.0`) needs that tag to exist. **Tag
+      plumb v1.1.0 first** — that is the actual next action, and it belongs
+      in the plumb repo, not here. Note the swap also costs the editable
+      install that makes local atlas+plumb co-development work, so it wants a
+      dev-extra escape hatch.
 - [ ] Add the `CONTENT_PIPELINE_TOKEN` repo secret so CI's `test-job-extra`
       leg actually exercises the real `LIB:` adapter-import path
       (`tests/integration/test_job_adapters_real_import.py`). Currently
       self-skips silently without it. *(from `.github/workflows/ci.yml`,
-      `docs/4_testing/index.md`)*
+      `docs/4_testing/index.md`)* — **Maintainer-only:** needs a PAT with
+      `repo` scope on `anant-gupta-utexas/content-pipeline`, created by hand
+      and added via repo Settings → Secrets. Note this leg is currently moot
+      anyway — see the CI-triggers item below.
 
 ## Loop mode (v3) — planning locked, not yet built
 
@@ -41,16 +69,16 @@ Autonomous, minimal-input development loop on top of the v2 engine. Design note:
 [`../2_architecture/system_design.md`](../2_architecture/system_design.md#loop-mode-v3).
 Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
 
-- [ ] **Phase L0 — honest baseline** *(→ v3.0)*. Version reconcile + tag `v2.2`;
+- [x] **Phase L0 — honest baseline** *(→ v3.0)* — **DONE 2026-07-27**, incl. T-L0.8/T-L0.9. Version reconcile + tag `v2.2`;
       first-ever live attended `atlas run` on the real `claude` backend;
       `ClaudeCodeBackend` loop-mode JSON telemetry (cost/tokens → plumb);
       headless permission profile; `Deliverer`/`GhPrDeliverer` (push branch +
       `gh pr create` + `cleanup()`, retiring the dead `merge_back()` path).
-- [ ] **Phase L1 — CodexBackend + `loop_dev.yaml`** *(→ v3.0)*. `codex exec
+- [x] **Phase L1 — CodexBackend + `loop_dev.yaml`** *(→ v3.0)* — **DONE 2026-07-27**, incl. T-L1.1/T-L1.8. `codex exec
       --json` backend registered in `_KNOWN_BACKENDS`; ungated loop workflow
       (`plan → code_gen → verify`); Codex section added to
       `headless-clis-reference.md`.
-- [ ] **Phase L2 — the loop daemon** *(→ v3.1)*. `queue_gh.py` (GitHub Issues
+- [x] **Phase L2 — the loop daemon** *(→ v3.1)* — **DONE 2026-07-27**, incl. T-L2.13. TRD-v3 §13 #1-#8 all proven live. `queue_gh.py` (GitHub Issues
       adapter) + `loop.py` (tick / run_forever / reconcile_orphans + two-lane
       triage + budgets + circuit breaker); `[loop]` config; `atlas loop
       run|start|stop|status|attach` (tmux for observability only).
@@ -118,89 +146,27 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
 
 ## Manual verification pending
 
-- [ ] **T3.8 — Antigravity (`agy`) manual smoke test.** Not yet attempted;
-      requires the `agy` binary installed and a working `GEMINI_API_KEY` /
-      `GOOGLE_API_KEY`. `agy` dispatch is otherwise only exercised in CI via
+- [ ] **T3.8 — Antigravity (`agy`) manual smoke test.** Still open. Checked
+      2026-07-27: the `agy` binary **is** installed (`~/.local/bin/agy`), so
+      the only blocker left is credentials — neither `GEMINI_API_KEY` nor
+      `GOOGLE_API_KEY` is set in the environment. Export one and the smoke is
+      a single `atlas run --backend agy` away (`--backend` now exists, added
+      2026-07-27). Until then `AntigravityBackend.preflight()` fails closed
+      with no subprocess spawned, which is itself the tested behavior. `agy` dispatch is otherwise only exercised in CI via
       mocked subprocess calls. *(from STATUS.md, yaml_workflow_engine.md
       Phase 3 notes)*
 
 ## plumb-side ideas (not required for current atlas scope)
 
-- [ ] **plumb P1-a — `RunHandle.set_usage()` + `finalize_run` cost threading.**
-      Confirmed (2026-07-21): `runs.dollar_cost` / `runs.tokens_in` /
-      `runs.tokens_out` exist in plumb v1.0.1's schema but are **not
-      writable** from the online `with run()` path — `finalize_run`
-      (`plumb/storage_sqlite.py:431`) sets none of them, and `RunHandle`
-      exposes no cost/usage setter. atlas's Phase L0 writes per-span
-      `tokens=(in, out)` via the confirmed `add_span(tokens=...)` path
-      (`plumb/api.py:264`) but cannot write run-level `dollar_cost` or a
-      token roll-up until plumb adds a `set_usage`-style setter and threads it
-      through `finalize_run`. Blocks atlas's L2 exit criterion (cost-per-
-      landed-PR) and `max_dollars_per_day` budget enforcement (TRD-v3 §12).
-      *(from Phase L0 TRS, T-L0.5, plumb spike resolved 2026-07-21)*
-      **⚠ Amended 2026-07-24 (Phase L1 Codex verification) — P1-a's stated
-      premise is now falsified.** plumb's `atlas-unblock-v1.1-scope.md`
-      justifies an explicit `set_usage` setter over auto-derivation because it
-      *"matches how backends report a single authoritative `total_cost_usd`"*.
-      Verified against `codex-cli 0.144.4`: **Codex emits no cost field at
-      all** (terminal `turn.completed` carries only `usage`). So atlas has one
-      backend that can supply a dollar figure and one that structurally cannot
-      — ever, not pending anything. Two consequences for plumb to resolve
-      **before the v1.1 TRS is cut**: (a) `plumb run stats` sums
-      `runs.dollar_cost`, so with mixed-engine runs that total silently
-      represents an unknown *subset* of spend while presenting as complete —
-      decide whether to report coverage alongside the sum, add a
-      `cost_source` discriminator, or document the caveat; (b) re-open D-a1
-      (explicit vs auto-sum) — the "dollars have no other source" argument
-      doesn't apply to *tokens*, which every backend reports, so
-      auto-deriving `runs.tokens_*` from spans is more attractive than when
-      the doc was written. **atlas's position: plumb should NOT compute cost
-      from tokens** — that turns a recorder into a calculator with a silent
-      staleness failure mode. Worth recording as an explicit plumb non-goal.
-      *(see the ready-to-use prompt in this entry's sibling below)*
-- [ ] **Send plumb the L1 Codex findings before v1.1's migration freezes.**
-      Two time-sensitive items for the plumb session: (1) the P1-a premise
-      correction above; (2) **`spans.attributes` (P1-b) sign-off** — plumb's
-      own scope doc flags it as *"proposal needing sign-off"* that must ride
-      the v1.1 `user_version` 1→2 migration **or wait a full release**. atlas
-      L2/L3 wants per-span `engine` / `lane` / `issue` / `attempt_n` /
-      `failure_mode`, and L1 adds a new need: **neither CLI's token breakdown
-      fits a two-column `tokens_in`/`tokens_out` split without loss** (Claude:
-      `input`/`output`/`cache_creation`/`cache_read`; Codex:
-      `input`/`cached_input`/`output`/`reasoning_output`), so `attributes` is
-      the only durable home for the breakdown while `tokens_in/out` carry
-      billable totals. If the migration ships without it, this waits a whole
-      release. *(Phase L1, 2026-07-24)*
-      **UPDATE 2026-07-25 — item (2) is DONE: `spans.attributes` shipped in
-      plumb v1.1.0** (`ALTER TABLE spans ADD COLUMN attributes TEXT`, schema
-      v2 migration) and atlas now writes it: `PlumbIO.record_span()` takes an
-      `attributes` kwarg, and `cli_backend.codex_usage_attributes()` supplies
-      the raw Codex breakdown + reduction-rule stamp (closes L1 code review
-      finding M1). **Item (1), the P1-a premise correction, is still open** —
-      run-level `dollar_cost`/token roll-up remains unwritable from the online
-      path. The `engine`/`lane`/`issue`/`attempt_n`/`failure_mode` attributes
-      L2/L3 want are now unblocked but not yet written.
-- [ ] **`runs.workflow` provenance column.** Today "which workflow produced
-      this run" is only recoverable via `task_id` prefix convention
-      (`job.<slug>` vs `dev.<slug>`). A first-class `runs.workflow TEXT`
-      column would make cross-workflow analysis queries first-class instead
-      of string-prefix parsing. Only worth it if cross-workflow analysis
-      becomes a headline use case — this bumps plumb's `SCHEMA_VERSION`.
-      *(extracted from archived `yaml-driven-workflows-analysis.md` §4.4)*
-- [ ] **`spans.attributes` JSON column (plumb-side proposal).** Would give
-      per-workflow context (`{workflow, stage, gate}`) a durable structured
-      home, potentially subsuming both the metric-namespacing convention and
-      the `runs.workflow` column above. Proposed in plumb's own
-      `deferred-features.md` / `phase-2-prioritization.md` (2026-06-07) —
-      not an atlas-owned decision, but worth tracking here since it would
-      change how atlas namespaces metrics if it lands. *(extracted from
-      archived `yaml-driven-workflows-analysis.md` §7.3)*
-- [ ] **Widen plumb's `spans.kind` CHECK constraint.** Only if a real
-      workflow genuinely cannot express a stage as one of the existing six
-      kinds (`llm`, `tool`, `subagent`, `handoff`, `plan`, `verify`) — so far
-      every shipped workflow (`dev`, `job`, `job_cli`) fits within the six.
-      Treat as unlikely to be needed; the loader-side validation approach has
-      held. *(extracted from archived `yaml-driven-workflows-analysis.md` §4.2)*
+- [x] **DONE (plumb v1.1.0, adopted by atlas 2026-07-27) — plumb P1-a
+      `RunHandle.set_usage()`.** plumb shipped `set_usage(tokens_in,
+      tokens_out, dollar_cost)` plus split `spans.tokens_in`/`tokens_out`
+      columns. atlas now writes run-level `dollar_cost` via
+      `PlumbIO.set_usage()` and leaves the token fields unset so plumb
+      auto-fills them from buffered spans. This is what made
+      `max_dollars_per_day` a real budget rather than a documented intention
+      — `atlas loop status` reports actual spend. Verified live:
+      `$2.5822 / $5.00` across two loop runs.
 
 ## Workflow engine — not yet built
 

@@ -111,7 +111,7 @@ jobs:
         if: steps.gate.outputs.have_token == 'true'
         run: uv sync --extra dev --extra job
 
-      - name: Run suite with job extra (real LIB: adapter import path)
+      - name: "Run suite with job extra (real LIB: adapter import path)"
         if: steps.gate.outputs.have_token == 'true'
         run: uv run pytest --cov=src/atlas --cov-fail-under=80 -v
 
