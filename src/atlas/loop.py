@@ -634,7 +634,7 @@ def _format_run_summary(run_id: str, pr_ref: PrRef) -> str:
 def run_forever(cfg: Config, *, repos: list[str], repo_root: Path) -> None:
     _warn_on_unenforced_budget(cfg.loop, engine=cfg.default_backend)
     state = LoopState.load_or_init(repo_root)
-    reconcile_orphans(cfg, repos=repos, repo_root=repo_root)
+    reconcile_orphans(cfg, repos=repos, repo_root=repo_root, at_startup=True)
 
     while True:
         # No outer breaker check: tick() handles the breaker itself (returns
@@ -669,7 +669,20 @@ def _log_tick(result: TickResult | None) -> None:
     )
 
 
-def reconcile_orphans(cfg: Config, *, repos: list[str], repo_root: Path) -> list[str]:
+def reconcile_orphans(
+    cfg: Config, *, repos: list[str], repo_root: Path, at_startup: bool = False
+) -> list[str]:
+    """Reclaim issues and worktrees stranded by a crashed run.
+
+    ``at_startup`` marks the daemon-boot call, where ``.atlas/current-run``
+    is **by definition stale**: concurrency is frozen at 1 until Phase L4, so
+    no run can be in flight before the daemon's first tick. Without it, a
+    hard crash (``kill -9``) leaves that file naming the dead run's worktree,
+    and ``_sweep_orphaned_worktrees`` retains precisely the orphan it exists
+    to prune — observed live in T-L2.13's crash drill on 2026-07-27, where
+    the issue was correctly relabeled back to ``atlas:ready`` but its
+    worktree survived every restart.
+    """
     reconciled: list[str] = []
     for repo in repos:
         working_issues = queue_gh.list_labeled(repo, "atlas:working")
@@ -685,12 +698,25 @@ def reconcile_orphans(cfg: Config, *, repos: list[str], repo_root: Path) -> list
                 queue_gh.relabel(issue, state="ready")
                 reconciled.append(f"issue #{issue.number}")
 
-    reconciled += _sweep_orphaned_worktrees(repo_root)
+    reconciled += _sweep_orphaned_worktrees(repo_root, ignore_current_run=at_startup)
+    if at_startup:
+        # The pointer is stale by construction here; leaving it would also
+        # make `atlas resume` offer to resume a run that no longer exists.
+        from atlas.state import StateStore
+
+        try:
+            StateStore(repo_root).delete_current_run()
+        except OSError as exc:
+            _logger.warning("could not clear stale .atlas/current-run: %s", exc)
     return reconciled
 
 
-def _sweep_orphaned_worktrees(repo_root: Path) -> list[str]:
+def _sweep_orphaned_worktrees(repo_root: Path, *, ignore_current_run: bool = False) -> list[str]:
     """Delete worktrees left behind by a crashed run, retaining the live one.
+
+    ``ignore_current_run`` disables the retain-check entirely. Callers pass it
+    at daemon startup, where the pointer cannot describe a live run — see
+    ``reconcile_orphans``.
 
     The retain-check must be exact, because this deletes directories that may
     hold uncommitted agent work. Matching on re-slugified issue titles (the
@@ -714,7 +740,7 @@ def _sweep_orphaned_worktrees(repo_root: Path) -> list[str]:
         return []
 
     live: Path | None = None
-    if current is not None and current[2] is not None:
+    if not ignore_current_run and current is not None and current[2] is not None:
         live = current[2].resolve()
 
     swept: list[str] = []

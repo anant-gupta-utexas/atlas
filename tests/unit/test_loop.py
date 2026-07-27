@@ -1062,3 +1062,39 @@ def test_assert_main_checkout_untouched_passes_when_head_unmoved(tmp_path: Path)
 def test_assert_main_checkout_untouched_is_a_noop_without_a_baseline(tmp_path: Path) -> None:
     """A repo whose HEAD couldn't be read must not block delivery."""
     loop._assert_main_checkout_untouched(tmp_path, None)
+
+
+def test_startup_reconcile_prunes_the_worktree_current_run_still_names(tmp_path: Path) -> None:
+    """After kill -9, .atlas/current-run names the DEAD run's worktree.
+
+    _sweep_orphaned_worktrees treats that path as live and retains it — so
+    the sweep skipped precisely the orphan it exists to prune. Observed in
+    T-L2.13's crash drill: the issue was correctly relabeled back to
+    atlas:ready, but the worktree survived every restart.
+
+    Concurrency is frozen at 1 until Phase L4, so at daemon startup no run
+    can be in flight and the pointer is stale by construction.
+    """
+    from atlas.state import StateStore
+    from atlas.worktree import WorktreeManager
+
+    repo = _init_git_repo(tmp_path / "r")
+    wt = WorktreeManager(repo).create(slug="stranded", run_id="dead0000deadbeef")
+    StateStore(repo).write_current_run("dead0000deadbeef", "stranded", wt)
+    assert wt.exists()
+
+    cfg = _cfg(repo)
+    with (
+        patch("atlas.queue_gh.list_labeled", return_value=[]),
+        patch("atlas.queue_gh.sync", return_value=[]),
+    ):
+        # Mid-run semantics: the pointer is honored, the worktree retained.
+        loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo)
+        assert wt.exists(), "a live run's worktree must never be swept"
+
+        # Startup semantics: the pointer is stale, so the orphan goes.
+        reconciled = loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo, at_startup=True)
+
+    assert not wt.exists()
+    assert any("stranded" in item for item in reconciled)
+    assert not (repo / ".atlas" / "current-run").exists()
