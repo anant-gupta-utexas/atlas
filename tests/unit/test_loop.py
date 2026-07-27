@@ -1020,3 +1020,45 @@ def test_commit_all_sweeps_uncommitted_agent_work(tmp_path: Path) -> None:
 
     loop._commit_all(repo, message="atlas: sweep", require_changes=False)
     loop._assert_branch_has_commits(repo)  # swept up, now ahead of main
+
+
+def test_assert_main_checkout_untouched_detects_agent_commit(tmp_path: Path) -> None:
+    """The most serious T-L2.13 finding, now loud instead of silent.
+
+    On 2026-07-27 the unattended agent committed
+    `fix(config): add .atlas.toml to .gitignore` directly onto the operator's
+    checked-out feature branch, outside its worktree, while leaving the
+    worktree's own copy uncommitted. The worktree is a directory boundary,
+    not a sandbox — the agent is handed `--add-dir repo_root` so it can read
+    tasks.md, and nothing physically stops it writing there.
+    """
+    import subprocess as sp
+
+    from atlas.worktree import WorktreeError
+
+    repo = _init_git_repo(tmp_path / "r")
+    before = loop._head_sha(repo)
+
+    # Simulate the agent committing into the primary checkout.
+    (repo / "seed.txt").write_text("agent wrote here\n")
+    sp.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    sp.run(["git", "commit", "-m", "agent escape"], cwd=repo, capture_output=True, check=True)
+
+    with pytest.raises(WorktreeError, match="committed into the primary checkout"):
+        loop._assert_main_checkout_untouched(repo, before)
+
+
+def test_assert_main_checkout_untouched_passes_when_head_unmoved(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path / "r")
+    before = loop._head_sha(repo)
+    # Uncommitted noise in the primary checkout is not an escape — only a
+    # moved HEAD is. Being stricter would false-positive on every operator
+    # who has edits in flight while the daemon runs.
+    (repo / "seed.txt").write_text("operator edit\n")
+
+    loop._assert_main_checkout_untouched(repo, before)  # must not raise
+
+
+def test_assert_main_checkout_untouched_is_a_noop_without_a_baseline(tmp_path: Path) -> None:
+    """A repo whose HEAD couldn't be read must not block delivery."""
+    loop._assert_main_checkout_untouched(tmp_path, None)

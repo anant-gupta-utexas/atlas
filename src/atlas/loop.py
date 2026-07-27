@@ -113,6 +113,9 @@ def current_gh_user() -> str:
 def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, str, float]:
     engine = _engine_for_issue(issue)
     prompt_context = build_issue_prompt(issue)
+    # Pinned before dispatch so a post-run comparison can catch an agent that
+    # committed into the operator's checkout instead of its worktree.
+    repo_head_before = _head_sha(repo_root)
 
     pipeline, recorder = make_pipeline(
         repo_root,
@@ -143,6 +146,7 @@ def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, 
     # guarantee — sweep up anything the agent left uncommitted, then verify
     # the branch is actually ahead of main before delivering. Without both
     # steps a "successful" run silently delivers nothing (T-L2.13).
+    _assert_main_checkout_untouched(repo_root, repo_head_before)
     _commit_all(
         result.ctx.worktree_path,
         message=f"atlas: {issue.title} (#{issue.number})",
@@ -247,6 +251,48 @@ def _assert_branch_has_commits(worktree_path: Path, *, base_branch: str = "main"
         )
 
 
+def _head_sha(repo_path: Path) -> str | None:
+    """Current HEAD sha, or None if it can't be read (never raises)."""
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _assert_main_checkout_untouched(repo_root: Path, before_sha: str | None) -> None:
+    """Fail if the unattended agent committed into the operator's own checkout.
+
+    The worktree is a *directory* boundary, not a filesystem sandbox (TRD-v3
+    §3.6) — the agent is handed ``--add-dir repo_root`` so it can read
+    ``dev/active/<slug>/tasks.md``, and nothing physically stops it writing
+    there instead.
+
+    On 2026-07-27 that stopped being theoretical: during T-L2.13's first live
+    zero-touch run, the agent committed ``fix(config): add .atlas.toml to
+    .gitignore`` straight onto the operator's checked-out feature branch while
+    leaving the worktree's copy uncommitted. An unattended daemon silently
+    rewriting the branch a human has checked out is the single worst failure
+    mode available to this design, and it produced no warning at all.
+
+    This does not *prevent* the escape (only a real sandbox could), but it
+    converts a silent corruption into a loud, attributable failure the
+    operator sees on the very next tick.
+    """
+    if before_sha is None:
+        return
+    after_sha = _head_sha(repo_root)
+    if after_sha is not None and after_sha != before_sha:
+        raise WorktreeError(
+            f"agent committed into the primary checkout at {repo_root} "
+            f"(HEAD moved {before_sha[:8]} -> {after_sha[:8]}); it should only "
+            "write inside its worktree. Inspect and reset that commit before rerunning."
+        )
+
+
 def _cleanup_quietly(worktree: WorktreeManager, worktree_path: Path) -> None:
     """Best-effort worktree cleanup on a failure path — never masks the original error."""
     try:
@@ -272,6 +318,7 @@ def run_planned_first_pass(
     plumb = PlumbIO(real=True)
     run_id = plumb.open_run(task=prompt_context)
     ctx_slug = _slugify(issue.title)
+    repo_head_before = _head_sha(repo_root)
 
     engine = _engine_for_issue(issue) or cfg.default_backend
     try:
@@ -343,6 +390,7 @@ def run_planned_first_pass(
         # dev-docs-be ever commits its own triad, an empty index means
         # "nothing left over", not "the agent did nothing". The
         # ahead-of-main assertion below is the real guard either way.
+        _assert_main_checkout_untouched(repo_root, repo_head_before)
         _commit_all(
             wt_path,
             message=f"docs(plan): TRS triad for #{issue.number}",
