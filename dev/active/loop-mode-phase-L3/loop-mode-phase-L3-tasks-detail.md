@@ -11,35 +11,50 @@ nesting. Progress checkboxes live in `loop-mode-phase-L3-tasks.md`.
 ### T-L3.1 — Resolve or formally scope the `plugin_resolver` `RAW:` blocker
 
 **[Task Name]** Resolve `plugin_resolver.resolve()`'s missing `RAW:` special-case
-[Effort: S]
+[Effort: S] — **DONE (closed early, 2026-07-25, commit `48ee363`)**
 
-- **Description**: STATUS.md's `blocked_on` names this as unresolved: `resolve()`
-  does a literal dict lookup and doesn't special-case `RAW:`-prefixed tool strings
-  despite its own docstring's claim that it does, so `loop_dev.yaml`'s `plan` and
-  `code_gen` stages raise `RoutingDriftError` under a real `atlas loop run`. This
-  is a **precondition for every other task in this TRS that touches a live run**
-  (T-L3.10) and for L2's own still-open T-L2.13. Pick one of the two fixes
-  STATUS.md names: (a) special-case `RAW:` inside `resolve()` itself, or (b) ship
-  a documented `.atlas.toml [plugin_commands]` block covering `loop_dev.yaml`'s
-  three stages as part of loop-mode setup docs. See
-  [Pending Decision #1](./loop-mode-phase-L3-decisions.md#1-how-to-resolve-the-plugin_resolver-raw-blocker-t-l31--before-l3s-manual-checks-or-in-parallel-with-l3s-code-tasks)
-  for the tradeoff.
+> **Closed before L3 started.** This task was written while the blocker was open;
+> it was fixed during the L2 session that unblocked T-L2.13, since the same
+> one-line gap blocked both phases. Pending Decision #1 resolved as **Option A**
+> (fix `resolve()`), which was already its recommended option. No L3 work
+> remains here — kept for provenance rather than deleted. **T-L3.10 no longer
+> depends on this task**, only on `PLUMB_JUDGE_PROVIDER` being configured.
+
+- **Description**: `resolve()` did a literal dict lookup and didn't special-case
+  `RAW:`-prefixed tool strings despite its own docstring's claim that it did, so
+  `loop_dev.yaml`'s `plan` and `code_gen` stages raised `RoutingDriftError` under
+  a real `atlas loop run`. This was a **precondition for every other task in this
+  TRS that touches a live run** (T-L3.10) and for L2's T-L2.13.
+- **Resolution**: Option A. `resolve()` now returns `RAW:` strings verbatim — the
+  text after `RAW:` is a literal prompt authored in the workflow YAML, not a
+  plugin name, so there is no third-party command to allow-list. The allow-list's
+  security property is unchanged: unknown *non*-`RAW:` tool strings still raise
+  before any subprocess spawns. An explicit `.atlas.toml` override still wins.
+  A second, latent bug surfaced once the first was fixed: the `verify` stage
+  carried a literal `"/verify"` tool string, which `build_prompt` would have
+  rendered as `//verify` (it prepends the slash itself) — now the bare `verify`,
+  mapped in `PLUGIN_COMMANDS` to `DEV-ESSENTIALS:verify`. Fixing only the `RAW:`
+  half would have turned a clean error into a malformed prompt found mid-smoke.
 - **Acceptance Criteria**:
-    - [ ] `loop_dev.yaml`'s three stages (`plan`, `code_gen`, `verify`) resolve
-      without `RoutingDriftError` under a real (or faithfully-mocked)
-      `plugin_resolver.resolve()` call, proven by a new unit test.
-    - [ ] The chosen fix is documented in `docs/3_guides/yaml_workflow_engine.md`
-      (tool-string conventions section) so a future `RAW:`-based workflow doesn't
-      hit the same gap silently.
-    - [ ] STATUS.md's `blocked_on` field is cleared or updated to reflect the new
-      state.
-- **Files to Create/Modify**:
-    - `src/atlas/plugin_resolver.py` — special-case fix (if option (a) chosen)
-    - `.atlas.toml` — `[plugin_commands]` entries (if option (b) chosen)
-    - `docs/3_guides/yaml_workflow_engine.md` — document the resolution
-    - `tests/unit/test_plugin_resolver.py` — regression test
-- **Dependencies**: None (first task; blocks T-L3.10)
-- **Testing Requirements**: Unit
+    - [x] `loop_dev.yaml`'s three stages (`plan`, `code_gen`, `verify`) resolve
+      without `RoutingDriftError` — pinned by
+      `test_loop_dev_workflow_stages_all_resolve_without_overrides`.
+    - [x] The fix is documented in `docs/3_guides/yaml_workflow_engine.md`
+      (tool-string conventions section), including the no-leading-slash pitfall.
+    - [x] STATUS.md's `blocked_on` is now `null`.
+- **Files Modified** (actual):
+    - `src/atlas/plugin_resolver.py` — `RAW:` pass-through + `verify` mapping
+    - `src/atlas/workflows/loop_dev.yaml` — `"/verify"` → `"verify"`
+    - `docs/3_guides/yaml_workflow_engine.md` — documented both conventions
+    - `tests/unit/test_phase4.py` — 3 regression tests (co-located with the
+      existing T4.3 allow-list test rather than a new
+      `tests/unit/test_plugin_resolver.py`, so the bypass and the allow-list
+      rejection it must not weaken sit side by side)
+    - `tests/integration/test_loop_e2e.py` — removed the now-obsolete
+      `[plugin_commands]` workaround so those tests exercise the real path
+    - `tests/unit/test_workflow_loader.py` — updated for the bare `verify`
+- **Dependencies**: None
+- **Testing Requirements**: Unit — 427 passed, 1 xfailed; ruff + `mypy --strict src` clean
 
 ---
 

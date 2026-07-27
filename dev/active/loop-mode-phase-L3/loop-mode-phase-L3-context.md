@@ -4,6 +4,10 @@ Reference notes for anyone picking up this work cold.
 
 ## Status at TRS authoring time (2026-07-25)
 
+> ⚠️ **Snapshot, not current state.** The `plugin_resolver` blocker described
+> below was fixed later the same day (commit `48ee363`) — see the update at the
+> end of this section before acting on anything here.
+
 Per `STATUS.md`: v2.2 shipped; Loop Mode Phases L0, L1, and L2 are all
 **code-complete**. L2 (the loop daemon itself) passed code review (2 Critical + 4
 Important findings, all fixed in the same pass). **L2's own manual exit check,
@@ -21,6 +25,20 @@ pipeline, same as L2's own tests do), but **no manual/live proof of Phase L3's
 exit criteria is possible until T-L3.1 resolves the `plugin_resolver` gap.**
 T-L3.1 is therefore the first task in this TRS's execution order specifically to
 unblock T-L3.10 (and, as a side effect, L2's own still-open T-L2.13).
+
+> **Update 2026-07-25 (after authoring): the blocker above is FIXED — commit
+> `48ee363`.** It was resolved during the L2 session that unblocked T-L2.13,
+> because the same one-line gap blocked both phases and there was no reason to
+> hold the fix for L3 to begin. Pending Decision #1 resolved as Option A;
+> T-L3.1 is closed; **T-L3.10 no longer depends on it** (only on
+> `PLUMB_JUDGE_PROVIDER` being configured, plus T-L3.7/T-L3.8). `resolve()` now
+> returns `RAW:` strings verbatim, and `loop_dev.yaml`'s `verify` stage uses the
+> bare `verify` tool string rather than the literal `"/verify"` that
+> `build_prompt` would have rendered as `//verify`. The paragraphs above are
+> preserved as the authoring-time snapshot; read them as history, not current
+> state. L2's T-L2.13 is likewise unblocked and now needs only a human operator
+> — a runbook lives at the bottom of
+> [`loop-mode-phase-L2-tasks.md`](../loop-mode-phase-L2/loop-mode-phase-L2-tasks.md).
 
 **The user's framing for this request** — "previous phases have been
 implemented but manual testing remains across phases" — is accurate and is
@@ -42,7 +60,8 @@ open manual checks" section.
   before the PR... threshold (default 0.7)" language this TRS's design
   implements literally.
 - [`STATUS.md`](../../../STATUS.md) — **read the full Phase L2 entry.** The
-  `plugin_resolver` blocker, the cost-extraction (`extract_cost`) known
+  `plugin_resolver` blocker (now fixed — see the update above), the
+  cost-extraction (`extract_cost`) known
   limitation, and the exact shipped module list (`loop.py`, `loop_budget.py`,
   `pipeline_factory.py`, `triage.py`, `queue_gh.py`) this TRS builds on top of
   are all documented there, not re-derived here.
@@ -107,12 +126,10 @@ open manual checks" section.
   failure branch is rewired to call `self_heal.handle_failure` instead of
   leaving the issue `atlas:working` with no forward progress (T-L3.7); new
   `JudgeGateFailedError` exception class.
-- `src/atlas/plugin_resolver.py` — possible `RAW:` special-case fix (T-L3.1,
-  if Pending Decision #1's Option A is chosen).
-- `.atlas.toml` — possible `[plugin_commands]` workaround entries (T-L3.1, if
-  Option B is chosen instead).
-- `docs/3_guides/yaml_workflow_engine.md` — document whichever T-L3.1 fix was
-  chosen.
+- ~~`src/atlas/plugin_resolver.py` — possible `RAW:` special-case fix~~ —
+  **done 2026-07-25 (Option A, commit `48ee363`)**; no L3 change needed. The
+  `.atlas.toml [plugin_commands]` workaround (Option B) was not taken and is
+  not needed. `docs/3_guides/yaml_workflow_engine.md` documents the result.
 - `docs/1_product_and_research/BACKLOG.md` — Router v1 entry (T-L3.9).
 - `tests/unit/test_loop.py`, `tests/integration/test_loop_e2e.py` — new cases
   for the judge gate and retry paths.

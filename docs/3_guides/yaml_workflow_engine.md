@@ -151,6 +151,8 @@ tool: dev-docs-be
 
 Dispatched by `SubprocessStageRunner` → `plugin_resolver.resolve()` → `claude -p /<tool> <task>`. These are the tool strings the dev workflow uses. `PLUGIN_COMMANDS` in `plugin_resolver.py` provides fallback mappings; per-stage overrides come from `.atlas.toml [plugin_commands]`.
 
+**Write the tool string without a leading slash.** `build_prompt()` adds the `/` itself, so a `tool: "/verify"` renders as `//verify` and the command silently fails to match. Use `tool: verify` and let `PLUGIN_COMMANDS` map it to its namespaced form (`DEV-ESSENTIALS:verify`). A tool string in this form that is absent from both `PLUGIN_COMMANDS` and `.atlas.toml [plugin_commands]` raises `RoutingDriftError` before any subprocess spawns — that allow-list check is a deliberate security boundary, not an inconvenience to route around.
+
 ### `RAW:` — inline prompt to claude (or configured backend)
 
 ```yaml
@@ -160,6 +162,10 @@ tool: "RAW:Draft a tailored CV and cover letter for each shortlisted role."
 The string after `RAW:` is passed as the prompt directly to the configured backend (`claude -p` or `agy -p`). No plugin resolution. The `RAW:` prefix is stripped; the remaining text plus the task description becomes the full prompt.
 
 This convention is for judgment/drafting stages that do not map to a named plugin command.
+
+`plugin_resolver.resolve()` returns `RAW:` strings verbatim rather than looking them up: the text after `RAW:` is a literal prompt authored in the YAML, not a plugin or slash-command name, so there is no third-party command to validate against the allow-list. **A `RAW:` stage therefore needs no `PLUGIN_COMMANDS` entry and no `.atlas.toml [plugin_commands]` block.** An explicit `[plugin_commands]` override still wins if a repo deliberately redirects a `RAW:` stage.
+
+> Fixed 2026-07-25. `resolve()` previously did a plain dict lookup with no `RAW:` special case despite documenting this bypass, so every `RAW:` stage raised `RoutingDriftError` under a real run unless `.atlas.toml` mapped each literal prompt string to itself. This blocked `atlas loop run` on `loop_dev.yaml` (Phase L2 T-L2.13) and affected `job.yaml`/`job_cli.yaml` equally. Regression tests live in `tests/unit/test_phase4.py`.
 
 ### `LIB:` — in-process Python adapter
 

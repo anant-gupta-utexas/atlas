@@ -10,6 +10,29 @@ optional reading — several of these change which files T-L3.1/T-L3.3 touch.
 
 ## 1. How to resolve the `plugin_resolver` `RAW:` blocker (T-L3.1) — before L3's manual checks, or in parallel with L3's code tasks?
 
+> **RESOLVED 2026-07-25 — Option A, implemented in commit `48ee363`.** Fixed
+> during the L2 session that unblocked T-L2.13, since the one gap blocked both
+> phases; there was no reason to hold a one-line fix for L3 to start. T-L3.1 is
+> closed and T-L3.10 no longer depends on it. Everything below is the original
+> framing, kept as the record of what was weighed.
+>
+> **What was actually built:** `resolve()` returns `RAW:` strings verbatim —
+> the text after `RAW:` is a literal prompt authored in the YAML, not a plugin
+> name, so there is no third-party command to allow-list. Option A's named
+> downside (touching a shared module) was addressed as it anticipated: three
+> regression tests in `test_phase4.py`, sited next to the existing T4.3
+> allow-list test, pinning that unknown *non*-`RAW:` tool strings still raise
+> before any subprocess spawns. Documented in
+> `docs/3_guides/yaml_workflow_engine.md`.
+>
+> **One thing neither option anticipated:** the `verify` stage's tool string
+> was the literal `"/verify"`, which `build_prompt` would render as `//verify`
+> since it prepends the slash itself. Option B would have papered over this —
+> mapping `"/verify"` to itself in `.atlas.toml` produces a malformed prompt
+> rather than a clean `RoutingDriftError`, so the bug would have surfaced
+> mid-smoke-test instead of at resolution time. That is a concrete argument for
+> A over B beyond the ones listed below.
+
 `STATUS.md`'s `blocked_on` names this as unresolved: `plugin_resolver.resolve()`
 does a literal dict lookup and doesn't special-case `RAW:`-prefixed tool strings
 despite its own docstring's claim that it does, so `loop_dev.yaml`'s `plan` and
@@ -32,7 +55,7 @@ for L2's own still-open T-L2.13.
 
 This TRS's task list (T-L3.1) is written to accommodate either; the maintainer
 should pick before implementation starts since it changes which files T-L3.1
-touches.
+touches. *(Picked: Option A — see the resolution callout above.)*
 
 ---
 

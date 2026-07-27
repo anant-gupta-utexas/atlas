@@ -6,11 +6,13 @@
 - **Delivers:** `v3.2` (TRD-v3 §11)
 - **Goal (copied from TRD-v3 §14):** *"Rescue failures with diagnosis rather than
   blind retry; begin score-informed routing."*
-- **Dependencies:** L2 (per TRD-v3 §14: "Dependencies: L2"). L2 is **code-complete**
-  but its own manual exit check (T-L2.13) is currently **blocked** — see
+- **Dependencies:** L2 (per TRD-v3 §14: "Dependencies: L2"). L2 is **code-complete**;
+  its manual exit check (T-L2.13) was blocked at authoring time by the
+  `plugin_resolver` `RAW:` gap, **fixed 2026-07-25 in commit `48ee363`**
+  (Pending Decision #1 → Option A; T-L3.1 closed with it). T-L2.13 itself
+  remains open but now needs only a human operator, not a code fix — see
   [Pending Decisions & Clarifications](./loop-mode-phase-L3-decisions.md) #1 and
-  [Overview & Scope](#overview--scope) below. This TRS treats that as a live
-  precondition, not background noise.
+  [Overview & Scope](#overview--scope) below.
 - **Exit criteria (TRD-v3 §13):**
   - **#9** Diagnosis-injected retry. A verify/judge failure is captured as a plumb
     example, classified, and retried **once** as a child run (`parent_run_id`) with
@@ -92,12 +94,13 @@ assuming they're done:
 | T-L0.9 (real `GhPrDeliverer.deliver()` against a scratch repo) | L0 | Same — L3's retry PRs are delivered the same way. |
 | T-L1.1 (write-heavy Codex capture — cold/warm-cache token question) | L1 | Only matters if L3 is smoke-tested under `engine:codex`; not required for the `claude`-only exit bar. |
 | T-L1.8 (both-engines smoke) | L1 | Same as T-L1.1. |
-| **T-L2.13 (zero-touch delivery / planned-lane / crash-recovery smoke)** | L2 | **Blocking.** T-L2.13 is itself blocked on the `plugin_resolver.resolve()` gap (STATUS.md `blocked_on`) — `loop_dev.yaml`'s `RAW:`-prefixed stages raise `RoutingDriftError` under a real `atlas loop run`. L3's retry re-dispatches through the exact same `run_one_shot()` → `loop_dev.yaml` path, so **this gap blocks live retry testing, not just the original run.** See Pending Decision #1. |
+| **T-L2.13 (zero-touch delivery / planned-lane / crash-recovery smoke)** | L2 | **Still open, no longer code-blocked.** T-L2.13 was blocked on the `plugin_resolver.resolve()` gap — `loop_dev.yaml`'s `RAW:`-prefixed stages raised `RoutingDriftError` under a real `atlas loop run`, and L3's retry re-dispatches through the exact same `run_one_shot()` → `loop_dev.yaml` path, so it blocked live retry testing too. **Fixed 2026-07-25 (commit `48ee363`).** T-L2.13 now needs only a human operator session. Running it before L3's own manual checks is still the sensible order — it is the cheaper way to discover a broken live path. |
 
-L3's own task list includes a task (T-L3.1) that resolves or formally re-scopes the
-`plugin_resolver` blocker specifically because L3 cannot be manually proven without
-it — everything else in the table above is named as context, not duplicated as an
-L3 task.
+L3's task list originally opened with T-L3.1 to resolve the `plugin_resolver`
+blocker, because L3 could not be manually proven without it. **That fix landed
+early, during the L2 session (commit `48ee363`), so T-L3.1 is closed before this
+phase starts** and T-L3.10's dependency on it is discharged. Everything else in
+the table above is named as context, not duplicated as an L3 task.
 
 ---
 
@@ -520,7 +523,7 @@ except AbortedRunError as exc:
 | `PlumbIO.write_example` / `PlumbIO.reopen_run` | Internal (`plumb_io.py`) | Already shipped in L0/L2 — no new `PlumbIO` method required (extends L2 Decision #8's precedent one phase further). |
 | `queue_gh.relabel(issue, state="blocked")` | Internal (`queue_gh.py`) | Signature already accepts `"blocked"` (TRD-v3 §3.1) — L3 is the first caller. No `queue_gh.py` change needed. |
 | `loop_dev.yaml` (`plan → code_gen[isolate] → verify`) | Internal (packaged workflow) | Reused unchanged for the retry dispatch — same workflow, new prompt content (the injected diagnosis). |
-| `plugin_resolver.resolve()` | Internal (`src/atlas/plugin_resolver.py`) | **Live blocker** — does not special-case `RAW:`-prefixed tool strings (STATUS.md). `loop_dev.yaml`'s `plan`/`code_gen` stages are both `RAW:`-prefixed. Must be resolved (or formally worked around) before any retry — quick-lane or otherwise — can run for real. See T-L3.1, Pending Decision #1. |
+| `plugin_resolver.resolve()` | Internal (`src/atlas/plugin_resolver.py`) | ~~**Live blocker**~~ — **fixed 2026-07-25, commit `48ee363`.** It did not special-case `RAW:`-prefixed tool strings, and `loop_dev.yaml`'s `plan`/`code_gen` stages are both `RAW:`-prefixed, so no retry could run for real. `resolve()` now returns `RAW:` strings verbatim; the `verify` stage's tool string changed from the literal `"/verify"` to the bare `verify`. **No L3 change needed** — reused as-is. |
 
 ---
 
@@ -620,7 +623,7 @@ One-line index:
 
 | # | Task | Effort |
 | - | --- | --- |
-| T-L3.1 | Resolve or formally scope the `plugin_resolver` `RAW:` blocker | S |
+| ~~T-L3.1~~ | ~~Resolve or formally scope the `plugin_resolver` `RAW:` blocker~~ — **done early, commit `48ee363`** | S |
 | T-L3.2 | `judge_gate.py`: pre-PR scoring | M |
 | T-L3.3 | `judge_gate.py`: failure-mode classification | M |
 | T-L3.4 | `loop.py`: wire the judge gate into `run_one_shot` | M |
@@ -662,7 +665,7 @@ One-line index:
 
 | # | Decision | Recommendation |
 | - | --- | --- |
-| 1 | How/when to resolve the `plugin_resolver` `RAW:` blocker | Fix `resolve()` properly (T-L3.1, Option A) |
+| 1 | How/when to resolve the `plugin_resolver` `RAW:` blocker | **RESOLVED** — fixed `resolve()` properly (Option A), commit `48ee363` |
 | 2 | Does the planned lane get the same judge gate as the quick lane? | No — no code diff exists to score (Option A) |
 | 3 | Judge invocation: library `JudgeAdapter` API vs. `plumb judge run` CLI | Library API — confirm this reading of TRD-v3 §6 |
 | 4 | Include Router v1 as a committed task in this TRS? | No — name the seam only (T-L3.9) |
