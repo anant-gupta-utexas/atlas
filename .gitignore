@@ -85,4 +85,4 @@ Thumbs.db
 .claude
 
 # Project specific
-# Add any project-specific ignores here
+.atlas.toml
