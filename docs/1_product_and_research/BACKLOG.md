@@ -179,12 +179,19 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
       job here is limited to staying a clean CLI target for that skill to
       shell out to. *(from TRD-v2.md §14 Phase 4, archived
       `job-workflow-scope.md` §3 Phase 3)*
-- [ ] **Model selection within a backend via `.atlas.toml`.** Currently the
-      `agy` backend's default model (`gemini-flash-lite`) is only overridable
-      per-stage or globally via the YAML `backend:` field — there's no
-      `.atlas.toml` knob for it yet, unlike the `[models]` table atlas
-      already has for the dev pipeline. *(from `docs/3_guides/cli_backends.md`)*
-- [ ] **`orchestrator.py` file-size split.** At 746 LoC it is over the
+- [x] **DONE (2026-07-27) — Model selection within a backend via
+      `.atlas.toml`.** Landed as `[backend.models]`, e.g.
+      `[backend.models]\ncodex = "gpt-5.1-codex"`, resolved by
+      `cli_backend.resolve_model()`. Closed as a side effect of a live T-L1.8
+      failure rather than as planned work: `Config.model` is one global
+      string defaulting to `"haiku"`, a Claude name, and it was handed to
+      every engine — `codex exec --model haiku` returns HTTP 400, so every
+      codex run died in the plan stage. An engine with no configured entry
+      now gets `""` and falls back to its own CLI default, which is always
+      valid; deliberately not a hardcoded cross-engine mapping table, since
+      model lineups change faster than atlas releases.
+- [ ] **`orchestrator.py` file-size split.** Now ~900 LoC after the L0
+      telemetry wiring (2026-07-27), further over the
       400/800-line file guidance in `CLAUDE.md`, flagged during the v2.2
       guide write-up as a future split candidate (mirrors the Phase 2 split
       that produced `composite_runner.py`). *(from
