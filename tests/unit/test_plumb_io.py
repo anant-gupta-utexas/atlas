@@ -117,3 +117,42 @@ def test_set_usage_omits_tokens_so_plumb_autofills_them() -> None:
 
     assert plumb.usage[0]["tokens_in"] is None
     assert plumb.usage[0]["tokens_out"] is None
+
+
+def test_every_span_kind_atlas_emits_is_valid_in_plumb() -> None:
+    """Guards the whole class of bug, not just the one instance.
+
+    `sync_prior_prs` passed kind="deliver", which plumb's SpanKind enum does
+    not define, so plumb raised ValueError and the entire tick died. It
+    survived to production because that code path was unreachable until an
+    unrelated sync fix, and because unit tests use PlumbIO(real=False), whose
+    stub path never touches the enum.
+
+    Collects every literal `kind=` atlas passes to record_span plus every
+    span_kind declared in a shipped workflow, and checks all of them.
+    """
+    import re
+    from pathlib import Path as _Path
+
+    from plumb.core.entities import SpanKind
+
+    valid = {m.value for m in SpanKind}
+    src = _Path(__file__).parents[2] / "src" / "atlas"
+
+    emitted: set[str] = set()
+    for py in src.rglob("*.py"):
+        text = py.read_text(encoding="utf-8")
+        # Scoped to record_span call sites: a bare `kind="..."` scan also
+        # picks up plumb_run(kind="online"), which is a *run* kind and a
+        # different enum entirely.
+        for call in text.split("record_span(")[1:]:
+            found = re.search(r'kind="([a-z_]+)"', call)
+            if found:
+                emitted.add(found.group(1))
+    for yml in (src / "workflows").glob("*.yaml"):
+        emitted |= set(re.findall(r"span_kind:\s*([a-z_]+)", yml.read_text(encoding="utf-8")))
+
+    assert emitted, "regex found nothing — the guard would pass vacuously"
+    assert emitted <= valid, (
+        f"invalid SpanKind(s): {sorted(emitted - valid)}; valid={sorted(valid)}"
+    )

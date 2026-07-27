@@ -451,7 +451,11 @@ def sync_prior_prs(repo: str, state: LoopState) -> list[queue_gh.PrStatus]:
             # dangling foreign key into plumb's scores.span_id.
             span_id = plumb.record_span(
                 run_id=active_run_id,
-                kind="deliver",
+                # "handoff" not "deliver": plumb's SpanKind enum has no
+                # deliver member, and this span records the outcome of the
+                # handoff to a human reviewer. Passing an invalid kind raised
+                # ValueError inside plumb and took down the whole tick.
+                kind="handoff",
                 name="pr_outcome",
                 status="success" if s.outcome == "merged" else "failure",
                 latency_ms=0.0,
