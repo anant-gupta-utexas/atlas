@@ -165,3 +165,18 @@ def test_loop_config_concurrency_guard_still_enforced() -> None:
         assert "concurrency" in str(exc)
     else:
         raise AssertionError("expected ValueError for concurrency != 1")
+
+
+def test_backend_flag_help_matches_actual_precedence() -> None:
+    """The help text is a contract with the operator; keep it true.
+
+    It originally said "a stage's own `backend:` field still wins", written
+    before resolve_backend gained the override tier. Once the override moved
+    to tier 1 the string became actively misleading — it told the user the
+    opposite of what the flag does.
+    """
+    result = CliRunner().invoke(app, ["run", "--help"])
+    assert result.exit_code == 0
+    help_text = " ".join(result.output.split())
+    assert "still wins" not in help_text
+    assert "Wins over every other tier" in help_text

@@ -1,6 +1,6 @@
 ---
 project: atlas
-status: v2.2 shipped; loop mode Phases L0-L2 COMPLETE — all manual off-CI verification done 2026-07-27
+status: v3.1 shipped — loop mode L0/L1/L2 complete and verified live 2026-07-27
 last_updated: 2026-07-27
 next_gate: Phase L3 (self-healing + routing) — TRS written, not implemented
 blocked_on: null
@@ -8,270 +8,128 @@ blocked_on: null
 
 # atlas — status
 
-## Current
+## What atlas is today
 
-**Loop mode L0-L2 is complete and proven end-to-end on real systems
-(2026-07-27).** Every manual off-CI check that L0/L1/L2 carried — T-L0.8,
-T-L0.9, T-L1.1, T-L1.8, T-L2.13 — has now been executed. TRD-v3 §13 #1
-through #8 all hold.
+A local CLI agent orchestrator with two modes over one engine:
 
-**Running them found eight defects that 400+ green tests, `mypy --strict`
-and a full code review had all missed**, because each lived on a path CI
-never executed. The headline: **Phase L0's telemetry was never actually
-connected in production.** `parse_usage()` had no caller, `StageOutcome`
-had no usage field, `record_span()` was called with no `tokens=`, and
-nothing ever requested the JSON envelope — so §13 #1 was unimplementable
-rather than merely unverified. The envelope schema it parsed was also wrong
-(Claude 2.1.220 emits a JSON *array*, not an object), and the token rule
-undercounted a real 159,896-token span as **50 tokens**.
+- **Attended** — `atlas run "<task>"` walks a YAML-defined workflow, stopping
+  at human gates. The dev workflow is 7 stages / 6 gates; `job`/`job_cli` and
+  any workflow you author run through the same machinery.
+- **Unattended** — `atlas loop run` polls a GitHub Issues queue, triages each
+  issue into one of two lanes, runs the pipeline in an isolated worktree on a
+  selectable engine (`claude` or `codex`), and opens a PR. It never merges and
+  never pushes `main`.
 
-Proven live, against `anant-gupta-utexas/atlas`:
+Both modes write every run into [plumb](https://github.com/anant-gupta-utexas/plumb)
+as a typed span tree with tokens, cost, and gate scores. The premise is
+unchanged from v1: **humans keep the pen on decisions, the agent does
+everything in between, and both sides of the split are measured.** Loop mode
+moves the gate from an inline `input()` to a PR review — asynchronous and
+batchable, not absent.
 
-- **§13 #5 zero-touch** — issue #7 labeled → PR #8 with `Closes #7` and a
-  run_id comment, **zero keystrokes**; merged → next tick wrote
-  `user_signal=approved` anchored to a real span and set `atlas:done`.
-- **§13 #6 two-lane** — issue #10 (`wf:planned`) → PR #11 containing exactly
-  the three triad files, a `dev_docs_be` span and **no `code_gen` span**.
-- **§13 #8 crash recovery** — `kill -9` mid-dispatch → restart reclaimed the
-  issue and pruned the orphaned worktree.
-- **§13 #7 budgets** — `atlas loop status` reports real accumulated spend
-  (`$2.5822 / $5.00`), where it previously printed "not tracked (cap NOT
-  enforced)". plumb v1.1's `set_usage` is what unblocked this; the P1-a
-  deferral is closed.
-- **§13 #1/#3 engines** — `loop_dev` completed on both `claude`
-  ($0.1865/run) and `codex` (tokens only — that CLI reports no cost, so
-  run-level `dollar_cost` is correctly NULL rather than 0.0).
+Local suite: **484 passed, 1 xfailed, 95.29% coverage** (measured 2026-07-27).
 
-**T-L1.1 also reversed a shipped assumption.** A cold/warm capture pair
-showed `cached_input_tokens` is a **subset** of `input_tokens`, not an
-addend — atlas had it backwards and was inflating every Codex span's input
-by ~70-90%. Rule is now `openai_subset_fields_v2`; spans written under v1
-stay recomputable because the raw breakdown and rule name were persisted to
-`spans.attributes` (the L1 review's M1 mechanism earning its keep).
+## Shipped
 
-Full defect list and the live evidence for each:
+| Release | What it is | State |
+|---|---|---|
+| **v2.2** | YAML workflow engine — multi-workflow loader, `RAW:`/`LIB:`/`SHELL:`/plugin-command dispatch, `CliBackend` strategy (`claude`/`agy`) | Complete. `pyproject.toml` reads `2.2.0`; the `v2.2` tag exists **locally only** — `git push origin v2.2` is still pending. |
+| **v3.0** | Measured baseline (Phases L0+L1) — Claude JSON telemetry → plumb, headless permission profile, `GhPrDeliverer`, `CodexBackend`, `loop_dev.yaml` | Complete, incl. both phases' manual off-CI checks. |
+| **v3.1** | The loop daemon (Phase L2) — `queue_gh.py`, `loop.py`, `triage.py`, `loop_budget.py`, `[loop]` config, `atlas loop run/start/stop/status/attach` | Complete, incl. T-L2.13. TRD-v3 §13 #1–#8 all hold. |
+
+Per-module coverage on the loop-mode surface: `loop.py` 90%, `queue_gh.py`
+92%, `triage.py` 95%, `cli_backend.py` 99%, `config.py`/`deliverer.py` 100%.
+
+## Verified against real systems (2026-07-27)
+
+All five manual off-CI checks the phases carried — **T-L0.8, T-L0.9, T-L1.1,
+T-L1.8, T-L2.13** — have been executed against the real
+`anant-gupta-utexas/atlas` repo with real tokens. Evidence per criterion:
+
+| TRD-v3 §13 | Criterion | Evidence |
+|---|---|---|
+| #1 | Live attended run, measured | `code_gen` span carried **161,200 real tokens**; run-level `dollar_cost` **`$0.1865061`**. |
+| #2 | Attended-mode invariance | Telemetry is opt-in behind `atlas run --telemetry`; without it the attended argv is byte-identical to pre-L0. |
+| #3 | `CodexBackend` dispatch | `loop_dev` completed on **both** `claude` and `codex`. Codex reports no cost at all, so its run-level `dollar_cost` is correctly **NULL**, not `0.0`. |
+| #4 | Delivery primitive | Real PRs **#8** and **#11**. `main` was never pushed to and never force-pushed. |
+| #5 | Zero-touch delivery *(headline)* | Issue **#7** → PR **#8** carrying `Closes #7` plus a `run_id` comment, with **zero keystrokes**. Merging it made the next tick write `user_signal=approved`, anchored to a real `pr_outcome`/`handoff` span, and relabel the issue `atlas:done`. |
+| #6 | Two-lane routing | Issue **#10** (`wf:planned`) → PR **#11** containing exactly the three TRS triad files, with a `dev_docs_be` span and **no `code_gen` span** — the loop stopped for review as designed. |
+| #7 | Budgets & breaker | `atlas loop status` reports real accumulated spend — **`$2.5822 / $5.00`** — where it previously printed "not tracked (cap NOT enforced)". |
+| #8 | Crash recovery | `kill -9` mid-dispatch; restart reclaimed the issue and pruned the orphaned worktree. |
+
+**What made #1 and #7 possible: plumb v1.1.** `RunHandle.set_usage()` landed,
+so run-level `dollar_cost` is writable and `spans.tokens_in`/`tokens_out` are
+durable. The **plumb P1-a deferral that TRD-v3 §3.6/§13 repeatedly carves out
+is closed**, and `max_dollars_per_day` is a real budget rather than a
+documented intention.
+
+## What running the checks actually cost
+
+Running them found **eight defects that 400+ green tests, `mypy --strict` and
+a full code review had all missed**, because each lived on a path CI never
+executed. The headline: **Phase L0's telemetry was never connected in
+production** — `parse_usage()` had no caller, `StageOutcome` had no usage
+field, `record_span()` was called with no `tokens=`, and nothing requested the
+JSON envelope. §13 #1 was *unimplementable*, not merely unverified. The
+envelope schema it parsed was also wrong, and the token rule recorded a real
+159,896-token span as **50 tokens**.
+
+Two shipped assumptions were reversed by measurement:
+
+- **`claude -p --output-format json` emits a JSON array** of stream events
+  terminated by a `type: "result"` element — not the single object `--help`
+  describes. The old `startswith("{")` sniff routed every real envelope into
+  the plain-text branch. Anthropic's token fields are **disjoint**: billed
+  input is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
+- **Codex's `cached_input_tokens` is a subset of `input_tokens`, not an
+  addend** (TRD-v3 §3.6's Pending Decision #4, settled by a cold/warm capture
+  pair). atlas had it backwards and was inflating every Codex span's input by
+  ~70–90%. The rule is now `openai_subset_fields_v2`; spans written under v1
+  stay recomputable because the raw breakdown and the rule name were persisted
+  to `spans.attributes`.
+
+The through-line: **every failure was silent.** Runs reported `success` on all
+spans while delivering nothing. Fixing observability first is what made the
+rest findable. Full defect list and per-defect evidence:
 [`dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md`](dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md)
-(field-findings section).
+(field-findings section). Phase-by-phase detail lives in the archived TRS
+triads under [`dev/archive/`](dev/archive/) and in git log.
 
+## Known gaps — read before trusting a number
 
-**v2.2 is complete.** `pyproject.toml` reads `2.2.0`; `git tag v2.2` remains
-a manual maintainer action (tracked in BACKLOG.md).
+- **Codex spend is invisible.** The Codex CLI emits no cost field, so a
+  Codex-only day advances `max_runs_per_day` but not `max_dollars_per_day`.
+  The runs cap is the load-bearing bound on that lane, not the backstop.
+  `atlas loop status` says so at runtime rather than printing a confident
+  `$0.00`.
+- **`test_score_jobs_adapter_real_import_success` is still `xfail`.**
+  content-pipeline decomposed `ScoreJobsUseCase`; re-targeting the adapter is
+  `job`-workflow scope, not loop mode. It is a correct drift signal.
+- **`origin/main` is far behind the loop-mode branch**, so the smoke PRs were
+  cut against a stale base.
+- **CI runs on `workflow_dispatch` only** — the suite is a local pre-commit
+  gate today, not an on-push check.
+- **plumb is still a local path dependency.** A versioned pin needs a
+  `v1.1.0` tag in the plumb repo first.
+- **T3.8 (`agy` manual smoke) is still open** — blocked only on credentials.
 
-**Loop Mode Phase L2 (the loop daemon) is code-complete and code-reviewed: 424
-tests pass, 1 xfail, 95.02% repo-wide coverage** (every individual module meets
-its own T-L2.11 target — `queue_gh.py` 92%, `triage.py` 95%, `config.py` 100% —
-the repo-wide figure sits below L1's 96% only because L2 added ~500 new
-statements below the pre-L2 average; well above the CI floor of 80%). Completes
-`v3.1` (the loop daemon itself).
-
-The Phase L2 code review
-([`loop-mode-phase-L2-code-review.md`](dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-code-review.md),
-verdict **Approve with changes**) found 2 Critical, 4 Important and 5 Minor
-issues; **all were fixed** in the same pass, along with both of its
-architecture recommendations. The Criticals are worth knowing about:
-
-- **The planned lane could not open a PR under any input.** `dev-docs-be` ran
-  against `repo_root` with the worktree created *afterwards* and nothing ever
-  committed, so delivery pushed a branch identical to `main`. Fixed by
-  mirroring the quick lane's ordering (worktree first, agent runs inside it,
-  triad committed, then deliver). Confirmed real: a pre-existing integration
-  test flipped red once the ordering was fixed, because its fake agent wrote
-  nothing to disk and nothing had checked for commits.
-- **`sync_prior_prs()` wrote `user_signal` scores with `span_id=""`** — a
-  dangling foreign key on the headline signal of the whole phase (§13 #5).
-  Now anchored to a real `record_span` id. Its dedupe list was also unbounded
-  in a file rewritten every tick; now capped at 500 entries.
-
-Shipped this phase:
-
-- `src/atlas/queue_gh.py` — the sole `gh` CLI adapter (`list_ready`/`claim`/
-  `deliver_pr`/`comment`/`sync`/`relabel`/`current_user`/`find_run_id_comment`),
-  list-form argv only, timeout-wrapped, grep-enforced as the only caller of
-  `gh` in the loop path (`loop.py` never shells `gh` directly).
-- `src/atlas/triage.py` — label-wins-else-classify two-lane router
-  (`wf:quick`/`wf:planned`); both-labels-present resolves to `planned`;
-  an unparseable classifier response also defaults to `planned`.
-- `src/atlas/loop.py` (600 lines) — `tick()` (the core state machine: sync →
-  breaker → budget → pull → trust-check → triage → claim → dispatch →
-  comment → persist), `run_one_shot()`/`run_planned_first_pass()` (quick and
-  planned-lane dispatch), `sync_prior_prs()` (idempotent PR-outcome
-  scoring via `PlumbIO.reopen_run()`), `run_forever()` + `reconcile_orphans()`
-  (crash recovery — an orphaned `atlas:working` issue is relabeled back to
-  `atlas:ready` and its worktree pruned on the next startup, keyed on
-  `.atlas/current-run`'s exact path so a live run is never swept).
-- `src/atlas/loop_budget.py` — `LoopState` (a new flat `.atlas/loop-state.json`
-  file), budgets and the circuit breaker. Split out of `loop.py` post-review so
-  the driver stays readable as L3 adds self-healing; `loop.py` re-exports the
-  public names, so `from atlas.loop import LoopState` still works.
-- `src/atlas/pipeline_factory.py` — `make_pipeline()` (was `cli.py::_make_pipeline`;
-  adds `backend_override` and `max_turns`) plus `LastOutcomeRunner`, so
-  `cli.py::run`/`resume` and `loop.py`'s quick-lane dispatch share one
-  construction path instead of two that could drift. Lives outside `cli.py` so
-  `loop.py` no longer imports the CLI entry point — that cycle previously forced
-  `cli.py`'s loop commands to import `loop` lazily inside function bodies.
-- `atlas loop run|start|stop|status|attach` — `run` calls `run_forever()` in
-  the foreground (no tmux dependency); `start`/`stop`/`attach` are thin tmux
-  wrappers (`tmux new -d -s atlas-loop 'atlas loop run'` /
-  `kill-session` / `attach`, the last via `os.execvp`); `status` reads
-  `.atlas/loop-state.json` and reports budgets used, last tick, breaker state.
-- `[loop]` config: `LoopConfig` + `Config.loop` + TOML `[loop]` parsing,
-  exactly TRD-v3 §7's schema; `concurrency != 1` raises (frozen at 1 until
-  Phase L4).
-- **L1 code review finding closed**: `deliverer.py::_parse_pr_url` now
-  raises `DeliveryError` on a malformed `gh pr create` URL instead of a
-  `PrRef(number=0, ...)` sentinel — L2 is `PrRef`'s first real consumer, so
-  this is where the L1 review's flagged gap actually mattered.
-- **T-L2.13's blocker found and fixed (2026-07-25)**:
-  `plugin_resolver.resolve()` did not special-case `RAW:`-prefixed tool
-  strings despite its own docstring's claim that it did — a literal dict
-  lookup, so `loop_dev.yaml`'s stages raised `RoutingDriftError` under a real
-  `atlas loop run` unless `.atlas.toml` carried a `[plugin_commands]`
-  override for each. `resolve()` now returns `RAW:` strings verbatim (they
-  are literal prompts from the workflow YAML, not plugin names, so there is
-  no third-party command to allow-list; an explicit override still wins).
-  The separate `verify` stage carried a literal `"/verify"` tool string that
-  `build_prompt` would have rendered as `//verify`; it is now the bare
-  `verify`, mapped in `PLUGIN_COMMANDS` to `DEV-ESSENTIALS:verify` like the
-  other dev-pipeline slash commands. The allow-list still rejects unknown
-  non-`RAW:` tool strings before any subprocess spawns. `loop_dev` now
-  dispatches with **no `.atlas.toml` workaround**, and
-  `test_loop_e2e.py`'s override was removed so its tests exercise the real
-  resolution path rather than passing regardless of it.
-- **Known limitation carried forward, not a regression**: cost extraction
-  (`extract_cost`) is unimplemented, so `run_one_shot()`'s `cost` is always
-  `0.0` — `max_dollars_per_day` is mechanically wired and tested (the
-  breaker/cooldown/runs-cap logic is correct) but never actually accumulates
-  from real runs yet; only `max_runs_per_day` has teeth today. Post-review this
-  is now **surfaced at runtime instead of only in docs**: `atlas loop status`
-  prints "Dollars today: not tracked (cap $N NOT enforced — pending plumb
-  P1-a)" rather than a confident `$0.00 / $N`, and `run_forever()` logs a
-  startup WARNING when an operator has set a non-default cap. A spend control
-  that silently does nothing is worse than no control at all.
-- `cfg.loop.max_turns` was parsed and documented but never reached a backend
-  (a runaway-cost guard that did nothing); it is now threaded through
-  `make_pipeline(max_turns=...)` into both lanes. `atlas run` still leaves it
-  unset — a human is watching there.
-
-**Not yet done (off-CI, manual, real external systems):** T-L2.13 (zero-touch
-delivery, planned-lane, and crash-recovery smoke tests against the real
-GitHub repo) — no longer blocked (see the `plugin_resolver` fix above); it
-now needs only a human operator session, since it drives real GitHub and
-spends real tokens. Everything else in the Phase L2 TRS
-([`dev/archive/loop-mode-phase-L2/`](dev/archive/loop-mode-phase-L2/)) is done.
-
----
-
-**Loop Mode Phase L1 (`CodexBackend` + `loop_dev.yaml`) is code-complete: 301
-tests pass, 1 xfail, at 96% coverage.** Completes `v3.0` (measured baseline +
-engines + delivery) alongside L0. Shipped this phase:
-
-- `CodexBackend` in `cli_backend.py` — a second `CliBackend` implementation
-  dispatching `codex exec --json -C <dir> --sandbox workspace-write`.
-  Schema **verified** against real `codex-cli 0.144.4` output (not designed
-  against the TRD's assumed shape, which turned out wrong in four material
-  ways — no `result` event, no status field, no cost field, output text on a
-  separate `item.completed` event). Status is exit-code-only; `preflight()`
-  fails closed on missing `OPENAI_API_KEY`/`$CODEX_HOME/auth.json` with no
-  subprocess spawned (mirrors `AntigravityBackend`'s L0/Phase-3 pattern).
-  Registered in `_KNOWN_BACKENDS`/`make_backend()` (`frozenset({"claude",
-  "agy", "codex"})`).
-- `CodexUsageStats` — a distinct 5-field dataclass (`total_cost_usd` always
-  `None`; Codex reports tokens only). `codex_usage_to_tokens()` documents the
-  one open question from this phase: whether `cached_input_tokens` is an
-  addend or a subset of `input_tokens` (assumed addend, matching Anthropic's
-  own convention — unconfirmed by execution, logged at debug level on every
-  real run so it's diagnosable).
-- `src/atlas/workflows/loop_dev.yaml` — new ungated 3-stage workflow
-  (`plan → code_gen[isolate] → verify`), `default_backend: claude`. Quality
-  enforcement is entirely `StageOutcome`/`RunResult.status`-driven (no gate,
-  no new "guardrail" type).
-- `Pipeline.run_to_completion()` return type widens `RunContext` → new
-  `RunResult(ctx, status)` — the one deliberate, TRD-sanctioned exception to
-  Appendix A's "`orchestrator.py` unchanged" row (both `cli.py` call sites
-  already discarded the return value, so this is additive not breaking).
-  Both `cli.py::run`/`resume` call sites unaffected (bare-statement calls).
-- **Found and fixed in-scope**: `Pipeline.step()`'s ungated-stage branch
-  unconditionally indexed `self._stages[stage.index + 1]`, which crashes
-  `IndexError` when the **last** stage in a workflow has no gate.
-  `dev.yaml`/`job.yaml` always gate their final stage, so this path was
-  never exercised until `loop_dev.yaml` (whose last stage, `verify`, is
-  ungated) — now guarded the same way the gated branch already was.
-- New "Part E — Codex CLI headless reference" + "Part F" 3-way comparison
-  table in `headless-clis-reference.md`, with every unconfirmed schema claim
-  explicitly flagged (write-path event types, failure-path event existence,
-  `--add-dir` writability under `--sandbox workspace-write`, and the
-  cached-token addend/subset question all remain open pending a write-heavy
-  live capture — T-L1.1).
-
-**Not yet done (off-CI, manual, real external systems):** T-L1.1 (a
-write-heavy Codex capture — file edits, a deliberately-failed run, a
-cold/warm-cache pair to settle the cached-token question) and T-L1.8
-(`atlas run --workflow loop_dev` against both `--backend claude` and
-`--backend codex`, the latter contingent on Codex auth being available).
-Everything else in the Phase L1 TRS
-([`dev/archive/loop-mode-phase-L1/`](dev/archive/loop-mode-phase-L1/)) is done.
-
----
-
-**Loop Mode Phase L0 ("honest baseline") is code-complete: 271 tests pass, 1
-xfail, at 96% coverage.** Adds the telemetry, permission, and delivery
-primitives the v3 loop depends on — no loop or `atlas loop` command yet
-(that's L1/L2). Shipped this phase:
-
-- `ClaudeCodeBackend` gains an opt-in JSON telemetry path (`--output-format
-  json` + a headless permission profile), gated on `extra_flags` and absent
-  by default — attended `atlas run` argv is byte-identical to pre-L0.
-  `parse_result` handles the JSON envelope; a new `parse_usage()` method +
-  `UsageStats` dataclass extract `total_cost_usd`/token counts.
-- `PlumbIO.record_span()` gains an optional `tokens: tuple[int, int] | None`
-  kwarg threaded to plumb's `RunHandle.add_span(tokens=(in, out))`. Run-level
-  `dollar_cost`/token roll-up is **not** written — confirmed unreachable from
-  plumb v1.0.1's online run path, deferred to plumb P1-a (BACKLOG.md).
-- New `src/atlas/deliverer.py`: `Deliverer` Protocol + `GhPrDeliverer` — push
-  branch → `gh pr create` → `WorktreeManager.cleanup()`. Never touches
-  `main`, never force-pushes (enforced by construction + a dedicated
-  security test).
-- `test_score_jobs_adapter_real_import_success` is `xfail(strict=False)`
-  (content-pipeline decomposed `ScoreJobsUseCase`; re-targeting is
-  `job`-workflow scope — tracked in BACKLOG.md), so the suite is genuinely
-  green rather than silently red.
-
-**Not yet done (off-CI, manual, real external systems):** T-L0.8 (first live
-`atlas run` against the real `claude` backend, confirming `spans.tokens` from
-a real JSON envelope) and T-L0.9 (a real `GhPrDeliverer.deliver()` against a
-scratch GitHub repo). These are the phase's two manual exit-criteria checks
-and have not been executed yet — everything else in the Phase L0 TRS
-([`dev/archive/loop-mode-phase-L0/`](dev/archive/loop-mode-phase-L0/)) is done.
-
-Prior to L0: the v1 7-stage dev pipeline (6 human gates, git worktree
-boundary, post-commit hook, full plumb span-tree integration) plus the v2
-YAML workflow engine — a multi-workflow loader (`dev`/`job`/`job_cli` +
-custom YAML), `LIB:`/`SHELL:`/`RAW:`/plugin-command runner dispatch, and CLI
-backend selection (`claude` / `agy`, 4-tier resolution). Full phase-by-phase
-build history lives in git log and in
-[`dev/archive/yaml-workflow-engine-phase-{1,2,3}/`](dev/archive/).
+Full pending list: [`docs/1_product_and_research/BACKLOG.md`](docs/1_product_and_research/BACKLOG.md).
 
 ## Next
 
-See [`docs/1_product_and_research/BACKLOG.md`](docs/1_product_and_research/BACKLOG.md)
-for the full pending list. Immediate: run T-L2.13's manual smoke tests (the
-`plugin_resolver.resolve()` gap that blocked them is fixed — see Current,
-above) — then **Phase L3** (self-healing + routing: pre-PR plumb judge gate,
-diagnosis-injected single-retry, failed runs → plumb examples, score-informed
-routing). The manual off-CI checks carried by L0/L1 (T-L0.8/T-L0.9,
-T-L1.1/T-L1.8) remain open alongside L2's. Also open: tag `v2.2`, install
-plumb as a versioned (not path) dependency, add the `CONTENT_PIPELINE_TOKEN`
-CI secret, run the T3.8 `agy` manual smoke test, re-target the `score_jobs`
-adapter (`job`-workflow scope), wire `extract_cost` so `max_dollars_per_day`
-actually accumulates, extend `GhPrDeliverer`'s branch-safety check beyond
-exact `"main"`.
+**Phase L3 — self-healing + routing (`v3.2`).** TRS written and sitting in
+[`dev/active/loop-mode-phase-L3/`](dev/active/loop-mode-phase-L3/); no code
+yet. Scope: a pre-PR plumb judge gate, a diagnosis-injected single child-run
+retry (`parent_run_id`), failed runs captured as plumb examples, and
+score-informed engine/workflow routing (stretch). Exit criteria are TRD-v3
+§13 #9 and #10.
 
 ## Pointers
 
-- Docs hub: `docs/README.md`
-- PRD: `docs/1_product_and_research/PRD.md`
-- Backlog: `docs/1_product_and_research/BACKLOG.md`
-- TRD (v1): `docs/2_architecture/TRD.md`
-- TRD (v2): `docs/2_architecture/TRD-v2.md`
-- System design: `docs/2_architecture/system_design.md`
-- YAML workflow engine guide: `docs/3_guides/yaml_workflow_engine.md`
+- Docs hub: [`docs/README.md`](docs/README.md)
+- Backlog: [`docs/1_product_and_research/BACKLOG.md`](docs/1_product_and_research/BACKLOG.md)
+- Loop-mode phase contract: [`docs/2_architecture/TRD-v3.md`](docs/2_architecture/TRD-v3.md)
+- System design: [`docs/2_architecture/system_design.md`](docs/2_architecture/system_design.md)
+- Workflow engine guide: [`docs/3_guides/yaml_workflow_engine.md`](docs/3_guides/yaml_workflow_engine.md)
+- Backend selection: [`docs/3_guides/cli_backends.md`](docs/3_guides/cli_backends.md)
+- Build history: [`dev/archive/`](dev/archive/) + git log

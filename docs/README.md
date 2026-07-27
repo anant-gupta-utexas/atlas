@@ -6,11 +6,14 @@ into [plumb](https://github.com/anant-gupta-utexas/plumb). This is the entry
 point into the docs — start here, then follow into whichever domain area
 matches what you're trying to do.
 
-Current shipped state: v1 pipeline (7-stage dev workflow, 6 human gates) plus
+Current shipped state: the v1 pipeline (7-stage dev workflow, 6 human gates),
 the v2 YAML workflow engine (v2.0–v2.2: multi-workflow loader, `job`/`job_cli`
-content-pipeline integration, CLI backend dispatch for `claude`/`agy`). 239
-tests, 95% coverage. See [`STATUS.md`](../STATUS.md) for the current snapshot
-and [`BACKLOG.md`](1_product_and_research/BACKLOG.md) for what's next.
+content-pipeline integration, CLI backend dispatch), and **loop mode through
+Phase L2 (v3.0 + v3.1)** — `CodexBackend`, `loop_dev.yaml`, PR delivery, and
+the `atlas loop` daemon, all verified live against a real GitHub repo on
+2026-07-27. 484 tests, 1 xfail, 95% coverage. Next is Phase L3 (self-healing +
+routing). See [`STATUS.md`](../STATUS.md) for the snapshot and
+[`BACKLOG.md`](1_product_and_research/BACKLOG.md) for what's pending.
 
 ---
 
@@ -36,6 +39,42 @@ and [`BACKLOG.md`](1_product_and_research/BACKLOG.md) for what's next.
 - **4_testing/** — *When to read:* you're adding a test, wondering what's a
   release blocker, or setting up CI locally. See
   [4_testing/index.md](4_testing/index.md).
+
+---
+
+## Cross-cutting: loop mode (v3)
+
+The autonomous loop is the newest cross-cutting area — it has a design note, a
+phase contract, an architecture section, two guides that changed because of
+it, and a body of field evidence. Entry points, in reading order:
+
+- **[2_architecture/TRD-v3.md](2_architecture/TRD-v3.md)** — *When to read:*
+  you want the phase contract and the current shipped semantics of engines,
+  telemetry, budgets, and delivery. **Start with its "Where reality diverged
+  from this contract" table** — five load-bearing design assumptions were
+  wrong, and that table is the index of what changed.
+- **[2_architecture/system_design.md § Loop mode](2_architecture/system_design.md#loop-mode-v3)**
+  — *When to read:* you want the component-level picture (`loop.py`,
+  `queue_gh.py`, `triage.py`, `deliverer.py`, `loop_budget.py`) and what is
+  reused verbatim from v1/v2.
+- **[3_guides/cli_backends.md](3_guides/cli_backends.md)** — *When to read:*
+  you're choosing or debugging an engine. Backend resolution, per-engine
+  model names, telemetry, and the `codex` backend all live here.
+- **Phase records, archived and frozen:**
+  [`dev/archive/loop-mode-phase-L0/`](../dev/archive/loop-mode-phase-L0/),
+  [`loop-mode-phase-L1/`](../dev/archive/loop-mode-phase-L1/),
+  [`loop-mode-phase-L2/`](../dev/archive/loop-mode-phase-L2/). These are
+  **completed** phases, not active work. The single highest-value document in
+  the set is the **field-findings section** at the end of
+  [`loop-mode-phase-L2-tasks.md`](../dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md)
+  — eight defects that survived 400+ green tests, `mypy --strict`, and a full
+  code review, because each lived on a path CI never executed. Read it before
+  trusting "code-complete" as a synonym for "works".
+- **[dev/active/loop-mode-phase-L3/](../dev/active/loop-mode-phase-L3/)** —
+  the one loop-mode TRS that *is* active: written, not implemented.
+- **[1_product_and_research/loop-mode-design.md](1_product_and_research/loop-mode-design.md)**
+  — the originating design note (2026-07-21). A frozen research artifact;
+  where it and TRD-v3 disagree, TRD-v3 wins.
 
 ---
 
@@ -70,7 +109,9 @@ rather than one facet of it, the guide is the right single entry point:
 | Understand gates, stages, the state file | [3_guides/core_concepts.md](3_guides/core_concepts.md) |
 | Write a custom workflow YAML | [3_guides/yaml_workflow_engine.md](3_guides/yaml_workflow_engine.md#writing-a-custom-workflow) |
 | Run the job-search workflow | [3_guides/job_workflow.md](3_guides/job_workflow.md) |
-| Pick / debug a CLI backend (claude vs agy) | [3_guides/cli_backends.md](3_guides/cli_backends.md) |
+| Pick / debug a CLI backend (claude / codex / agy) | [3_guides/cli_backends.md](3_guides/cli_backends.md) |
+| Set a per-engine model, or record cost/tokens | [3_guides/cli_backends.md](3_guides/cli_backends.md#model-selection-is-per-engine) |
+| Run the autonomous loop | [2_architecture/TRD-v3.md](2_architecture/TRD-v3.md#38-cli-surface) §3.8, then `[loop]` config in [3_guides/getting_started.md](3_guides/getting_started.md#configuration) |
 | Understand the system architecture | [2_architecture/system_design.md](2_architecture/system_design.md) |
 | Know what's shipped vs. pending | [../STATUS.md](../STATUS.md), [1_product_and_research/BACKLOG.md](1_product_and_research/BACKLOG.md) |
 | Add or run tests | [4_testing/index.md](4_testing/index.md) |
@@ -85,10 +126,12 @@ rather than one facet of it, the guide is the right single entry point:
   numbered by domain (`1_product_and_research` → `2_architecture` →
   `3_guides` → `4_testing`).
 - **`dev/active/`** — work-in-progress technical designs for features
-  currently being built. Empty when nothing is in flight.
+  currently being built. Empty when nothing is in flight. Currently holds
+  **only** the Phase L3 TRS; loop-mode L0–L2 have been archived.
 - **`dev/archive/`** — historical record of completed features: TDS/plan/
   context/tasks documents, code reviews, and superseded design notes that
   grounded now-shipped work. Not evergreen — reflects what was true when
-  written, not necessarily current behavior.
+  written, not necessarily current behavior. The one exception worth reading
+  for its own sake is the L2 field-findings log, linked above.
 - **[`CLAUDE.md`](../CLAUDE.md)** — repo-wide conventions (300 LoC ethos,
   file-based state, coding style) plus the doc map used by agent sessions.

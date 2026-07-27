@@ -179,10 +179,13 @@ it depends only on the `StageRunner` Protocol.
   `SubprocessStageRunner`.
 - **`SubprocessStageRunner`** (`orchestrator.py`) — the v1 runner,
   generalized in Phase 3 to dispatch through a `CliBackend` strategy
-  (`ClaudeCodeBackend` or `AntigravityBackend`) instead of a hardcoded
-  `claude -p` argv build. Backend resolution is a 4-tier cascade:
-  per-stage YAML → workflow `default_backend` → `.atlas.toml [backend]` →
-  hard default `"claude"`.
+  (`ClaudeCodeBackend`, `AntigravityBackend`, or `CodexBackend`) instead of a
+  hardcoded `claude -p` argv build. Backend resolution is a **5-tier**
+  cascade: explicit run-scoped override (`atlas run --backend`, or the loop's
+  `engine:*` label) → per-stage YAML → workflow `default_backend` →
+  `.atlas.toml [backend]` → hard default `"claude"`. The override tier was
+  added 2026-07-26 — it previously sat *below* the workflow default, which
+  silently disabled both surfaces that use it.
 - **`LibraryStageRunner`** (`library_runner.py`) — dispatches `LIB:` tool
   strings to in-process content-pipeline adapters via a closed registry
   (`atlas/library_adapters/`). Used by the `job` workflow.
@@ -196,12 +199,16 @@ Full schema, dispatch chain diagram, and error-type tables:
 
 ### Loop mode (v3)
 
-> **Status:** planning. This section is the architecture-level view; the phase
-> contract is [`TRD-v3.md`](./TRD-v3.md) and the source-of-truth design note is
-> [`loop-mode-design.md`](../1_product_and_research/loop-mode-design.md). Loop
-> mode is **additive** — everything in v1/v2 above is unchanged. The loop
-> constructs and drives `Pipeline` instances exactly as `atlas.cli::run` does
-> today.
+> **Status: SHIPPED through Phase L2 (`v3.1`), verified live 2026-07-27.**
+> Phases L0/L1/L2 are complete; L3 (self-healing + routing) is next. This
+> section is the architecture-level view; the phase contract is
+> [`TRD-v3.md`](./TRD-v3.md) — read its "Where reality diverged from this
+> contract" table before trusting any design-time claim in the older
+> [`loop-mode-design.md`](../1_product_and_research/loop-mode-design.md), which
+> is a frozen research artifact from 2026-07-21. Loop mode is **additive** —
+> everything in v1/v2 above is unchanged in shape. The loop constructs and
+> drives `Pipeline` instances the same way `atlas.cli::run` does, through the
+> shared `pipeline_factory.make_pipeline()`.
 
 Loop mode turns atlas from a single-run, operator-present orchestrator into a
 long-running driver. The operator's involvement collapses to two points:
@@ -268,8 +275,17 @@ DAG engine:
 7. **Comment + relabel** — post the plumb `run_id` and a score summary on the PR.
 
 **`run_forever()`** wraps `tick()` with the configured interval, a per-day
-budget (run count + dollar cap from real `runs.dollar_cost`), and a circuit
-breaker (consecutive no-progress ticks or identical errors → cooldown → resume).
+budget, and a circuit breaker (consecutive no-progress ticks or identical
+errors → cooldown → resume). It configures logging and accepts `--verbose`;
+before it did, the daemon logged nothing, which is what hid every other defect
+the first live run turned up. The budget is two caps kept in
+`.atlas/loop-state.json` (`loop_budget.py`): a **run count**, and a **dollar
+cap** accumulated from the backend-reported cost each run returns — the same
+figure atlas writes to plumb's `runs.dollar_cost` via `set_usage`. Both are
+live as of 2026-07-27; **only `claude` feeds the dollar cap**, because the
+Codex CLI reports no cost at all, so a Codex-heavy day is bounded by the run
+count alone. `atlas loop status` prints that caveat rather than implying the
+dollar figure is complete.
 It first calls **`reconcile_orphans()`** — a crash-recovery pass that resets any
 `atlas:working` issue with no open PR back to `atlas:ready` and prunes stale
 `.atlas/worktrees/*`. The loop processes **one issue per tick** and is
@@ -309,15 +325,33 @@ unwired `merge_back()` path. It **pushes a branch and opens a PR only**: never
 
 #### Engines & telemetry
 
-Engine per run resolves through the existing 4-tier `CliBackend` cascade, with
-the loop injecting the backend from an `engine:*` label. **`CodexBackend`** is
-the one new backend (`codex exec --json -C <worktree> --sandbox
+Engine per run resolves through the `CliBackend` cascade above, with the loop
+injecting the backend from an `engine:*` label at **tier 1**. **`CodexBackend`**
+is the one new backend (`codex exec --json -C <worktree> --sandbox
 workspace-write`, JSONL result parsing, fail-closed `preflight`), registered in
-`_KNOWN_BACKENDS` alongside `claude` and the experimental `agy`. In loop mode
-`ClaudeCodeBackend` also emits `--output-format json` so `total_cost_usd` +
-`usage` populate the `runs.tokens_in` / `tokens_out` / `dollar_cost` columns
-(which already exist) — guarded by a per-run flag so **attended** `dev` runs keep
-their plain-text stdout for gate-parity.
+`_KNOWN_BACKENDS` alongside `claude` and the experimental `agy`. Model names are
+**engine-specific** — `Config.model` is a Claude name, and handing it to codex
+is an HTTP 400, so per-engine names live in `.atlas.toml`'s `[backend.models]`
+and an engine with no entry falls back to its own CLI default.
+
+With telemetry requested, `ClaudeCodeBackend` emits `--output-format json` and
+the parsed cost/tokens flow to plumb: tokens per span via
+`add_span(tokens=(in, out))` plus the raw per-engine breakdown in
+`spans.attributes`, and run-level `dollar_cost` via plumb v1.1's `set_usage()`.
+Telemetry is **opt-in** — the loop always requests it; attended runs need
+`atlas run --telemetry` — so `dev` runs keep their plain-text stdout for
+gate-parity and their argv byte-identical to pre-loop-mode. The flag is
+deliberately independent of the `acceptEdits` permission mode below, so
+measuring an attended run never widens what the agent may do.
+
+Three things a reader should not assume here, all corrected by live capture:
+Claude's JSON mode emits an **array** of stream events ending in a
+`type: "result"` element, not a single object; Anthropic's token fields are
+**disjoint** (billed input sums `input_tokens` + both cache fields) while
+OpenAI's are **nested** (`cached_input_tokens ⊆ input_tokens`); and Codex
+reports **no cost figure at all**, so a Codex run's `runs.dollar_cost` is
+`NULL` by design rather than `0.0`. Detail and evidence:
+[`TRD-v3.md`](./TRD-v3.md) §3.3 and §3.6.
 
 #### Security posture (loop mode)
 
@@ -326,7 +360,12 @@ their plain-text stdout for gate-parity.
   checked-in `.claude/settings.json`) + a `--max-turns` cap. Never
   `--dangerously-skip-permissions`; the worktree is a directory boundary, not a
   filesystem sandbox. `CodexBackend` uses `--sandbox workspace-write` for the
-  equivalent confinement.
+  equivalent confinement. **That distinction is not theoretical:** the first
+  live loop run had an unattended agent commit into the operator's own
+  checked-out branch. Unattended dispatch now runs with `cwd` set to the
+  worktree (attended runs keep the atlas root, which plugin discovery resolves
+  against), and a commit landing outside the worktree is detected and
+  reported rather than silently delivering an empty branch.
 - **PR-only delivery.** The loop never pushes `main`, merges, or force-pushes.
 - **Prompt injection via issue bodies.** Issue text becomes part of the agent
   prompt. In a **private, single-author** repo (the v3 target) this equals the
@@ -335,13 +374,18 @@ their plain-text stdout for gate-parity.
   before dispatch, or sanitize the body — a hard requirement gated on repo
   visibility.
 - **Runaway bound.** A per-day **cost cap** and a **no-progress circuit
-  breaker** both bound the loop; neither alone is sufficient.
+  breaker** both bound the loop; neither alone is sufficient. The cost cap
+  only sees `claude` spend (Codex reports none), so on that lane the **run
+  count is the load-bearing cap, not the backstop** — set it conservatively
+  enough to bound spend on its own.
 
 #### New on-disk / config surface
 
 | File / config | Purpose |
 |---|---|
 | `.atlas.toml [loop]` / `~/.atlas/config.toml [loop]` | repos, poll interval, budgets, breaker thresholds, concurrency |
+| `.atlas.toml [backend.models]` | per-engine model names, e.g. `codex = "gpt-5.1-codex"` |
+| `.atlas/loop-state.json` | flat `LoopState` — day, runs today, dollars today, last tick, breaker state. Read by `atlas loop status`. |
 | target repo `.claude/settings.json` | loop-run tool allowlist (per target repo) |
 | `.atlas/runs/<run_id>.log` | per-run log — the primary `atlas loop attach` tail surface |
 
@@ -411,6 +455,8 @@ erDiagram
         status enum
         start_ts timestamp
         end_ts timestamp
+        tokens_in integer
+        tokens_out integer
         dollar_cost numeric
     }
     spans {
@@ -422,6 +468,9 @@ erDiagram
         input_hash string
         start_ts timestamp
         end_ts timestamp
+        tokens_in integer
+        tokens_out integer
+        attributes json
     }
     scores {
         id PK
@@ -445,6 +494,16 @@ erDiagram
 Full schema lives in plumb's repo. `runs.kind` is intentionally absent
 in v1 (resolved 2026-04-24 — added later as a single column + backfill
 to `"dev_workflow"` if a second run kind appears).
+
+The usage columns above are plumb **v1.1**. Atlas writes `spans.tokens_in` /
+`tokens_out` per stage, the raw per-engine token breakdown plus the name of
+the reduction rule that produced the pair into `spans.attributes`, and
+run-level `dollar_cost` via `RunHandle.set_usage()` — leaving the run-level
+token fields unset so plumb auto-fills them from buffered spans. Storing the
+rule name alongside the raw fields is what made a reduction rule that later
+proved wrong (Codex's cached tokens) a recomputable error rather than
+permanently corrupt data. There is **no per-span cost column** and there is
+not intended to be one.
 
 ### Atlas-owned on-disk state
 

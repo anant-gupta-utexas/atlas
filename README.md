@@ -2,7 +2,7 @@
 
 > Phase-gated agent orchestrator for a structured dev workflow.
 
-[![Tests](https://img.shields.io/badge/tests-239%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-484%20passing-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -51,9 +51,13 @@ so the data is analyzable after the fact.
 - **git worktree boundary for isolated stages.** Any stage with
   `isolate: true` (code_gen in the dev workflow) runs in an isolated
   worktree — main is never touched by the agent directly.
-- **CLI backend dispatch.** Stages can run through `claude -p` or
-  `agy -p` (Antigravity/Gemini, experimental), selected per-stage,
-  per-workflow, or via `.atlas.toml`.
+- **CLI backend dispatch.** Stages can run through `claude -p`,
+  `codex exec`, or `agy -p` (Antigravity/Gemini, experimental), selected
+  per-run (`--backend`), per-stage, per-workflow, or via `.atlas.toml`.
+- **An autonomous loop mode (v3.1).** `atlas loop run` pulls labeled
+  GitHub issues, runs the pipeline unattended in a worktree, and opens a
+  PR — never merging, never pushing `main`. The human gate becomes the PR
+  review. Bounded by per-day run and cost caps and a circuit breaker.
 - **Post-commit hook.** `atlas hook install` writes deterministic
   `verify_pass` and `gate_commit` scores on every commit.
 - **Compaction-safe state file.** `dev/active/<task>/tasks.md` is the
@@ -64,7 +68,7 @@ so the data is analyzable after the fact.
 - **Full plumb integration.** Every run produces a `runs` row, one typed
   span per stage, one gate score per gate, and an `examples` row per gate
   rejection.
-- **239 tests, 95% coverage.**
+- **484 tests, 95% coverage.**
 
 ---
 
@@ -163,7 +167,7 @@ unchecked box — no human re-briefing.
 | System design + span tree | [docs/2_architecture/system_design.md](docs/2_architecture/system_design.md) |
 | v2 technical requirements | [docs/2_architecture/TRD-v2.md](docs/2_architecture/TRD-v2.md) |
 | Dev environment setup | [docs/3_guides/getting_started.md](docs/3_guides/getting_started.md) |
-| Testing strategy (239 tests) | [docs/4_testing/index.md](docs/4_testing/index.md) |
+| Testing strategy (484 tests) | [docs/4_testing/index.md](docs/4_testing/index.md) |
 | What's shipped now | [STATUS.md](STATUS.md) |
 | What's pending / future work | [docs/1_product_and_research/BACKLOG.md](docs/1_product_and_research/BACKLOG.md) |
 | Repo conventions | [CLAUDE.md](CLAUDE.md) |

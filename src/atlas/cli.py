@@ -91,8 +91,9 @@ def run(
         "",
         "--backend",
         "-b",
-        help="CLI backend to dispatch with (claude / agy / codex). Overrides "
-        "the configured default; a stage's own `backend:` field still wins.",
+        help="CLI backend to dispatch with (claude / agy / codex). Wins over "
+        "every other tier, including a stage's own `backend:` field and the "
+        "workflow's default_backend — it is an explicit, run-scoped choice.",
     ),
     telemetry: bool = typer.Option(
         False,

@@ -98,14 +98,15 @@ The dev workflow uses only plugin slash-commands (no prefix). The `job` workflow
 
 ## CLI backends
 
-`RAW:` and plugin-command stages dispatch through a `CliBackend` strategy. The backend is selected per-stage via a 4-tier cascade:
+`RAW:` and plugin-command stages dispatch through a `CliBackend` strategy. The backend is selected per-stage via a 5-tier cascade:
 
-1. Per-stage `backend:` field in the workflow YAML.
-2. Workflow-level `default_backend:` field.
-3. `.atlas.toml [backend] default`.
-4. Hard default: `"claude"`.
+1. Explicit run-scoped override — `atlas run --backend <name>`, or a loop issue's `engine:<name>` label.
+2. Per-stage `backend:` field in the workflow YAML.
+3. Workflow-level `default_backend:` field.
+4. `.atlas.toml [backend] default`.
+5. Hard default: `"claude"`.
 
-Currently supported backends: `"claude"` (Claude Code CLI) and `"agy"` (Antigravity/Gemini, experimental). See [cli_backends.md](cli_backends.md) for auth requirements and error types.
+Supported backends: `"claude"` (Claude Code CLI), `"codex"` (OpenAI Codex CLI), and `"agy"` (Antigravity/Gemini, experimental). Model names are **engine-specific** and configured separately under `[backend.models]`. See [cli_backends.md](cli_backends.md) for auth requirements, telemetry, and error types.
 
 ---
 

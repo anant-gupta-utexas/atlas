@@ -14,9 +14,19 @@ decisions, and a set of TRD Development Phases (L0–L4). Each phase is then
 detailed into its own per-phase TRS via the standard Tech-Lead workflow.
 
 > **Scope of this doc vs. the TRD.** This note proposes the phases and the
-> load-bearing design decisions. `docs/2_architecture/TRD-v2.md` (phase contract)
-> and `docs/2_architecture/system_design.md` (component architecture) are the
-> authoritative homes once updated — this note feeds them.
+> load-bearing design decisions. [`TRD-v3.md`](../2_architecture/TRD-v3.md)
+> (phase contract) and
+> [`system_design.md`](../2_architecture/system_design.md) (component
+> architecture) are the authoritative homes — this note fed them.
+>
+> **⚠ Frozen research artifact (2026-07-21). Do not read it as current
+> behavior.** Phases L0–L2 shipped on 2026-07-27 and several assumptions in
+> this note turned out wrong under live execution — most notably backend
+> resolution (now 5-tier, with an explicit override on top), plumb's
+> writability (`runs.dollar_cost` is written today via v1.1's `set_usage()`),
+> and Codex's token semantics (`cached_input_tokens` is a subset, not an
+> addend). See TRD-v3's **"Where reality diverged from this contract"** table
+> for the full list. Where this note and TRD-v3 disagree, TRD-v3 wins.
 
 ---
 

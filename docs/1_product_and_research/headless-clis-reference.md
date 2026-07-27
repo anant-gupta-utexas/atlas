@@ -551,10 +551,12 @@ atlas's reduction rule is now `openai_subset_fields_v2` (`cli_backend.codex_usag
 added for.
 
 **No cost field exists anywhere in the schema.** Codex does not report a dollar figure at all
-— this is a data-availability gap, not a plumb-storage gap (contrast with Claude's
-`total_cost_usd`, which the CLI *does* report — see Part B — but which plumb can't yet persist,
-BACKLOG.md P1-a). Cross-engine cost comparison is therefore **tokens-only**; no price table is
-implemented anywhere in atlas's v3 loop-mode arc.
+— this is a **data-availability** gap, not a storage gap. Contrast with Claude's
+`total_cost_usd`, which the CLI *does* report (see Part B) and which atlas now persists as
+run-level `dollar_cost` via plumb v1.1's `set_usage()` — the P1-a blocker this paragraph used
+to cite closed on 2026-07-27. Codex's gap does not close with it: there is nothing to store.
+Cross-engine cost comparison is therefore **tokens-only**, and no price table is implemented
+anywhere in atlas's v3 loop-mode arc.
 
 ### Exit codes
 
@@ -648,7 +650,8 @@ signal than `agy`'s.
 
 ## Cross-references
 
-- Project README: [`README.md`](./README.md)
-- Repo: <https://github.com/anant-gupta-utexas/content-pipeline>
-- LLM port & adapters: `src/application/ports/llm.py`, `src/infrastructure/llm/{anthropic,openrouter,ollama}_client.py`
-- **Layer-ownership decision** (atlas owns CLI-subprocess dispatch; this project stays API-only) and the `CliBackend` implementation spec that consumes Parts B–D above: [`../atlas/cli-backend-dispatch.md`](../atlas/cli-backend-dispatch.md)
+- Docs hub: [`../README.md`](../README.md)
+- content-pipeline repo (the project Part A's decision is about): <https://github.com/anant-gupta-utexas/content-pipeline>
+- Its LLM port & adapters: `src/application/ports/llm.py`, `src/infrastructure/llm/{anthropic,openrouter,ollama}_client.py`
+- **Layer-ownership decision** (atlas owns CLI-subprocess dispatch; content-pipeline stays API-only) and the `CliBackend` implementation spec that consumes Parts B–D above: [`cli-backend-dispatch.md`](../../dev/archive/yaml-workflow-engine-design-notes/cli-backend-dispatch.md) *(archived design note — the decision shipped in v2.2)*
+- Current backend behavior, as shipped: [`../3_guides/cli_backends.md`](../3_guides/cli_backends.md). Prefer it over this reference for atlas's own resolution order, model handling, and error types.

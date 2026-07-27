@@ -1,7 +1,7 @@
 ---
 title: atlas — backlog
 status: living document
-last_updated: 2026-07-15
+last_updated: 2026-07-27
 ---
 
 # Backlog
@@ -61,7 +61,7 @@ Grouped by theme, not by origin doc. Each item notes where it came from.
       and added via repo Settings → Secrets. Note this leg is currently moot
       anyway — see the CI-triggers item below.
 
-## Loop mode (v3) — planning locked, not yet built
+## Loop mode (v3) — L0/L1/L2 shipped; L3/L4 not yet built
 
 Autonomous, minimal-input development loop on top of the v2 engine. Design note:
 [`loop-mode-design.md`](loop-mode-design.md); phase contract:

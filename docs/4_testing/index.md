@@ -2,7 +2,9 @@
 
 ## Overview
 
-Atlas ships 239 tests at 95% coverage as of v2.2. CI is manual-only (`workflow_dispatch`) — this is a single-maintainer repo, so the suite is the local pre-commit gate rather than an on-push check. When run, it enforces the same quality gates: `pytest`, `ruff check`/`ruff format`, and `mypy --strict src`.
+Atlas ships **484 tests + 1 xfail at 95% coverage** as of v3.1 (measured 2026-07-27). CI is manual-only (`workflow_dispatch`) — this is a single-maintainer repo, so the suite is the local pre-commit gate rather than an on-push check. When run, it enforces the same quality gates: `pytest`, `ruff check`/`ruff format`, and `mypy --strict src`.
+
+> **Read this before trusting the number above.** Those 484 tests, plus `mypy --strict` and a full code review, all passed on a build in which **loop mode's telemetry chain was never connected** and the quick lane **never committed its work** — eight defects total, each living on a path CI does not execute. Every one was found by running the system against real GitHub and real engines. The lesson this suite has to carry forward: **unit-testing each link of a chain does not test the chain.** Where a path can only be exercised against an external system, the manual check is the test, and "code-complete with manual checks outstanding" means *unverified*. See the field-findings section of [`loop-mode-phase-L2-tasks.md`](../../dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md).
 
 ## Test organization
 
@@ -20,7 +22,13 @@ tests/
 │   ├── test_library_runner.py      # LIB: registry, not-installed, adapter exception
 │   ├── test_library_adapters.py    # score_jobs_adapter + capture_adapter (mocked use-cases)
 │   ├── test_non_dev_workflow.py    # synthetic non-dev workflow: namespaced metrics, resume
-│   ├── test_config.py              # TOML layering, default_backend field
+│   ├── test_config.py              # TOML layering, [backend] / [backend.models] / [loop]
+│   ├── test_plumb_io.py            # span writes, tokens, run-level set_usage
+│   ├── test_deliverer.py           # GhPrDeliverer: branch-scoped push, protected-branch refusal
+│   ├── test_queue_gh.py            # gh adapter: label transitions, sync outcome mapping
+│   ├── test_triage.py              # two-lane router: label wins, classifier fallback
+│   ├── test_loop.py                # tick state machine, budgets, breaker, reconcile_orphans
+│   ├── test_cli_loop.py            # atlas loop run/start/stop/status/attach
 │   ├── test_routing_fixture_match.py   # dev.yaml matches routing_ground_truth.json
 │   ├── test_phase4.py              # SubprocessStageRunner backend wiring
 │   ├── test_worktree.py            # git worktree lifecycle
@@ -29,7 +37,8 @@ tests/
 │   └── test_t51_closure.py         # stage 5 → stage 6 transition
 ├── integration/
 │   ├── test_job_workflow_e2e.py    # job + job_cli workflows end-to-end (mocked use-cases)
-│   ├── test_cli_backend_dispatch.py  # agy dispatch, mixed-backend workflow, dev regression
+│   ├── test_cli_backend_dispatch.py  # agy/codex dispatch, mixed-backend workflow, dev regression
+│   ├── test_loop_e2e.py            # issue → triage → dispatch → deliver → sync, faked gh
 │   ├── test_job_adapters_real_import.py  # real content-pipeline import (skipped if extra absent)
 │   └── test_main_branch_isolation.py    # git worktree does not touch main
 ├── e2e/
@@ -75,17 +84,35 @@ Calls the post-commit score writer twice with the same commit SHA. Asserts plumb
 
 `test_non_dev_workflow.py` drives a synthetic `job` workflow through a sync gate and the async hook gate. Asserts that `job.gate_shortlist` (not `gate_shortlist`) and `job.gate_shipped` (not `gate_shipped`) are the metric names written to plumb. Verified to fail against pre-fix code, making these genuine regression guards, not tautologies.
 
+### 9. Delivery safety (loop mode)
+
+`test_deliverer.py` asserts `GhPrDeliverer` pushes a branch and opens a PR, and **never** pushes a protected branch and **never** force-pushes. Protected-branch matching is not exact-match on `"main"` — it strips `refs/heads/`, lowercases, and trims, covers `main`/`master`/`trunk`/`develop`, and additionally probes `origin/HEAD` to catch an unusually-named default branch. That probe **fails open**, because a missing `origin/HEAD` is common in fresh clones and must not block delivery.
+
+### 10. Orphan reconciliation
+
+Startup resets a stale `atlas:working` issue with no open PR back to `atlas:ready` and prunes its worktree — keyed on `.atlas/current-run`'s exact path so a *live* run is never swept. The live-run exclusion is the load-bearing half: an over-eager reconcile would reclaim the issue it is currently working on.
+
+### 11. Telemetry chain, end to end
+
+A dispatch that reports usage must produce a span with non-zero tokens **and** a run with a non-`NULL` `dollar_cost`. Added after the L0 telemetry chain shipped fully unit-tested and entirely disconnected: `parse_usage()` had no production caller, `StageOutcome` had no usage field, `record_span()` was called with no `tokens=`, and nothing requested the JSON envelope. Each link was green; the chain did not exist.
+
 ## Coverage targets
 
-| Module | Target | Achieved (v2.2) |
+| Module | Target | Achieved (v3.1, 2026-07-27) |
 |---|---|---|
 | `workflow_loader.py` | ≥ 90% | 100% |
-| `cli_backend.py` | ≥ 85% | 100% |
-| `library_runner.py` | ≥ 85% | ≥ 85% |
-| `library_adapters/` | ≥ 80% | ≥ 80% |
-| `orchestrator.py` | ≥ 80% | ≥ 80% |
-| `state.py` | ≥ 80% | ≥ 80% |
-| Repo-wide | ≥ 80% | 95% |
+| `cli_backend.py` | ≥ 85% | 99% |
+| `library_runner.py` | ≥ 85% | 100% |
+| `library_adapters/` | ≥ 80% | 100% |
+| `orchestrator.py` | ≥ 80% | 95% |
+| `state.py` | ≥ 80% | 94% |
+| `loop.py` | ≥ 85% | 90% |
+| `queue_gh.py` | ≥ 90% | 92% |
+| `triage.py` | ≥ 85% | 95% |
+| `loop_budget.py` | ≥ 85% | 96% |
+| `deliverer.py` | ≥ 85% | 100% |
+| `plumb_io.py` | ≥ 80% | 89% |
+| Repo-wide | ≥ 80% (CI floor) | 95% |
 
 ## Running tests
 
@@ -113,7 +140,9 @@ mypy --strict src/
 
 ## Mocking strategy
 
-**`SubprocessStageRunner` and backends:** Mock at the `subprocess.run` boundary. Do not shell out to `claude` or `agy` in tests. Provide realistic stdout and a zero exit code for success cases; non-zero for failure paths.
+**`SubprocessStageRunner` and backends:** Mock at the `subprocess.run` boundary. Do not shell out to `claude`, `codex`, or `agy` in tests. Provide realistic stdout and a zero exit code for success cases; non-zero for failure paths. **Use real captured envelopes as fixtures, not hand-written ones** — the Claude array-envelope and Codex cached-token defects both slipped through precisely because the fixtures encoded what the docs said the CLIs emit rather than what they actually emit.
+
+**`queue_gh.py` and the loop:** fake the `gh` subprocess and assert on label transitions and sync-outcome mapping; fake `time` for the poll interval and cooldown. Never let a test reach real GitHub.
 
 **`LibraryStageRunner` adapters:** Mock at the content-pipeline use-case class boundary (`ScoreJobsUseCase`, `CaptureUseCase`), not at `_import_adapter`. This ensures the real adapter module body runs and catches future API mismatches between the adapter and content-pipeline.
 
@@ -125,7 +154,7 @@ mypy --strict src/
 
 ## CI configuration
 
-GitHub Actions on push and PR:
+GitHub Actions, **`workflow_dispatch` only** — no job runs on push or PR today. Restoring `on: [push, pull_request]` is a one-line decision tracked in [`BACKLOG.md`](../1_product_and_research/BACKLOG.md); until then everything below describes what a *manually triggered* run does, and the local suite is the real gate.
 
 1. `pytest` — all unit + integration tests (E2E excluded by default).
 2. `ruff check .` — linting.

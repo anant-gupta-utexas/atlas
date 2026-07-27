@@ -39,6 +39,7 @@ composite_runner.py  ─ CompositeStageRunner: prefix-dispatch to the right runn
 shell_runner.py      ─ ShellStageRunner: SHELL: → direct list-form subprocess
 library_runner.py    ─ LibraryStageRunner: LIB: → in-process Python adapter
 cli_backend.py       ─ CliBackend Protocol + ClaudeCodeBackend + AntigravityBackend
+                       + CodexBackend (v3), backend/model resolution, usage parsing
 ```
 
 `orchestrator.py` contains `SubprocessStageRunner` (the `RAW:` and plugin-command runner) and the `Pipeline` class. `Pipeline` is deliberately unaware of runners and backends — it sees only the `StageRunner` Protocol surface.
@@ -207,7 +208,7 @@ CompositeStageRunner.run(ctx, stage)
                                          (handles RAW: and plugin-command tools)
 ```
 
-Runners are wired in `cli.py::_make_pipeline()`. `LibraryStageRunner` is only instantiated when the resolved workflow has at least one `LIB:` stage. `ShellStageRunner` is only instantiated when there is at least one `SHELL:` stage. Dev workflow runs never instantiate either, so their code paths are never touched during a default `atlas run`.
+Runners are wired in `pipeline_factory.py::make_pipeline()` (moved out of `cli.py::_make_pipeline` in v3.1 so `atlas run`/`resume` and the loop's dispatch share one construction path instead of two that could drift). `LibraryStageRunner` is only instantiated when the resolved workflow has at least one `LIB:` stage. `ShellStageRunner` is only instantiated when there is at least one `SHELL:` stage. Dev workflow runs never instantiate either, so their code paths are never touched during a default `atlas run`.
 
 ### Error types from runners
 
@@ -225,7 +226,7 @@ Runners are wired in `cli.py::_make_pipeline()`. `LibraryStageRunner` is only in
 | `shell_timeout` | ShellStageRunner | `TimeoutExpired` |
 | `plugin_nonzero_exit` | SubprocessStageRunner | `claude -p` exited non-zero |
 | `plugin_timeout` | SubprocessStageRunner | Subprocess timed out |
-| `unknown_backend` | SubprocessStageRunner | `stage.backend` value not in `{"claude", "agy"}` |
+| `unknown_backend` | SubprocessStageRunner | resolved backend name not in `{"claude", "agy", "codex"}` |
 
 ---
 
@@ -233,16 +234,19 @@ Runners are wired in `cli.py::_make_pipeline()`. `LibraryStageRunner` is only in
 
 Applies only to stages dispatched by `SubprocessStageRunner` (plugin-command and `RAW:` stages). `LIB:` and `SHELL:` stages ignore the backend field.
 
-Resolution is a 4-tier cascade, first non-null wins:
+Resolution is a **5-tier** cascade, first non-null wins:
 
-1. `StageSpec.backend` — per-stage YAML field.
-2. `LoadedWorkflow.default_backend` — workflow-level YAML field.
-3. `Config.default_backend` — `.atlas.toml [backend] default`.
-4. Hard default: `"claude"`.
+1. **Explicit run-scoped override** — `atlas run --backend <name>`, or a loop issue's `engine:<name>` label.
+2. `StageSpec.backend` — per-stage YAML field.
+3. `LoadedWorkflow.default_backend` — workflow-level YAML field.
+4. `Config.default_backend` — `.atlas.toml [backend] default`.
+5. Hard default: `"claude"`.
 
-Available backends: `"claude"` and `"agy"`. An unknown backend name surfaces as `error_type="unknown_backend"` at dispatch time (not at load time — the loader stores the value but does not validate it).
+> **Tier 1 was added 2026-07-26.** The override previously sat *below* the workflow `default_backend`, so any workflow declaring one silently beat it — which made both `--backend` and the loop's `engine:*` label inert with no error. If you are looking at an older description of a 4-tier order, this is the one that matches the code.
 
-For full backend documentation including auth requirements, argv shapes, and error types, see [cli_backends.md](cli_backends.md).
+Available backends: `"claude"`, `"codex"`, and the experimental `"agy"`. An unknown backend name surfaces as `error_type="unknown_backend"` at dispatch time (not at load time — the loader stores the value but does not validate it).
+
+Model names are resolved **separately and per-engine** (`[backend.models]` in `.atlas.toml`); they are not interchangeable across engines. For that, plus auth requirements, argv shapes, telemetry, and error types, see [cli_backends.md](cli_backends.md).
 
 ---
 
@@ -370,7 +374,7 @@ This means dev and non-dev runs coexist in the same plumb DB without metric coll
 
 ## Built-in workflows
 
-Three workflows ship in `src/atlas/workflows/`:
+Four workflows ship in `src/atlas/workflows/`:
 
 ### `dev` (default)
 
@@ -393,6 +397,15 @@ A 4-stage job-search workflow that integrates content-pipeline in-process via `L
 ### `job_cli` — job-search pipeline (Mode B)
 
 The same 4 stages as `job`, but `ingest_postings` and `score_fit` dispatch via `SHELL:` to the content-pipeline CLI subprocess. No Python dependency on content-pipeline — the CLI binary must be on `PATH`. See [job_workflow.md](job_workflow.md) for full documentation.
+
+### `loop_dev` — the unattended one-shot workflow (v3)
+
+Added in loop mode Phase L1. Three stages, **ungated**: `plan → code_gen[isolate] → verify`, with `default_backend: claude`. Quality is enforced by the `verify` stage plus the downstream PR review rather than by inline gates, so it is not meaningful to run attended without `--auto-approve`-style expectations — it exists for the loop daemon, which dispatches it for every `wf:quick` issue.
+
+Two schema details it is the first workflow to exercise, both of which surfaced real bugs:
+
+- Its last stage is **ungated**, which `dev.yaml` and `job.yaml` never are. `Pipeline.step()`'s ungated branch unconditionally indexed `self._stages[stage.index + 1]` and raised `IndexError` on the final stage; now guarded the same way the gated branch already was.
+- Its `plan` and `code_gen` tools are `RAW:` strings, and `plugin_resolver.resolve()` did not special-case them despite its docstring saying it did — every stage raised `RoutingDriftError` under a real `atlas loop run` until `resolve()` was fixed to return `RAW:` strings verbatim.
 
 ---
 
@@ -475,7 +488,7 @@ The engine was built in three phases, each tagged independently. This section su
 | `tests/unit/test_library_runner.py` | `LibraryStageRunner` dispatch: unknown ref, not-installed, adapter exception, success passthrough, `timeout_s` ignored |
 | `tests/unit/test_composite_runner.py` | `CompositeStageRunner` prefix dispatch: `LIB:`, `SHELL:`, default fallthrough, `library=None` failure |
 | `tests/unit/test_shell_runner.py` | `ShellStageRunner`: allow-list enforcement, `FileNotFoundError`, `TimeoutExpired`, non-zero exit, success |
-| `tests/unit/test_cli_backend.py` | `ClaudeCodeBackend` argv, `AntigravityBackend` argv + JSON parsing + preflight, `resolve_backend()` 4-tier table, `make_backend()` unknown name |
+| `tests/unit/test_cli_backend.py` | `ClaudeCodeBackend` argv + JSON-envelope parsing + usage reduction, `AntigravityBackend` argv + JSON parsing + preflight, `CodexBackend` argv + JSONL parsing + preflight, `resolve_backend()` 5-tier table, `resolve_model()` per-engine table, `make_backend()` unknown name |
 | `tests/unit/test_non_dev_workflow.py` | Synthetic non-dev workflow through sync gate and async gate; asserts namespaced metrics survive hook + run-id-changing resume |
 | `tests/unit/test_library_adapters.py` | `score_jobs_adapter` and `capture_adapter` with mocked use-case classes |
 | `tests/integration/test_job_workflow_e2e.py` | Full `job` workflow: span-tree shape, namespaced gate scores, dev/job coexistence, not-installed failure path names `job_cli`, `job_cli` variant runs dependency-free |
