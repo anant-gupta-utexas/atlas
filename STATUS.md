@@ -33,9 +33,18 @@ Local suite: **484 passed, 1 xfailed, 95.29% coverage** (measured 2026-07-27).
 
 | Release | What it is | State |
 |---|---|---|
-| **v2.2** | YAML workflow engine — multi-workflow loader, `RAW:`/`LIB:`/`SHELL:`/plugin-command dispatch, `CliBackend` strategy (`claude`/`agy`) | Complete. `pyproject.toml` reads `2.2.0`; the `v2.2` tag exists **locally only** — `git push origin v2.2` is still pending. |
+| **v2.2** | YAML workflow engine — multi-workflow loader, `RAW:`/`LIB:`/`SHELL:`/plugin-command dispatch, `CliBackend` strategy (`claude`/`agy`) | Complete. Tagged at `47027c3` (Phase 3 review). |
 | **v3.0** | Measured baseline (Phases L0+L1) — Claude JSON telemetry → plumb, headless permission profile, `GhPrDeliverer`, `CodexBackend`, `loop_dev.yaml` | Complete, incl. both phases' manual off-CI checks. |
-| **v3.1** | The loop daemon (Phase L2) — `queue_gh.py`, `loop.py`, `triage.py`, `loop_budget.py`, `[loop]` config, `atlas loop run/start/stop/status/attach` | Complete, incl. T-L2.13. TRD-v3 §13 #1–#8 all hold. |
+| **v3.1** | The loop daemon (Phase L2) — `queue_gh.py`, `loop.py`, `triage.py`, `loop_budget.py`, `[loop]` config, `atlas loop run/start/stop/status/attach` | Complete, incl. T-L2.13. TRD-v3 §13 #1–#8 all hold. `pyproject.toml` reads `3.1.0`. |
+
+**On tags.** `v2.2` and `v3.1` exist **locally only** — push with
+`git push origin v2.2 v3.1`. There is deliberately **no `v3.0` tag**, though
+TRD-v3 §11 reserves one for the L0+L1 exit: no commit ever satisfied it. L0's
+headline criterion (§13 #1, a live measured run) was *unimplementable* until
+2026-07-27 — `parse_usage()` had no caller — so the L0/L1 code-complete point
+was not a releasable state, and by the time it became one, L2 was in the same
+tree. Tagging `v3.0` retroactively would assert a working measured baseline
+that never shipped on its own. `v3.1` subsumes it.
 
 Per-module coverage on the loop-mode surface: `loop.py` 90%, `queue_gh.py`
 92%, `triage.py` 95%, `cli_backend.py` 99%, `config.py`/`deliverer.py` 100%.
