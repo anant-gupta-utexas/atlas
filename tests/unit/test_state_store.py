@@ -115,6 +115,80 @@ def test_read_current_run_returns_none_when_absent(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Phase L4 (T-L4.3) — per-run-keyed current-run
+# ---------------------------------------------------------------------------
+
+
+def test_write_and_list_current_runs_keyed(tmp_path):
+    store = _make_store(tmp_path)
+    store.write_current_run_keyed("run-a", "slug-a")
+    store.write_current_run_keyed("run-b", "slug-b")
+
+    runs = store.list_current_runs()
+    assert {(r[0], r[1]) for r in runs} == {("run-a", "slug-a"), ("run-b", "slug-b")}
+
+
+def test_list_current_runs_empty_when_no_runs_dir(tmp_path):
+    store = _make_store(tmp_path)
+    assert store.list_current_runs() == []
+
+
+def test_delete_current_run_keyed_removes_only_that_run(tmp_path):
+    store = _make_store(tmp_path)
+    store.write_current_run_keyed("run-a", "slug-a")
+    store.write_current_run_keyed("run-b", "slug-b")
+
+    store.delete_current_run_keyed("run-a")
+
+    runs = store.list_current_runs()
+    assert [r[0] for r in runs] == ["run-b"]
+
+
+def test_delete_current_run_keyed_is_noop_when_absent(tmp_path):
+    store = _make_store(tmp_path)
+    store.delete_current_run_keyed("nope")  # must not raise
+
+
+def test_keyed_current_run_carries_worktree_and_span(tmp_path):
+    store = _make_store(tmp_path)
+    wt = tmp_path / "wt"
+    store.write_current_run_keyed("run-a", "slug-a", wt, code_gen_span_id="span-1")
+
+    runs = store.list_current_runs()
+    assert runs == [("run-a", "slug-a", wt, "span-1")]
+
+
+def test_attended_singleton_untouched_by_keyed_writes(tmp_path):
+    """Decision #3: the singleton path and the keyed path are independent —
+    writing a keyed run must not create or alter .atlas/current-run."""
+    store = _make_store(tmp_path)
+    store.write_current_run_keyed("run-a", "slug-a")
+
+    assert store.read_current_run() is None
+
+
+def test_assert_consistent_keyed_passes_on_valid_state(tmp_path):
+    store = _make_store(tmp_path)
+    ctx = _make_ctx(tmp_path)
+    store.create_tasks_md(ctx, stages=STAGES)
+    store.write_current_run_keyed(ctx.run_id, ctx.slug)
+
+    store.assert_consistent(ctx, keyed=True)  # must not raise
+
+
+def test_assert_consistent_keyed_raises_when_keyed_file_absent(tmp_path):
+    store = _make_store(tmp_path)
+    ctx = _make_ctx(tmp_path)
+    store.create_tasks_md(ctx, stages=STAGES)
+    # No write_current_run_keyed call, and no singleton either — the keyed
+    # check must not fall back to the singleton file.
+    store.write_current_run(ctx.run_id, ctx.slug)
+
+    with pytest.raises(StateInconsistencyError):
+        store.assert_consistent(ctx, keyed=True)
+
+
+# ---------------------------------------------------------------------------
 # first_unchecked
 # ---------------------------------------------------------------------------
 

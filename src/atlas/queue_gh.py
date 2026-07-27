@@ -153,6 +153,33 @@ def claim(issue: Issue, *, assignee: str, timeout_s: int = _DEFAULT_TIMEOUT_S) -
     _run_gh(argv, timeout_s=timeout_s)
 
 
+def current_assignees(issue: Issue, *, timeout_s: int = _DEFAULT_TIMEOUT_S) -> list[str]:
+    """Return the logins currently assigned to `issue` (Phase L4, T-L4.4).
+
+    Used right after `claim()` to detect a lost claim-race: `gh issue edit
+    --add-assignee` is additive, not exclusive, so two concurrent claimants
+    both land in this list. The caller compares against its own login.
+    """
+    argv = [
+        "gh",
+        "issue",
+        "view",
+        str(issue.number),
+        "--repo",
+        issue.repo,
+        "--json",
+        "assignees",
+    ]
+    stdout = _run_gh(argv, timeout_s=timeout_s)
+    payload = _parse_json(stdout, context="issue view (assignees)")
+    if not isinstance(payload, dict):
+        return []
+    raw = payload.get("assignees", [])
+    if not isinstance(raw, list):
+        return []
+    return [str(a["login"]) for a in raw if isinstance(a, dict) and "login" in a]
+
+
 def deliver_pr(
     issue: Issue,
     *,

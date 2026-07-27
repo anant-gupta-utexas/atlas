@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from atlas import loop
-from atlas.config import Config, LoopConfig
+from atlas.config import Config, LoopConfig, RepoTarget
 from atlas.queue_gh import Issue
 
 _REPO = "anant-gupta-utexas/atlas"
@@ -65,12 +65,20 @@ def _cfg(repo_root: Path, **loop_kwargs: object) -> Config:
     its two RAW: stages bypass the allow-list in plugin_resolver.resolve(), and
     its verify stage is in PLUGIN_COMMANDS. Passing an override here would make
     these tests pass regardless of that, masking a regression."""
-    loop_cfg = LoopConfig(repos=(_REPO,), **loop_kwargs)  # type: ignore[arg-type]
+    loop_cfg = LoopConfig(repos=(RepoTarget(github=_REPO, local_path=repo_root),), **loop_kwargs)  # type: ignore[arg-type]
     return Config(
         repo_root=repo_root,
         plumb_db_path=repo_root / "plumb.db",
         loop=loop_cfg,
     )
+
+
+def _tick(cfg: Config, state: loop.LoopState) -> loop.TickResult:
+    """Run one tick() and unwrap its single-dispatch BatchTickResult — every
+    e2e test here runs at the default concurrency=1."""
+    batch = loop.tick(cfg, state, targets=cfg.loop.repos)
+    assert len(batch.results) == 1
+    return batch.results[0]
 
 
 def _issue(
@@ -163,11 +171,12 @@ def test_one_shot_lane_end_to_end_faked(tmp_path: Path) -> None:
         patch("atlas.queue_gh.list_ready", return_value=[issue]),
         patch("atlas.loop.current_gh_user", return_value="anant"),
         patch("atlas.queue_gh.claim") as claim_mock,
+        patch("atlas.queue_gh.current_assignees", return_value=["anant"]),
         patch("atlas.orchestrator.subprocess.run", side_effect=fake_subprocess),
         patch("atlas.queue_gh.comment") as comment_mock,
         patch("atlas.queue_gh.relabel") as relabel_mock,
     ):
-        result = loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+        result = _tick(cfg, state)
 
     assert result.action == "dispatched"
     assert result.lane == "quick"
@@ -221,10 +230,11 @@ def test_planned_lane_stops_after_plan_pr(tmp_path: Path) -> None:
         patch("atlas.queue_gh.list_ready", return_value=[issue]),
         patch("atlas.loop.current_gh_user", return_value="anant"),
         patch("atlas.queue_gh.claim"),
+        patch("atlas.queue_gh.current_assignees", return_value=["anant"]),
         patch("atlas.loop.subprocess.run", side_effect=fake_subprocess),
         patch("atlas.queue_gh.comment") as comment_mock,
     ):
-        result = loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+        result = _tick(cfg, state)
 
     assert result.action == "dispatched"
     assert result.lane == "planned"
@@ -381,7 +391,7 @@ def test_crash_recovery_full_cycle(tmp_path: Path) -> None:
         patch("atlas.queue_gh.sync", return_value=[]),
         patch("atlas.queue_gh.relabel") as relabel_mock,
     ):
-        reconciled = loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo_root)
+        reconciled = loop.reconcile_orphans(cfg, targets=cfg.loop.repos)
 
     relabel_mock.assert_called_once_with(working_issue, state="ready")
     assert any("issue #9" in item for item in reconciled)
@@ -400,7 +410,7 @@ def test_crash_recovery_prunes_orphaned_worktree(tmp_path: Path) -> None:
         patch("atlas.queue_gh.list_labeled", return_value=[]),
         patch("atlas.queue_gh.sync", return_value=[]),
     ):
-        reconciled = loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo_root)
+        reconciled = loop.reconcile_orphans(cfg, targets=cfg.loop.repos)
 
     assert not orphan_path.exists()
     assert any("worktree" in item for item in reconciled)
@@ -435,7 +445,7 @@ def test_reconcile_retains_live_worktree_and_prunes_colliding_orphan(tmp_path: P
         patch("atlas.queue_gh.list_labeled", return_value=[]),
         patch("atlas.queue_gh.sync", return_value=[]),
     ):
-        reconciled = loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo_root)
+        reconciled = loop.reconcile_orphans(cfg, targets=cfg.loop.repos)
 
     assert live_path.exists(), "live run's worktree was deleted"
     assert not orphan_path.exists(), "colliding orphan was retained"
@@ -460,7 +470,7 @@ def test_reconcile_sweeps_nothing_when_current_run_unreadable(tmp_path: Path) ->
             side_effect=OSError("disk error"),
         ),
     ):
-        reconciled = loop.reconcile_orphans(cfg, repos=[_REPO], repo_root=repo_root)
+        reconciled = loop.reconcile_orphans(cfg, targets=cfg.loop.repos)
 
     assert wt_path.exists()
     assert not any("worktree" in item for item in reconciled)
@@ -481,10 +491,11 @@ def test_loop_passes_max_turns_to_the_backend(tmp_path: Path) -> None:
         patch("atlas.queue_gh.list_ready", return_value=[issue]),
         patch("atlas.loop.current_gh_user", return_value="anant"),
         patch("atlas.queue_gh.claim"),
+        patch("atlas.queue_gh.current_assignees", return_value=["anant"]),
         patch("atlas.orchestrator.subprocess.run", side_effect=fake_subprocess),
         patch("atlas.queue_gh.comment"),
     ):
-        loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+        _tick(cfg, state)
 
     claude_calls = [c for c in fake_subprocess.calls if c[0] == "claude"]
     assert claude_calls, "no backend call was made"
@@ -527,10 +538,11 @@ def test_zero_touch_smoke_faked(tmp_path: Path) -> None:
         patch("atlas.queue_gh.list_ready", return_value=[issue]),
         patch("atlas.loop.current_gh_user", return_value="anant"),
         patch("atlas.queue_gh.claim"),
+        patch("atlas.queue_gh.current_assignees", return_value=["anant"]),
         patch("atlas.orchestrator.subprocess.run", side_effect=fake_subprocess),
         patch("atlas.queue_gh.comment") as comment_mock,
     ):
-        result = loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+        result = _tick(cfg, state)
 
     assert result.action == "dispatched"
     assert result.pr_ref is not None
@@ -583,6 +595,7 @@ def test_retry_cap_doubly_failing_issue_dispatches_exactly_twice(tmp_path: Path)
         patch("atlas.queue_gh.list_ready", side_effect=[[issue], []]),
         patch("atlas.loop.current_gh_user", return_value="anant"),
         patch("atlas.queue_gh.claim"),
+        patch("atlas.queue_gh.current_assignees", return_value=["anant"]),
         # Two separate patch targets, not one: self_heal.py did `from
         # atlas.loop import run_one_shot` / `from atlas.judge_gate import
         # classify_failure`, which binds its own names at first import —
@@ -600,8 +613,8 @@ def test_retry_cap_doubly_failing_issue_dispatches_exactly_twice(tmp_path: Path)
         patch("atlas.queue_gh.comment"),
         patch("atlas.queue_gh.relabel") as relabel_mock,
     ):
-        first = loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
-        second = loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+        first = _tick(cfg, state)
+        second = _tick(cfg, state)
 
     # Exactly 2 dispatch attempts total: the original call (no parent_run_id)
     # and the one retry (parent_run_id set) — never a 3rd, even though tick()

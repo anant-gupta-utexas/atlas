@@ -70,6 +70,7 @@ def _make_pipeline(
     runner: _FakeRunner | None = None,
     prompter: _FakePrompter | None = None,
     commit_wait_timeout_s: int = 0,
+    loop_mode: bool = False,
 ) -> tuple[Pipeline, PlumbIO, StateStore]:
     plumb = PlumbIO(real=False)
     state = StateStore(tmp_path)
@@ -80,6 +81,7 @@ def _make_pipeline(
         runner=runner or _FakeRunner(),
         prompter=prompter or _FakePrompter(),
         commit_wait_timeout_s=commit_wait_timeout_s,
+        loop_mode=loop_mode,
     )
     return pipeline, plumb, state
 
@@ -465,3 +467,42 @@ def test_failed_run_still_reports_cost_to_the_budget(tmp_path):
     assert result.dollar_cost == pytest.approx(0.3)
     assert plumb.usage[-1]["dollar_cost"] == pytest.approx(0.3)
     assert plumb.usage[-1]["tokens_in"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase L4 (T-L4.3) — loop_mode routes .atlas/current-run to the keyed path
+# ---------------------------------------------------------------------------
+
+
+def test_loop_mode_start_writes_keyed_not_singleton(tmp_path):
+    pipeline, _plumb, state = _make_pipeline(tmp_path, loop_mode=True)
+    ctx = pipeline.start(task="do a thing", slug="test-task")
+
+    assert state.read_current_run() is None
+    runs = state.list_current_runs()
+    assert [r[0] for r in runs] == [ctx.run_id]
+
+
+def test_loop_mode_run_to_completion_deletes_the_keyed_run(tmp_path):
+    """A terminal outcome (here: gate rejection) must clear the keyed run,
+    the same as the singleton is cleared in attended mode."""
+    reject = GateDecision(label="rejected", turn_count=1, reason="bad")
+    pipeline, _plumb, state = _make_pipeline(
+        tmp_path, prompter=_FakePrompter(decisions=[reject]), loop_mode=True
+    )
+    ctx = pipeline.start(task="do a thing", slug="test-task")
+
+    result = pipeline.run_to_completion(ctx)
+
+    assert result.status == "failure"
+    assert state.list_current_runs() == []
+
+
+def test_attended_mode_unaffected_by_loop_mode_flag_default(tmp_path):
+    """loop_mode defaults False — attended `atlas run`'s existing singleton
+    behavior must be byte-identical (Pending Decision #3)."""
+    pipeline, _plumb, state = _make_pipeline(tmp_path)
+    ctx = pipeline.start(task="do a thing", slug="test-task")
+
+    assert state.read_current_run() == (ctx.run_id, ctx.slug)
+    assert state.list_current_runs() == []

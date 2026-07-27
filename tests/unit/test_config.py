@@ -6,7 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from atlas.config import Config, LoopConfig, _deep_merge
+from atlas.config import Config, LoopConfig, RepoTarget, _deep_merge
+
+
+def _init_git_repo(path: Path) -> Path:
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    return path
+
 
 # ---------------------------------------------------------------------------
 # _deep_merge
@@ -148,10 +157,10 @@ def test_loop_config_defaults_no_section(tmp_path: Path) -> None:
 
 
 def test_loop_config_section_overrides_defaults(tmp_path: Path) -> None:
+    repo_dir = _init_git_repo(tmp_path / "atlas")
     toml = tmp_path / ".atlas.toml"
     toml.write_text(
         "[loop]\n"
-        'repos = ["anant-gupta-utexas/atlas"]\n'
         "poll_interval_s = 30\n"
         "max_runs_per_day = 5\n"
         "max_dollars_per_day = 2.5\n"
@@ -160,10 +169,20 @@ def test_loop_config_section_overrides_defaults(tmp_path: Path) -> None:
         "identical_error_limit = 4\n"
         "cooldown_min = 15\n"
         "concurrency = 1\n"
+        "\n"
+        "[[loop.repo]]\n"
+        f'github = "anant-gupta-utexas/atlas"\n'
+        f'local_path = "{repo_dir}"\n'
         'trusted_authors = ["anant-gupta-utexas"]\n'
     )
     cfg = Config.load(tmp_path)
-    assert cfg.loop.repos == ("anant-gupta-utexas/atlas",)
+    assert cfg.loop.repos == (
+        RepoTarget(
+            github="anant-gupta-utexas/atlas",
+            local_path=repo_dir,
+            trusted_authors=("anant-gupta-utexas",),
+        ),
+    )
     assert cfg.loop.poll_interval_s == 30
     assert cfg.loop.max_runs_per_day == 5
     assert cfg.loop.max_dollars_per_day == 2.5
@@ -172,23 +191,87 @@ def test_loop_config_section_overrides_defaults(tmp_path: Path) -> None:
     assert cfg.loop.identical_error_limit == 4
     assert cfg.loop.cooldown_min == 15
     assert cfg.loop.concurrency == 1
-    assert cfg.loop.trusted_authors == ("anant-gupta-utexas",)
 
 
-def test_loop_config_concurrency_not_one_raises() -> None:
+def test_loop_config_concurrency_below_one_raises() -> None:
     with pytest.raises(ValueError, match="concurrency"):
-        LoopConfig(concurrency=2)
+        LoopConfig(concurrency=0)
+
+
+def test_loop_config_concurrency_above_one_no_longer_raises() -> None:
+    """Phase L4 lifts the L2/L3-era concurrency==1 guard."""
+    cfg = LoopConfig(concurrency=3)
+    assert cfg.concurrency == 3
 
 
 def test_loop_config_trusted_authors_absent_is_empty_tuple(tmp_path: Path) -> None:
+    repo_dir = _init_git_repo(tmp_path / "a")
     toml = tmp_path / ".atlas.toml"
-    toml.write_text('[loop]\nrepos = ["a/b"]\n')
+    toml.write_text(f'[[loop.repo]]\ngithub = "a/b"\nlocal_path = "{repo_dir}"\n')
     cfg = Config.load(tmp_path)
-    assert cfg.loop.trusted_authors == ()
+    assert cfg.loop.repos[0].trusted_authors == ()
 
 
-def test_loop_config_toml_concurrency_not_one_raises(tmp_path: Path) -> None:
+def test_loop_config_toml_concurrency_zero_raises(tmp_path: Path) -> None:
     toml = tmp_path / ".atlas.toml"
-    toml.write_text("[loop]\nconcurrency = 2\n")
+    toml.write_text("[loop]\nconcurrency = 0\n")
     with pytest.raises(ValueError, match="concurrency"):
         Config.load(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# T-L4.1 — RepoTarget / [[loop.repo]] table-array parsing
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_flat_repos_shape_hard_fails_with_migration_message(tmp_path: Path) -> None:
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text('[loop]\nrepos = ["anant-gupta-utexas/atlas"]\n')
+    with pytest.raises(ValueError, match=r"\[\[loop\.repo\]\]"):
+        Config.load(tmp_path)
+
+
+def test_repo_target_missing_local_path_key_hard_fails(tmp_path: Path) -> None:
+    """A [[loop.repo]] entry missing local_path must not silently default to
+    repo_root (which could accidentally 'work' if repo_root itself is a git
+    repo, masking a config typo) — it must fail loudly instead."""
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text('[[loop.repo]]\ngithub = "a/b"\n')
+    with pytest.raises(ValueError, match="local_path"):
+        Config.load(tmp_path)
+
+
+def test_repo_target_missing_github_key_hard_fails(tmp_path: Path) -> None:
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text(f'[[loop.repo]]\nlocal_path = "{tmp_path}"\n')
+    with pytest.raises(ValueError, match="github"):
+        Config.load(tmp_path)
+
+
+def test_repo_target_local_path_must_exist_and_be_a_git_repo(tmp_path: Path) -> None:
+    toml = tmp_path / ".atlas.toml"
+    missing = tmp_path / "nope"
+    toml.write_text(f'[[loop.repo]]\ngithub = "a/b"\nlocal_path = "{missing}"\n')
+    with pytest.raises(ValueError, match="does not exist"):
+        Config.load(tmp_path)
+
+
+def test_repo_target_local_path_resolved_to_absolute(tmp_path: Path) -> None:
+    repo_dir = _init_git_repo(tmp_path / "child")
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text('[[loop.repo]]\ngithub = "a/b"\nlocal_path = "child"\n')
+    cfg = Config.load(tmp_path)
+    assert cfg.loop.repos[0].local_path == repo_dir.resolve()
+    assert cfg.loop.repos[0].local_path.is_absolute()
+
+
+def test_multiple_repo_targets_parsed_in_order(tmp_path: Path) -> None:
+    repo_a = _init_git_repo(tmp_path / "a")
+    repo_b = _init_git_repo(tmp_path / "b")
+    toml = tmp_path / ".atlas.toml"
+    toml.write_text(
+        f'[[loop.repo]]\ngithub = "org/a"\nlocal_path = "{repo_a}"\n\n'
+        f'[[loop.repo]]\ngithub = "org/b"\nlocal_path = "{repo_b}"\n'
+    )
+    cfg = Config.load(tmp_path)
+    assert [t.github for t in cfg.loop.repos] == ["org/a", "org/b"]

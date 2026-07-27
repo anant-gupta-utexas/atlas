@@ -21,7 +21,53 @@ from atlas.config import LoopConfig
 
 _logger = logging.getLogger("atlas.loop")
 
+# Phase L4 (Pending Decision #14): loop-state.json is process-global — one
+# daemon, one set of daily caps/breaker state, shared across every configured
+# target repo. With N target repos and no single "the" repo_root, it lives
+# under the daemon's own home (`~/.atlas/`, already established by
+# config.py::Config.load reading `~/.atlas/config.toml` from there), not
+# under any one target's checkout. Only one loop daemon runs at a time, so a
+# single user-wide file has no collision problem.
 _LOOP_STATE_RELATIVE_PATH = Path(".atlas") / "loop-state.json"
+
+
+def _user_wide_state_path() -> Path:
+    return Path.home() / ".atlas" / "loop-state.json"
+
+
+def _legacy_state_path(repo_root: Path) -> Path:
+    return repo_root / _LOOP_STATE_RELATIVE_PATH
+
+
+def migrate_legacy_state_if_needed(repo_root: Path) -> None:
+    """One-time copy of a pre-L4 ``<repo_root>/.atlas/loop-state.json`` to the
+    new user-wide location, run before any tick mutates the new file.
+
+    Not abandoning the old file matters: ``synced_pr_outcomes`` is the
+    idempotency guard for PR-outcome scoring (``sync_prior_prs``'s
+    ``dedupe_key`` check). Losing it lets the next tick re-score an
+    already-synced merged PR and re-relabel a closed issue — a regression of
+    TRD-v3 §4 Reliability's idempotent-sync guarantee.
+
+    Idempotent: a no-op once ``~/.atlas/loop-state.json`` exists, so it never
+    clobbers newer user-wide state with stale legacy contents.
+    """
+    new_path = _user_wide_state_path()
+    if new_path.exists():
+        return
+    legacy_path = _legacy_state_path(repo_root)
+    if not legacy_path.exists():
+        return
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = new_path.with_suffix(".tmp")
+    tmp.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
+    tmp.replace(new_path)
+    _logger.info(
+        "migrated legacy loop-state.json from %s to %s (Phase L4 relocation)",
+        legacy_path,
+        new_path,
+    )
+
 
 # The dedupe list is rewritten to disk every tick, so it must not grow
 # without bound in a daemon that runs for weeks.
@@ -55,8 +101,8 @@ class LoopState:
     synced_pr_outcomes: list[str] = field(default_factory=list)
 
     @classmethod
-    def load_or_init(cls, repo_root: Path) -> LoopState:
-        path = repo_root / _LOOP_STATE_RELATIVE_PATH
+    def load_or_init(cls) -> LoopState:
+        path = _user_wide_state_path()
         if not path.exists():
             return cls(day=_today())
         try:
@@ -77,8 +123,8 @@ class LoopState:
             _logger.warning("loop-state.json corrupted at %s; initializing fresh state", path)
             return cls(day=_today())
 
-    def persist(self, repo_root: Path) -> None:
-        path = repo_root / _LOOP_STATE_RELATIVE_PATH
+    def persist(self) -> None:
+        path = _user_wide_state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
@@ -182,6 +228,7 @@ __all__ = [
     "breaker_open",
     "budget_exhausted",
     "error_signature",
+    "migrate_legacy_state_if_needed",
     "record_tick_outcome",
     "remember_synced_outcome",
     "warn_on_unenforced_budget",

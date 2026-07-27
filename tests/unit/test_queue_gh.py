@@ -16,6 +16,7 @@ from atlas.queue_gh import (
     Issue,
     claim,
     comment,
+    current_assignees,
     current_user,
     deliver_pr,
     find_run_id_comment,
@@ -381,6 +382,27 @@ def test_current_user_returns_login() -> None:
         "atlas.queue_gh.subprocess.run", return_value=_completed(stdout="anant-gupta-utexas\n")
     ):
         assert current_user() == "anant-gupta-utexas"
+
+
+def test_current_assignees_returns_logins() -> None:
+    issue = Issue(number=4, title="t", body="b", labels=frozenset(), repo=_REPO)
+    stdout = json.dumps({"assignees": [{"login": "anant"}, {"login": "other"}]})
+    with patch("atlas.queue_gh.subprocess.run", return_value=_completed(stdout=stdout)):
+        assert current_assignees(issue) == ["anant", "other"]
+
+
+def test_current_assignees_empty_when_unassigned() -> None:
+    issue = Issue(number=4, title="t", body="b", labels=frozenset(), repo=_REPO)
+    stdout = json.dumps({"assignees": []})
+    with patch("atlas.queue_gh.subprocess.run", return_value=_completed(stdout=stdout)):
+        assert current_assignees(issue) == []
+
+
+def test_current_assignees_malformed_json_raises() -> None:
+    issue = Issue(number=4, title="t", body="b", labels=frozenset(), repo=_REPO)
+    with patch("atlas.queue_gh.subprocess.run", return_value=_completed(stdout="not json")):
+        with pytest.raises(GhCliError):
+            current_assignees(issue)
 
 
 def test_find_run_id_comment_extracts_run_id() -> None:

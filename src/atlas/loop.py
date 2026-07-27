@@ -13,13 +13,15 @@ import logging
 import re
 import subprocess
 import time
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from atlas import judge_gate, queue_gh
 from atlas.cli_backend import UnknownBackendError, UsageReporting, make_backend, resolve_model
-from atlas.config import Config, LoopConfig
+from atlas.config import Config, LoopConfig, RepoTarget
 from atlas.deliverer import DeliveryError, GhPrDeliverer, PrRef
 
 # Re-exported so `from atlas.loop import LoopState, breaker_open, ...` keeps
@@ -31,6 +33,7 @@ from atlas.loop_budget import (
     _today,  # noqa: F401 — re-exported; tests and callers use loop._today()
     breaker_open,
     budget_exhausted,
+    migrate_legacy_state_if_needed,
     record_tick_outcome,
 )
 from atlas.loop_budget import error_signature as _error_signature
@@ -119,6 +122,32 @@ class TickResult:
     lane: Literal["quick", "planned"] | None
     pr_ref: PrRef | None
     detail: str
+
+
+@dataclass(frozen=True)
+class BatchTickResult:
+    """Outcome of one tick() call under Phase L4 concurrent dispatch.
+
+    ``results`` holds one ``TickResult`` per dispatched/failed issue this
+    tick, in no particular order. At ``concurrency=1`` it has exactly 0 or 1
+    elements — byte-identical to pre-L4 ``tick()``'s single ``TickResult``
+    once a caller reads ``results[0]`` (Pending Decision #9: ``TickResult``
+    itself is unchanged, not widened)."""
+
+    results: list[TickResult]
+
+
+@dataclass(frozen=True)
+class _DispatchOutcome:
+    """One worker's pure result — no `LoopState` access (Pending Decision #8).
+
+    `tick()` folds every outcome into `state` single-threaded, after the pool
+    that produced them has fully drained."""
+
+    result: TickResult
+    made_progress: bool
+    error_signature: str | None
+    cost: float
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +288,12 @@ def run_one_shot(
         status="success",
         latency_ms=0.0,
         error_type=None,
+        # Phase L4 (T-L4.7, Pending Decision #6): an explicit engine string,
+        # not inferred from the model name — build_weekly_report's per-engine
+        # cost/token split reads this rather than guessing from
+        # orchestrator_model, which would misclassify the moment a custom
+        # codex model name collides with a Claude-style one.
+        attributes={"engine": engine or cfg.default_backend},
     )
     try:
         gate: judge_gate.JudgeGateResult | None = judge_gate.score_diff(
@@ -653,43 +688,57 @@ def sync_prior_prs(repo: str, state: LoopState) -> list[queue_gh.PrStatus]:
 # ---------------------------------------------------------------------------
 
 
-def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) -> TickResult:
+def tick(cfg: Config, state: LoopState, *, targets: Sequence[RepoTarget]) -> BatchTickResult:
+    """Claim and dispatch up to ``cfg.loop.concurrency`` ready issues across
+    ``targets`` (Phase L4). Claiming/triage is sequential (fast gh/plumb
+    calls); dispatch itself runs in a bounded thread pool, and every
+    ``LoopState`` mutation happens single-threaded, after the pool drains
+    (Pending Decision #8) — see ``_dispatch_one``.
+    """
     _reset_daily_counters_if_new_day(state)
 
     sync_results: list[queue_gh.PrStatus] = []
-    for repo in repos:
+    for target in targets:
         try:
-            sync_results += sync_prior_prs(repo, state)
+            sync_results += sync_prior_prs(target.github, state)
         except GhCliError as exc:
-            _logger.warning("sync failed for repo=%s: %s", repo, exc)
+            _logger.warning("sync failed for repo=%s: %s", target.github, exc)
             continue
 
     made_progress_from_sync = len(sync_results) > 0
 
     if breaker_open(state, cfg.loop):
         state.last_tick_at = _now_iso()
-        state.persist(repo_root)
-        return TickResult(
-            action="breaker_open",
-            issue_number=None,
-            lane=None,
-            pr_ref=None,
-            detail=f"breaker open until {state.breaker_open_until}",
+        state.persist()
+        return BatchTickResult(
+            results=[
+                TickResult(
+                    action="breaker_open",
+                    issue_number=None,
+                    lane=None,
+                    pr_ref=None,
+                    detail=f"breaker open until {state.breaker_open_until}",
+                )
+            ]
         )
 
     if budget_exhausted(state, cfg.loop):
         state.last_tick_at = _now_iso()
-        state.persist(repo_root)
-        return TickResult(
-            action="budget_exhausted",
-            issue_number=None,
-            lane=None,
-            pr_ref=None,
-            detail="daily budget exhausted",
+        state.persist()
+        return BatchTickResult(
+            results=[
+                TickResult(
+                    action="budget_exhausted",
+                    issue_number=None,
+                    lane=None,
+                    pr_ref=None,
+                    detail="daily budget exhausted",
+                )
+            ]
         )
 
-    issue = _pull_next_ready(repos, cfg.loop)
-    if issue is None:
+    batch = _pull_ready_batch(targets, cfg.loop, limit=cfg.loop.concurrency)
+    if not batch:
         # An empty queue is NOT a failure, and must not feed the breaker.
         # This previously called record_tick_outcome(made_progress=False),
         # so a perfectly healthy idle loop incremented
@@ -703,15 +752,18 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
         if made_progress_from_sync:
             record_tick_outcome(state, cfg.loop, made_progress=True, error_signature=None)
         state.last_tick_at = _now_iso()
-        state.persist(repo_root)
-        return TickResult(
-            action="idle", issue_number=None, lane=None, pr_ref=None, detail="no ready issue"
+        state.persist()
+        return BatchTickResult(
+            results=[
+                TickResult(
+                    action="idle",
+                    issue_number=None,
+                    lane=None,
+                    pr_ref=None,
+                    detail="no ready issue",
+                )
+            ]
         )
-
-    plumb = PlumbIO(real=True)
-    run_id_for_triage = plumb.open_run(task=issue.title)
-    triage_result = _triage_issue(issue, plumb=plumb, run_id=run_id_for_triage)
-    plumb.close_run(run_id=run_id_for_triage, status="success")
 
     try:
         assignee = current_gh_user()
@@ -720,17 +772,103 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
             state, cfg.loop, made_progress=False, error_signature=_error_signature(exc)
         )
         state.last_tick_at = _now_iso()
-        state.persist(repo_root)
-        return TickResult(
-            action="failed",
-            issue_number=issue.number,
-            lane=triage_result.lane,
-            pr_ref=None,
-            detail=f"could not resolve gh identity: {exc}",
+        state.persist()
+        return BatchTickResult(
+            results=[
+                TickResult(
+                    action="failed",
+                    issue_number=batch[0][1].number,
+                    lane=None,
+                    pr_ref=None,
+                    detail=f"could not resolve gh identity: {exc}",
+                )
+            ]
         )
 
-    queue_gh.claim(issue, assignee=assignee)
+    # Claim + triage sequentially (fast, individually-attributable gh/plumb
+    # calls). A lost claim-race (T-L4.4) drops that one issue from dispatch
+    # without failing the tick or relabeling it — another claimant already
+    # owns it.
+    dispatchable: list[tuple[RepoTarget, Issue, TriageResult, str]] = []
+    for target, issue in batch:
+        plumb = PlumbIO(real=True)
+        run_id_for_triage = plumb.open_run(task=issue.title)
+        triage_result = _triage_issue(issue, plumb=plumb, run_id=run_id_for_triage)
+        plumb.close_run(run_id=run_id_for_triage, status="success")
 
+        queue_gh.claim(issue, assignee=assignee)
+        if not _claim_confirmed(issue, assignee):
+            _logger.info(
+                "lost claim race for issue #%s (repo=%s); skipping this tick",
+                issue.number,
+                target.github,
+            )
+            continue
+        dispatchable.append((target, issue, triage_result, run_id_for_triage))
+
+    if not dispatchable:
+        state.last_tick_at = _now_iso()
+        state.persist()
+        return BatchTickResult(
+            results=[
+                TickResult(
+                    action="idle",
+                    issue_number=None,
+                    lane=None,
+                    pr_ref=None,
+                    detail="all candidates lost the claim race",
+                )
+            ]
+        )
+
+    with ThreadPoolExecutor(max_workers=cfg.loop.concurrency) as pool:
+        futures = [
+            pool.submit(
+                _dispatch_one,
+                target,
+                issue,
+                cfg,
+                triage_result=triage_result,
+                run_id_for_triage=run_id_for_triage,
+            )
+            for target, issue, triage_result, run_id_for_triage in dispatchable
+        ]
+        outcomes = [future.result() for future in as_completed(futures)]
+
+    # Single-threaded from here on — the only place tick() mutates `state`.
+    for outcome in outcomes:
+        record_tick_outcome(
+            state,
+            cfg.loop,
+            made_progress=outcome.made_progress,
+            error_signature=outcome.error_signature,
+        )
+        if outcome.made_progress:
+            state.runs_today += 1
+            state.dollars_today += outcome.cost
+    state.last_tick_at = _now_iso()
+    state.persist()
+    return BatchTickResult(results=[outcome.result for outcome in outcomes])
+
+
+def _dispatch_one(
+    target: RepoTarget,
+    issue: Issue,
+    cfg: Config,
+    *,
+    triage_result: TriageResult,
+    run_id_for_triage: str,
+) -> _DispatchOutcome:
+    """Dispatch one already-claimed issue to completion.
+
+    Pure with respect to ``LoopState`` (Pending Decision #8, T-L4.5): takes no
+    ``state`` parameter and never touches one — every real side effect here
+    (dispatch, comment, relabel) is external (gh/plumb), not an in-memory
+    mutation ``tick()`` needs to serialize. Safe to run inside a thread-pool
+    worker; ``tick()`` folds the returned outcome into ``state`` afterwards,
+    single-threaded.
+    """
+    repo_root = target.local_path
     try:
         if triage_result.lane == "quick":
             pr_ref, run_id, cost = run_one_shot(issue, cfg, repo_root=repo_root)
@@ -738,18 +876,17 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
             pr_ref, run_id, cost = run_planned_first_pass(issue, cfg, repo_root=repo_root)
 
         queue_gh.comment(issue, body=_format_run_summary(run_id, pr_ref))
-
-        record_tick_outcome(state, cfg.loop, made_progress=True, error_signature=None)
-        state.runs_today += 1
-        state.dollars_today += cost
-        state.last_tick_at = _now_iso()
-        state.persist(repo_root)
-        return TickResult(
-            action="dispatched",
-            issue_number=issue.number,
-            lane=triage_result.lane,
-            pr_ref=pr_ref,
-            detail="ok",
+        return _DispatchOutcome(
+            result=TickResult(
+                action="dispatched",
+                issue_number=issue.number,
+                lane=triage_result.lane,
+                pr_ref=pr_ref,
+                detail="ok",
+            ),
+            made_progress=True,
+            error_signature=None,
+            cost=cost,
         )
 
     except AbortedRunError as exc:
@@ -773,36 +910,36 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
         if heal.outcome == "retried_success":
             assert heal.pr_ref is not None and heal.run_id is not None
             # Exact same shape as a first-try success (operator-visible
-            # parity) — comment + record_tick_outcome, no relabel (the issue
+            # parity) — comment + made_progress=True, no relabel (the issue
             # stays atlas:working until sync_prior_prs sees the PR merge,
             # same as any other successful dispatch).
             queue_gh.comment(issue, body=_format_run_summary(heal.run_id, heal.pr_ref))
-            record_tick_outcome(state, cfg.loop, made_progress=True, error_signature=None)
-            state.runs_today += 1
-            state.dollars_today += heal.cost
-            state.last_tick_at = _now_iso()
-            state.persist(repo_root)
-            return TickResult(
-                action="dispatched",
-                issue_number=issue.number,
-                lane=triage_result.lane,
-                pr_ref=heal.pr_ref,
-                detail="ok (retried)",
+            return _DispatchOutcome(
+                result=TickResult(
+                    action="dispatched",
+                    issue_number=issue.number,
+                    lane=triage_result.lane,
+                    pr_ref=heal.pr_ref,
+                    detail="ok (retried)",
+                ),
+                made_progress=True,
+                error_signature=None,
+                cost=heal.cost,
             )
 
         queue_gh.relabel(issue, state="blocked")
         queue_gh.comment(issue, body=_format_blocked_comment(exc, heal))
-        record_tick_outcome(
-            state, cfg.loop, made_progress=False, error_signature=_error_signature(exc)
-        )
-        state.last_tick_at = _now_iso()
-        state.persist(repo_root)
-        return TickResult(
-            action="failed",
-            issue_number=issue.number,
-            lane=triage_result.lane,
-            pr_ref=None,
-            detail=heal.detail,
+        return _DispatchOutcome(
+            result=TickResult(
+                action="failed",
+                issue_number=issue.number,
+                lane=triage_result.lane,
+                pr_ref=None,
+                detail=heal.detail,
+            ),
+            made_progress=False,
+            error_signature=_error_signature(exc),
+            cost=0.0,
         )
 
     except (DeliveryError, GhCliError, WorktreeError) as exc:
@@ -810,33 +947,66 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
             issue,
             body=f"loop_dev run failed: {exc}. Left atlas:working for manual triage.",
         )
-        error_sig = _error_signature(exc)
-        record_tick_outcome(state, cfg.loop, made_progress=False, error_signature=error_sig)
-        state.last_tick_at = _now_iso()
-        state.persist(repo_root)
-        return TickResult(
-            action="failed",
-            issue_number=issue.number,
-            lane=triage_result.lane,
-            pr_ref=None,
-            detail=str(exc),
+        return _DispatchOutcome(
+            result=TickResult(
+                action="failed",
+                issue_number=issue.number,
+                lane=triage_result.lane,
+                pr_ref=None,
+                detail=str(exc),
+            ),
+            made_progress=False,
+            error_signature=_error_signature(exc),
+            cost=0.0,
         )
 
 
-def _pull_next_ready(repos: list[str], loop_cfg: LoopConfig) -> Issue | None:
-    """First repo in cfg.repos order with a ready issue; first issue in gh's
-    own default (oldest-first) order (Decision #9). Untrusted-author issues
-    are skipped, left atlas:ready, not treated as 'no ready issue' (Decision #16)."""
-    for repo in repos:
-        issues = queue_gh.list_ready(repo)
+def _claim_confirmed(issue: Issue, assignee: str) -> bool:
+    """Re-read `issue`'s assignees right after `queue_gh.claim()` to detect a
+    lost claim-race (Phase L4, T-L4.4): two claimants both saw `atlas:ready`
+    before either claimed.
+
+    `gh issue edit --add-assignee` is additive, not exclusive, so a race
+    leaves *both* callers' logins in the assignees list — checking simple
+    membership can't tell them apart. The first assignee is the tie-break:
+    whichever claim() call landed first names this caller as assignees[0].
+    A transient read failure does not block dispatch (fails open, matching
+    every other best-effort gh read in this module).
+    """
+    try:
+        assignees = queue_gh.current_assignees(issue)
+    except GhCliError as exc:
+        _logger.warning("could not confirm claim for issue #%s: %s", issue.number, exc)
+        return True
+    return bool(assignees) and assignees[0] == assignee
+
+
+def _pull_ready_batch(
+    targets: Sequence[RepoTarget], loop_cfg: LoopConfig, *, limit: int
+) -> list[tuple[RepoTarget, Issue]]:
+    """Up to ``limit`` (RepoTarget, Issue) pairs across ``targets``, in target
+    order then gh's own oldest-first order within each target (Decision #9,
+    extended to multiple targets in Phase L4). Untrusted-author issues
+    (checked per-target, Decision #11) are skipped, left atlas:ready, not
+    treated as 'no ready issue' (Decision #16)."""
+    batch: list[tuple[RepoTarget, Issue]] = []
+    for target in targets:
+        if len(batch) >= limit:
+            break
+        issues = queue_gh.list_ready(target.github)
         for issue in issues:
-            if loop_cfg.trusted_authors and issue.author not in loop_cfg.trusted_authors:
+            if len(batch) >= limit:
+                break
+            if target.trusted_authors and issue.author not in target.trusted_authors:
                 _logger.warning(
-                    "skipping issue #%s: untrusted author %r", issue.number, issue.author
+                    "skipping issue #%s (repo=%s): untrusted author %r",
+                    issue.number,
+                    target.github,
+                    issue.author,
                 )
                 continue
-            return issue
-    return None
+            batch.append((target, issue))
+    return batch
 
 
 def _triage_issue(issue: Issue, *, plumb: PlumbIO, run_id: str) -> TriageResult:
@@ -886,10 +1056,12 @@ def _format_blocked_comment(exc: AbortedRunError, heal: SelfHealResult) -> str:
 # ---------------------------------------------------------------------------
 
 
-def run_forever(cfg: Config, *, repos: list[str], repo_root: Path) -> None:
+def run_forever(cfg: Config, *, targets: Sequence[RepoTarget]) -> None:
     _warn_on_unenforced_budget(cfg.loop, engine=cfg.default_backend)
-    state = LoopState.load_or_init(repo_root)
-    reconcile_orphans(cfg, repos=repos, repo_root=repo_root, at_startup=True)
+    for target in targets:
+        migrate_legacy_state_if_needed(target.local_path)
+    state = LoopState.load_or_init()
+    reconcile_orphans(cfg, targets=targets, at_startup=True)
 
     while True:
         # No outer breaker check: tick() handles the breaker itself (returns
@@ -898,53 +1070,58 @@ def run_forever(cfg: Config, *, repos: list[str], repo_root: Path) -> None:
         # so `atlas loop status` during a cooldown would look like a dead
         # daemon rather than one deliberately waiting.
         try:
-            result: TickResult | None = tick(cfg, state, repos=repos, repo_root=repo_root)
+            batch: BatchTickResult | None = tick(cfg, state, targets=targets)
         except Exception:
             _logger.exception("tick() raised unexpectedly")
-            result = None
-        _log_tick(result)
+            batch = None
+        _log_tick(batch)
         time.sleep(cfg.loop.poll_interval_s)
 
 
-def _log_tick(result: TickResult | None) -> None:
-    if result is None:
+def _log_tick(batch: BatchTickResult | None) -> None:
+    if batch is None:
         _logger.warning("tick() failed with an unhandled exception; see traceback above")
         return
-    # A failed tick must not scroll past at the same level as an idle one —
-    # `detail` is where a dispatch or delivery failure explains itself, and
+    # A failed dispatch must not scroll past at the same level as an idle one
+    # — `detail` is where a dispatch or delivery failure explains itself, and
     # state.last_error_signature is not a durable record of it (a later idle
     # tick used to clear it).
-    _logger.log(
-        logging.WARNING if result.action == "failed" else logging.INFO,
-        "tick: action=%s issue=%s lane=%s detail=%s",
-        result.action,
-        result.issue_number,
-        result.lane,
-        result.detail,
-    )
+    for result in batch.results:
+        _logger.log(
+            logging.WARNING if result.action == "failed" else logging.INFO,
+            "tick: action=%s issue=%s lane=%s detail=%s",
+            result.action,
+            result.issue_number,
+            result.lane,
+            result.detail,
+        )
 
 
 def reconcile_orphans(
-    cfg: Config, *, repos: list[str], repo_root: Path, at_startup: bool = False
+    cfg: Config, *, targets: Sequence[RepoTarget], at_startup: bool = False
 ) -> list[str]:
-    """Reclaim issues and worktrees stranded by a crashed run.
+    """Reclaim issues and worktrees stranded by a crashed run, independently
+    per target — a crash affecting one target's worktree does not touch
+    another's.
 
-    ``at_startup`` marks the daemon-boot call, where ``.atlas/current-run``
-    is **by definition stale**: concurrency is frozen at 1 until Phase L4, so
-    no run can be in flight before the daemon's first tick. Without it, a
-    hard crash (``kill -9``) leaves that file naming the dead run's worktree,
-    and ``_sweep_orphaned_worktrees`` retains precisely the orphan it exists
-    to prune — observed live in T-L2.13's crash drill on 2026-07-27, where
-    the issue was correctly relabeled back to ``atlas:ready`` but its
-    worktree survived every restart.
+    ``at_startup`` marks the daemon-boot call, where every ``current-run``
+    pointer (singleton and keyed) is **by definition stale**: nothing can be
+    in flight before the daemon's first tick. Without it, a hard crash
+    (``kill -9``) leaves a file naming the dead run's worktree, and
+    ``_sweep_orphaned_worktrees`` retains precisely the orphan it exists to
+    prune — observed live in T-L2.13's crash drill on 2026-07-27, where the
+    issue was correctly relabeled back to ``atlas:ready`` but its worktree
+    survived every restart.
     """
+    from atlas.state import StateStore
+
     reconciled: list[str] = []
-    for repo in repos:
-        working_issues = queue_gh.list_labeled(repo, "atlas:working")
+    for target in targets:
+        working_issues = queue_gh.list_labeled(target.github, "atlas:working")
         try:
-            statuses = queue_gh.sync(repo)
+            statuses = queue_gh.sync(target.github)
         except GhCliError as exc:
-            _logger.warning("reconcile_orphans: sync failed for repo=%s: %s", repo, exc)
+            _logger.warning("reconcile_orphans: sync failed for repo=%s: %s", target.github, exc)
             statuses = []
 
         linked_numbers = {s.issue.number for s in statuses}
@@ -953,24 +1130,28 @@ def reconcile_orphans(
                 queue_gh.relabel(issue, state="ready")
                 reconciled.append(f"issue #{issue.number}")
 
-    reconciled += _sweep_orphaned_worktrees(repo_root, ignore_current_run=at_startup)
-    if at_startup:
-        # The pointer is stale by construction here; leaving it would also
-        # make `atlas resume` offer to resume a run that no longer exists.
-        from atlas.state import StateStore
-
-        try:
-            StateStore(repo_root).delete_current_run()
-        except OSError as exc:
-            _logger.warning("could not clear stale .atlas/current-run: %s", exc)
+        reconciled += _sweep_orphaned_worktrees(target.local_path, ignore_current_run=at_startup)
+        if at_startup:
+            # Every pointer is stale by construction here; leaving the
+            # singleton would also make `atlas resume` offer to resume a run
+            # that no longer exists.
+            store = StateStore(target.local_path)
+            try:
+                store.delete_current_run()
+                for run_id, _slug, _wt, _span in store.list_current_runs():
+                    store.delete_current_run_keyed(run_id)
+            except OSError as exc:
+                _logger.warning(
+                    "could not clear stale current-run state for %s: %s", target.github, exc
+                )
     return reconciled
 
 
 def _sweep_orphaned_worktrees(repo_root: Path, *, ignore_current_run: bool = False) -> list[str]:
-    """Delete worktrees left behind by a crashed run, retaining the live one.
+    """Delete worktrees left behind by a crashed run, retaining every live one.
 
     ``ignore_current_run`` disables the retain-check entirely. Callers pass it
-    at daemon startup, where the pointer cannot describe a live run — see
+    at daemon startup, where no pointer can describe a live run — see
     ``reconcile_orphans``.
 
     The retain-check must be exact, because this deletes directories that may
@@ -978,7 +1159,8 @@ def _sweep_orphaned_worktrees(repo_root: Path, *, ignore_current_run: bool = Fal
     previous approach) was lossy twice over: _slugify truncates to 40 chars,
     so two similar titles collide and an orphan is retained forever; and a
     live run whose slug didn't match would have its work deleted. The
-    run_id-keyed path recorded in .atlas/current-run is unambiguous.
+    run_id-keyed paths recorded in current-run (singleton and, since Phase
+    L4, every ``.atlas/runs/<run_id>/current-run``) are unambiguous.
     """
     worktrees_dir = repo_root / ".atlas" / "worktrees"
     if not worktrees_dir.is_dir():
@@ -986,24 +1168,29 @@ def _sweep_orphaned_worktrees(repo_root: Path, *, ignore_current_run: bool = Fal
 
     from atlas.state import StateStore
 
-    try:
-        current = StateStore(repo_root).read_current_run_with_worktree()
-    except OSError as exc:
-        # Fail safe: without a readable state file we cannot tell which
-        # worktree is live, so sweep nothing rather than risk deleting it.
-        _logger.warning("could not read .atlas/current-run; skipping worktree sweep: %s", exc)
-        return []
-
-    live: Path | None = None
-    if not ignore_current_run and current is not None and current[2] is not None:
-        live = current[2].resolve()
+    store = StateStore(repo_root)
+    live: set[Path] = set()
+    if not ignore_current_run:
+        try:
+            singleton = store.read_current_run_with_worktree()
+            keyed = store.list_current_runs()
+        except OSError as exc:
+            # Fail safe: without readable state we cannot tell which
+            # worktree is live, so sweep nothing rather than risk deleting it.
+            _logger.warning("could not read current-run state; skipping worktree sweep: %s", exc)
+            return []
+        if singleton is not None and singleton[2] is not None:
+            live.add(singleton[2].resolve())
+        for _run_id, _slug, worktree_path, _span in keyed:
+            if worktree_path is not None:
+                live.add(worktree_path.resolve())
 
     swept: list[str] = []
     worktree_manager = WorktreeManager(repo_root)
     for worktree_dir in sorted(worktrees_dir.glob("*")):
         if not worktree_dir.is_dir():
             continue
-        if live is not None and worktree_dir.resolve() == live:
+        if worktree_dir.resolve() in live:
             continue
         try:
             worktree_manager.cleanup(worktree_dir)
@@ -1015,6 +1202,7 @@ def _sweep_orphaned_worktrees(repo_root: Path, *, ignore_current_run: bool = Fal
 
 __all__ = [
     "AbortedRunError",
+    "BatchTickResult",
     "JudgeGateFailedError",
     # Re-exported from loop_budget for backwards compatibility.
     "LoopState",

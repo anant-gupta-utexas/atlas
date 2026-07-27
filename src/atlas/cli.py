@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json as _json
 import logging
+import re
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 try:
@@ -15,6 +19,7 @@ except ModuleNotFoundError:  # pragma: no cover
 from atlas import loop as _loop
 from atlas.config import Config
 from atlas.loop_budget import LoopState, breaker_open
+from atlas.loop_report import build_weekly_report, format_report
 from atlas.orchestrator import (
     AbortedError,
     NoActiveRunError,
@@ -282,7 +287,7 @@ def loop_run(
         # Called through the module (not a `from ... import`) so tests can
         # patch atlas.loop.run_forever — a direct name binding would capture
         # the real daemon at import time and ignore the patch.
-        _loop.run_forever(cfg, repos=list(cfg.loop.repos), repo_root=repo_root)
+        _loop.run_forever(cfg, targets=cfg.loop.repos)
     except KeyboardInterrupt:
         typer.echo("\nLoop stopped.", err=True)
         raise typer.Exit(0)
@@ -304,16 +309,22 @@ def loop_stop() -> None:
 
 @loop_app.command("status")
 def loop_status() -> None:
-    """Print a human-readable summary of the loop's persisted state."""
+    """Print a human-readable summary of the loop's persisted state.
+
+    Phase L4 (Pending Decision #14): this state is now **user-wide**, not
+    per-repo — the daemon's budget/breaker caps were always process-global,
+    so running this from any repo reports the same state, read from
+    ``~/.atlas/loop-state.json``.
+    """
 
     repo_root = _find_repo_root()
     cfg = Config.load(repo_root)
-    state_path = repo_root / ".atlas" / "loop-state.json"
+    state_path = Path.home() / ".atlas" / "loop-state.json"
     if not state_path.exists():
         typer.echo("Loop has not run yet.")
         return
 
-    state = LoopState.load_or_init(repo_root)
+    state = LoopState.load_or_init()
     typer.echo(f"Day: {state.day}")
     typer.echo(f"Runs today: {state.runs_today} / {cfg.loop.max_runs_per_day}")
     # Live since 2026-07-26 (plumb v1.1 set_usage + the L0 telemetry chain).
@@ -328,6 +339,76 @@ def loop_status() -> None:
         typer.echo(f"Breaker: OPEN until {state.breaker_open_until}")
     else:
         typer.echo("Breaker: closed")
+
+
+_SINCE_RELATIVE_RE = re.compile(r"^(\d+)([dwhm])$")
+_SINCE_UNIT_MAP = {
+    "d": lambda n: timedelta(days=n),
+    "w": lambda n: timedelta(weeks=n),
+    "h": lambda n: timedelta(hours=n),
+    "m": lambda n: timedelta(minutes=n),
+}
+
+
+def _parse_since(value: str) -> datetime:
+    """Parse `--since` — relative (``7d``/``2w``/``1h``/``30m``) or an
+    ISO-8601 date.
+
+    Reimplemented locally rather than imported from plumb's own internal
+    `_time_utils` module — same reasoning as Pending Decision #4's
+    `_get_storage` note: an underscore-prefixed module is not a published
+    API atlas should couple its CLI parsing to.
+    """
+    match = _SINCE_RELATIVE_RE.match(value.strip().lower())
+    if match:
+        n = int(match.group(1))
+        if n == 0:
+            raise ValueError(f"--since value must be > 0, got {value!r}")
+        return datetime.now(tz=UTC) - _SINCE_UNIT_MAP[match.group(2)](n)
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(
+            f"Cannot parse --since value: {value!r}. Use a relative value "
+            "(e.g. 7d, 2w, 1h, 30m) or an ISO-8601 date."
+        ) from None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+@loop_app.command("report")
+def loop_report(
+    since: str = typer.Option(
+        "7d", "--since", help="Time window, e.g. 7d, 2w, 1h, 30m, or an ISO-8601 date."
+    ),
+    fmt: str = typer.Option("text", "--format", help="Output format: text or json."),
+) -> None:
+    """Print a cost-per-landed-PR + intervention-rate weekly report.
+
+    A one-shot CLI command (TRD-v3 §13 #12) — "recurring" describes the
+    operator's own scheduling (a crontab entry, a scheduled GitHub Action),
+    not new code inside atlas (Pending Decision #7).
+    """
+    repo_root = _find_repo_root()
+    cfg = Config.load(repo_root)
+
+    if fmt not in ("text", "json"):
+        typer.echo("Error: --format must be 'text' or 'json'.", err=True)
+        raise typer.Exit(1)
+
+    try:
+        since_dt = _parse_since(since)
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    report = build_weekly_report(cfg, since=since_dt)
+
+    if fmt == "json":
+        payload = dataclasses.asdict(report)
+        payload["since"] = report.since.isoformat() if report.since else None
+        typer.echo(_json.dumps(payload))
+    else:
+        typer.echo(format_report(report))
 
 
 @loop_app.command("attach")

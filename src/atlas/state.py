@@ -132,13 +132,9 @@ class StateStore:
         # placeholders for the lines it depends on. Readers index by position
         # (read_current_run_with_worktree, read_async_gate_metric, the hook).
         self._atlas_dir.mkdir(parents=True, exist_ok=True)
-        body = f"{run_id}\n{slug}\n"
-        if worktree_path is not None or code_gen_span_id is not None or async_gate_metric:
-            body += f"{worktree_path or ''}\n"
-        if code_gen_span_id is not None or async_gate_metric:
-            body += f"{code_gen_span_id or ''}\n"
-        if async_gate_metric:
-            body += f"{async_gate_metric}\n"
+        body = _build_current_run_body(
+            run_id, slug, worktree_path, code_gen_span_id, async_gate_metric
+        )
         _atomic_write(self._current_run_path, body)
 
     def read_current_run(self) -> tuple[str, str] | None:
@@ -153,18 +149,7 @@ class StateStore:
     ) -> tuple[str, str, Path | None, str | None] | None:
         if not self._current_run_path.exists():
             return None
-        lines = self._current_run_path.read_text().splitlines()
-        if len(lines) < 2:
-            return None
-        run_id = lines[0].strip()
-        slug = lines[1].strip()
-        worktree_path: Path | None = None
-        if len(lines) >= 3 and lines[2].strip():
-            worktree_path = Path(lines[2].strip())
-        code_gen_span_id: str | None = None
-        if len(lines) >= 4 and lines[3].strip():
-            code_gen_span_id = lines[3].strip()
-        return run_id, slug, worktree_path, code_gen_span_id
+        return _parse_current_run_body(self._current_run_path.read_text())
 
     def read_async_gate_metric(self) -> str | None:
         """Return line 5 of .atlas/current-run (the async-gate metric name), if present."""
@@ -178,6 +163,57 @@ class StateStore:
     def delete_current_run(self) -> None:
         if self._current_run_path.exists():
             self._current_run_path.unlink()
+
+    # -----------------------------------------------------------------
+    # Per-run-keyed current-run (Phase L4, T-L4.3) — additive; only
+    # loop-dispatched runs use these. Attended `atlas run`/`resume` keep
+    # using the singleton methods above, untouched (Pending Decision #3).
+    # -----------------------------------------------------------------
+
+    def _keyed_current_run_path(self, run_id: str) -> Path:
+        return self._atlas_dir / "runs" / run_id / "current-run"
+
+    def write_current_run_keyed(
+        self,
+        run_id: str,
+        slug: str,
+        worktree_path: Path | None = None,
+        code_gen_span_id: str | None = None,
+        async_gate_metric: str | None = None,
+    ) -> None:
+        path = self._keyed_current_run_path(run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = _build_current_run_body(
+            run_id, slug, worktree_path, code_gen_span_id, async_gate_metric
+        )
+        _atomic_write(path, body)
+
+    def list_current_runs(self) -> list[tuple[str, str, Path | None, str | None]]:
+        """Every live keyed run's ``current-run`` contents, one per concurrent
+        dispatch. Order is not significant to callers (orphan-sweep retain-set,
+        `atlas loop status`-style introspection)."""
+        runs_dir = self._atlas_dir / "runs"
+        if not runs_dir.is_dir():
+            return []
+        results: list[tuple[str, str, Path | None, str | None]] = []
+        for run_dir in sorted(runs_dir.glob("*")):
+            path = run_dir / "current-run"
+            if not path.exists():
+                continue
+            parsed = _parse_current_run_body(path.read_text())
+            if parsed is not None:
+                results.append(parsed)
+        return results
+
+    def delete_current_run_keyed(self, run_id: str) -> None:
+        path = self._keyed_current_run_path(run_id)
+        if not path.exists():
+            return
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass  # not empty or already gone — best-effort only
 
     def update_current_block(
         self,
@@ -219,12 +255,15 @@ class StateStore:
                 return name
         return None
 
-    def assert_consistent(self, ctx: RunContext) -> None:
-        result = self.read_current_run()
+    def assert_consistent(self, ctx: RunContext, *, keyed: bool = False) -> None:
+        """``keyed=True`` (Phase L4, T-L4.3) checks the per-run-keyed
+        current-run file instead of the singleton — additive, keyword-only,
+        default-False, so attended `atlas run`'s existing call shape is
+        byte-identical (Pending Decision #3)."""
+        result = self._read_current_run_keyed_pair(ctx.run_id) if keyed else self.read_current_run()
         if result is None:
-            raise StateInconsistencyError(
-                f"No .atlas/current-run found; expected run_id={ctx.run_id}"
-            )
+            where = f".atlas/runs/{ctx.run_id}/current-run" if keyed else ".atlas/current-run"
+            raise StateInconsistencyError(f"No {where} found; expected run_id={ctx.run_id}")
         file_run_id, _ = result
 
         path = self._tasks_md_path(ctx.slug)
@@ -238,14 +277,55 @@ class StateStore:
 
         if file_run_id != tasks_run_id:
             raise StateInconsistencyError(
-                f"State mismatch: .atlas/current-run says {file_run_id!r}; "
+                f"State mismatch: current-run says {file_run_id!r}; "
                 f"tasks.md header says {tasks_run_id!r}. Resolve manually."
             )
         if ctx.run_id != file_run_id:
             raise StateInconsistencyError(
                 f"State mismatch: RunContext has run_id={ctx.run_id!r} but "
-                f".atlas/current-run says {file_run_id!r}. Resolve manually."
+                f"current-run says {file_run_id!r}. Resolve manually."
             )
+
+    def _read_current_run_keyed_pair(self, run_id: str) -> tuple[str, str] | None:
+        path = self._keyed_current_run_path(run_id)
+        if not path.exists():
+            return None
+        parsed = _parse_current_run_body(path.read_text())
+        if parsed is None:
+            return None
+        return parsed[0], parsed[1]
+
+
+def _build_current_run_body(
+    run_id: str,
+    slug: str,
+    worktree_path: Path | None,
+    code_gen_span_id: str | None,
+    async_gate_metric: str | None,
+) -> str:
+    body = f"{run_id}\n{slug}\n"
+    if worktree_path is not None or code_gen_span_id is not None or async_gate_metric:
+        body += f"{worktree_path or ''}\n"
+    if code_gen_span_id is not None or async_gate_metric:
+        body += f"{code_gen_span_id or ''}\n"
+    if async_gate_metric:
+        body += f"{async_gate_metric}\n"
+    return body
+
+
+def _parse_current_run_body(text: str) -> tuple[str, str, Path | None, str | None] | None:
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return None
+    run_id = lines[0].strip()
+    slug = lines[1].strip()
+    worktree_path: Path | None = None
+    if len(lines) >= 3 and lines[2].strip():
+        worktree_path = Path(lines[2].strip())
+    code_gen_span_id: str | None = None
+    if len(lines) >= 4 and lines[3].strip():
+        code_gen_span_id = lines[3].strip()
+    return run_id, slug, worktree_path, code_gen_span_id
 
 
 def _atomic_write(path: Path, content: str) -> None:

@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from atlas import loop
@@ -31,8 +32,7 @@ def test_loop_run_calls_run_forever_no_tmux(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert mock_run_forever.call_count == 1
     _, kwargs = mock_run_forever.call_args
-    assert kwargs["repos"] == []
-    assert kwargs["repo_root"] == tmp_path
+    assert kwargs["targets"] == ()
 
 
 def test_loop_start_invokes_exact_tmux_new_session(tmp_path: Path) -> None:
@@ -104,8 +104,13 @@ def test_loop_run_unaffected_by_missing_tmux(tmp_path: Path) -> None:
     assert mock_run_forever.call_count == 1
 
 
-def test_loop_status_no_state_file_reports_not_run_yet(tmp_path: Path) -> None:
+def test_loop_status_no_state_file_reports_not_run_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _init_repo(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     with patch("atlas.cli._find_repo_root", return_value=tmp_path):
         result = runner.invoke(app, ["loop", "status"])
 
@@ -113,8 +118,13 @@ def test_loop_status_no_state_file_reports_not_run_yet(tmp_path: Path) -> None:
     assert "not run yet" in result.output.lower()
 
 
-def test_loop_status_populated_state_reports_summary(tmp_path: Path) -> None:
+def test_loop_status_populated_state_reports_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _init_repo(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     (tmp_path / ".atlas.toml").write_text(
         "[loop]\nmax_runs_per_day = 20\nmax_dollars_per_day = 10.0\n"
     )
@@ -124,7 +134,7 @@ def test_loop_status_populated_state_reports_summary(tmp_path: Path) -> None:
         dollars_today=1.42,
         last_tick_at="2026-07-24T18:03:11Z",
     )
-    state.persist(tmp_path)
+    state.persist()
 
     with patch("atlas.cli._find_repo_root", return_value=tmp_path):
         result = runner.invoke(app, ["loop", "status"])
@@ -144,10 +154,13 @@ def test_loop_status_populated_state_reports_summary(tmp_path: Path) -> None:
     assert "codex" in result.output.lower()
 
 
-def test_loop_status_reports_open_breaker(tmp_path: Path) -> None:
+def test_loop_status_reports_open_breaker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _init_repo(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     state = loop.LoopState(day=loop._today(), breaker_open_until="2099-01-01T00:00:00+00:00")
-    state.persist(tmp_path)
+    state.persist()
 
     with patch("atlas.cli._find_repo_root", return_value=tmp_path):
         result = runner.invoke(app, ["loop", "status"])
@@ -157,14 +170,94 @@ def test_loop_status_reports_open_breaker(tmp_path: Path) -> None:
     assert "2099-01-01" in result.output
 
 
-def test_loop_config_concurrency_guard_still_enforced() -> None:
-    # Sanity check the CLI surface didn't silently bypass the T-L2.3 guard.
+def test_loop_config_concurrency_bounds_still_enforced() -> None:
+    # Sanity check the CLI surface didn't silently bypass the config guard.
+    # Phase L4 lifts the old ==1 restriction; only concurrency < 1 now raises.
+    LoopConfig(concurrency=3)  # must not raise
     try:
-        LoopConfig(concurrency=2)
+        LoopConfig(concurrency=0)
     except ValueError as exc:
         assert "concurrency" in str(exc)
     else:
-        raise AssertionError("expected ValueError for concurrency != 1")
+        raise AssertionError("expected ValueError for concurrency < 1")
+
+
+def test_loop_report_default_since_prints_text_summary(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    from atlas.loop_report import WeeklyReport
+
+    report = WeeklyReport(
+        since=None,
+        total_runs=3,
+        landed_prs=2,
+        intervention_count=1,
+        terminal_lineages=2,
+        intervention_rate=0.5,
+        cost_per_landed_pr_claude=1.25,
+        tokens_per_landed_pr_codex=None,
+    )
+    with (
+        patch("atlas.cli._find_repo_root", return_value=tmp_path),
+        patch("atlas.cli.build_weekly_report", return_value=report) as build_mock,
+    ):
+        result = runner.invoke(app, ["loop", "report"])
+
+    assert result.exit_code == 0
+    assert "Landed PRs:          2" in result.output
+    build_mock.assert_called_once()
+    assert build_mock.call_args.kwargs["since"] is not None  # "7d" default resolved
+
+
+def test_loop_report_json_format_is_valid_json(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    from atlas.loop_report import WeeklyReport
+
+    report = WeeklyReport(
+        since=None,
+        total_runs=1,
+        landed_prs=1,
+        intervention_count=0,
+        terminal_lineages=1,
+        intervention_rate=0.0,
+        cost_per_landed_pr_claude=None,
+        tokens_per_landed_pr_codex=(100.0, 40.0),
+    )
+    with (
+        patch("atlas.cli._find_repo_root", return_value=tmp_path),
+        patch("atlas.cli.build_weekly_report", return_value=report),
+    ):
+        result = runner.invoke(app, ["loop", "report", "--since", "30d", "--format", "json"])
+
+    assert result.exit_code == 0
+    import json
+
+    payload = json.loads(result.output)
+    assert payload["total_runs"] == 1
+    assert payload["tokens_per_landed_pr_codex"] == [100.0, 40.0]
+
+
+def test_loop_report_invalid_since_fails_cleanly(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    with patch("atlas.cli._find_repo_root", return_value=tmp_path):
+        result = runner.invoke(app, ["loop", "report", "--since", "not-a-time"])
+
+    assert result.exit_code == 1
+    assert "Cannot parse --since" in result.output
+
+
+def test_loop_report_invalid_format_fails_cleanly(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    with patch("atlas.cli._find_repo_root", return_value=tmp_path):
+        result = runner.invoke(app, ["loop", "report", "--format", "xml"])
+
+    assert result.exit_code == 1
+    assert "--format" in result.output
+
+
+def test_loop_report_discoverable_under_loop_help() -> None:
+    result = runner.invoke(app, ["loop", "--help"])
+    assert result.exit_code == 0
+    assert "report" in result.output
 
 
 def test_backend_flag_help_matches_actual_precedence() -> None:

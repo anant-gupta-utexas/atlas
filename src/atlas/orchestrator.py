@@ -168,6 +168,7 @@ class Pipeline:
         workflow_name: str = "dev",
         worktree: WorktreeManager | None = None,
         commit_wait_timeout_s: int = _DEFAULT_COMMIT_WAIT_TIMEOUT_S,
+        loop_mode: bool = False,
     ) -> None:
         self._repo_root = repo_root
         self._state = state
@@ -176,6 +177,13 @@ class Pipeline:
         self._prompter = prompter
         self._worktree = worktree
         self._commit_wait_timeout_s = commit_wait_timeout_s
+        # Phase L4 (T-L4.3, Pending Decision #3): a loop-dispatched run writes
+        # its .atlas/current-run pointer keyed by run_id
+        # (.atlas/runs/<run_id>/current-run) instead of the singleton file, so
+        # concurrent dispatches don't clobber each other. Attended `atlas run`
+        # never sets this — it keeps the singleton path forever; resume() is
+        # attended-only and is untouched by this flag.
+        self._loop_mode = loop_mode
         self._last_code_gen_span_id: str = ""
         # Run-level usage roll-up across every stage of this run. plumb
         # auto-fills run tokens from buffered spans at close, but NEVER
@@ -216,6 +224,38 @@ class Pipeline:
         """
         return self._plumb
 
+    def _write_current_run(
+        self,
+        run_id: str,
+        slug: str,
+        worktree_path: Path | None = None,
+        *,
+        code_gen_span_id: str | None = None,
+        async_gate_metric: str | None = None,
+    ) -> None:
+        if self._loop_mode:
+            self._state.write_current_run_keyed(
+                run_id,
+                slug,
+                worktree_path,
+                code_gen_span_id=code_gen_span_id,
+                async_gate_metric=async_gate_metric,
+            )
+        else:
+            self._state.write_current_run(
+                run_id,
+                slug,
+                worktree_path,
+                code_gen_span_id=code_gen_span_id,
+                async_gate_metric=async_gate_metric,
+            )
+
+    def _delete_current_run(self, run_id: str) -> None:
+        if self._loop_mode:
+            self._state.delete_current_run_keyed(run_id)
+        else:
+            self._state.delete_current_run()
+
     def start(self, *, task: str, slug: str) -> RunContext:
         """
         Create a new run. Writes tasks.md + .atlas/current-run.
@@ -224,7 +264,7 @@ class Pipeline:
         run_id = self._plumb.open_run(task=task)
         ctx = RunContext(run_id=run_id, slug=slug, task=task, repo_root=self._repo_root)
         self._state.create_tasks_md(ctx, stages=self._stages, workflow_name=self._workflow_name)
-        self._state.write_current_run(run_id, slug)
+        self._write_current_run(run_id, slug)
         return ctx
 
     def resume(self) -> RunContext:
@@ -310,7 +350,7 @@ class Pipeline:
         Returns StageOutcome, or None if the run is already complete.
         Idempotent if called after run close.
         """
-        self._state.assert_consistent(ctx)
+        self._state.assert_consistent(ctx, keyed=self._loop_mode)
 
         # Drain any gate_commit scores written by the post-commit hook since
         # the last step. The hook can't open a plumb run handle itself, so it
@@ -341,7 +381,7 @@ class Pipeline:
                 repo_root=ctx.repo_root,
                 worktree_path=worktree_path,
             )
-            self._state.write_current_run(ctx.run_id, ctx.slug, worktree_path)
+            self._write_current_run(ctx.run_id, ctx.slug, worktree_path)
 
         # Cache the (possibly-mutated) ctx so run_to_completion() can use the
         # post-worktree-creation context for stage 6 in same-process flow.
@@ -414,7 +454,7 @@ class Pipeline:
             # separate, asynchronous concern.
             self._state.check_box(ctx, stage.name)
             self._last_code_gen_span_id = span_id
-            self._state.write_current_run(
+            self._write_current_run(
                 ctx.run_id,
                 ctx.slug,
                 ctx.worktree_path,
@@ -504,12 +544,12 @@ class Pipeline:
             if outcome is None:
                 self._flush_run_usage(run_id=ctx.run_id)
                 self._plumb.close_run(run_id=ctx.run_id, status="success")
-                self._state.delete_current_run()
+                self._delete_current_run(ctx.run_id)
                 return RunResult(ctx=ctx, status="success", dollar_cost=self.run_dollar_cost)
             if outcome.status in ("failure", "rejected"):
                 self._flush_run_usage(run_id=ctx.run_id)
                 self._plumb.close_run(run_id=ctx.run_id, status="failure")
-                self._state.delete_current_run()
+                self._delete_current_run(ctx.run_id)
                 # A failed run still spent money — the budget must see it.
                 return RunResult(ctx=ctx, status="failure", dollar_cost=self.run_dollar_cost)
             if outcome.status == "awaiting_hook":

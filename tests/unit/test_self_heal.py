@@ -136,9 +136,7 @@ def test_retryable_mode_calls_run_one_shot_once_with_parent_and_diagnosis(
 def test_retry_failure_returns_retried_failed_does_not_recurse(tmp_path: Path) -> None:
     with (
         patch("atlas.self_heal.PlumbIO"),
-        patch(
-            "atlas.self_heal.classify_failure", return_value=_classification("flaky", True)
-        ),
+        patch("atlas.self_heal.classify_failure", return_value=_classification("flaky", True)),
         patch(
             "atlas.self_heal.run_one_shot", side_effect=AbortedRunError("second failure")
         ) as run_mock,

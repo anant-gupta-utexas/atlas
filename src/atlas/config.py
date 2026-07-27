@@ -8,10 +8,32 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class RepoTarget:
+    """One `[[loop.repo]]` entry — a GitHub repo paired with its local checkout
+    (Phase L4, Pending Decision #1). ``trusted_authors`` is per-target
+    (Decision #11): repo visibility/authorship is a property of each repo
+    independently, so a global allowlist can't express "atlas is
+    private/single-author but plumb is public"."""
+
+    github: str
+    local_path: Path
+    trusted_authors: tuple[str, ...] = ()
+
+
+_LEGACY_REPOS_MIGRATION_MSG = (
+    "[loop].repos (a flat string list) is no longer supported as of Phase "
+    "L4. Migrate to the [[loop.repo]] table-array shape, e.g.:\n\n"
+    "[[loop.repo]]\n"
+    'github = "owner/repo"\n'
+    'local_path = "/abs/path/to/repo"\n'
+)
+
+
+@dataclass(frozen=True)
 class LoopConfig:
     """``[loop]`` config block — atlas loop daemon settings (TRD-v3 §7)."""
 
-    repos: tuple[str, ...] = ()
+    repos: tuple[RepoTarget, ...] = ()
     poll_interval_s: int = 60
     max_runs_per_day: int = 20
     max_dollars_per_day: float = 10.0
@@ -19,12 +41,11 @@ class LoopConfig:
     no_progress_limit: int = 3
     identical_error_limit: int = 5
     cooldown_min: int = 30
-    concurrency: int = 1  # frozen at 1 for v3.0-v3.2
-    trusted_authors: tuple[str, ...] = ()
+    concurrency: int = 1
 
     def __post_init__(self) -> None:
-        if self.concurrency != 1:
-            raise ValueError("concurrency > 1 is not supported until Phase L4")
+        if self.concurrency < 1:
+            raise ValueError("concurrency must be >= 1")
 
 
 @dataclass(frozen=True)
@@ -87,7 +108,9 @@ class Config:
             {str(k): str(v) for k, v in raw_models.items()} if isinstance(raw_models, dict) else {}
         )
         loop_section = merged.get("loop", {})
-        loop_cfg = _parse_loop_config(loop_section if isinstance(loop_section, dict) else {})
+        loop_cfg = _parse_loop_config(
+            loop_section if isinstance(loop_section, dict) else {}, repo_root=repo_root
+        )
         return cls(
             repo_root=repo_root,
             plumb_db_path=Path(str(merged["plumb_db_path"])),
@@ -110,18 +133,56 @@ def _float_field(section: dict[str, object], key: str, default: float) -> float:
     return float(raw) if isinstance(raw, (int, float, str)) else default
 
 
-def _parse_loop_config(section: dict[str, object]) -> LoopConfig:
+def _parse_repo_targets(section: dict[str, object], *, repo_root: Path) -> tuple[RepoTarget, ...]:
+    """Parse `[[loop.repo]]` table-array entries into `RepoTarget`s.
+
+    Hard-fails (loudly, at load time) on the pre-L4 flat `repos = [...]`
+    shape rather than silently ignoring it — a stale config that parses but
+    dispatches to no target is worse than a startup error naming the fix
+    (Pending Decision #1).
+    """
+    if "repos" in section:
+        raise ValueError(_LEGACY_REPOS_MIGRATION_MSG)
+
+    raw_targets = section.get("repo", [])
+    if not isinstance(raw_targets, list):
+        return ()
+
+    targets: list[RepoTarget] = []
+    for entry in raw_targets:
+        if not isinstance(entry, dict):
+            continue
+        if "github" not in entry or "local_path" not in entry:
+            raise ValueError(
+                "[[loop.repo]] entry is missing a required key: both 'github' and "
+                f"'local_path' must be set (got: {entry!r})"
+            )
+        github = str(entry["github"])
+        local_path = Path(str(entry["local_path"])).expanduser()
+        if not local_path.is_absolute():
+            local_path = repo_root / local_path
+        local_path = local_path.resolve()
+
+        if not (local_path / ".git").exists():
+            raise ValueError(
+                f"[[loop.repo]] github={github!r} local_path={local_path} does not exist "
+                "or is not a git repo (no .git found)"
+            )
+
+        raw_trusted = entry.get("trusted_authors", [])
+        trusted_authors = (
+            tuple(str(a) for a in raw_trusted) if isinstance(raw_trusted, list) else ()
+        )
+        targets.append(
+            RepoTarget(github=github, local_path=local_path, trusted_authors=trusted_authors)
+        )
+    return tuple(targets)
+
+
+def _parse_loop_config(section: dict[str, object], *, repo_root: Path) -> LoopConfig:
     defaults = LoopConfig()
-    raw_repos = section.get("repos", defaults.repos)
-    repos = tuple(str(r) for r in raw_repos) if isinstance(raw_repos, list) else defaults.repos
-    raw_trusted = section.get("trusted_authors", defaults.trusted_authors)
-    trusted_authors = (
-        tuple(str(a) for a in raw_trusted)
-        if isinstance(raw_trusted, list)
-        else defaults.trusted_authors
-    )
     return LoopConfig(
-        repos=repos,
+        repos=_parse_repo_targets(section, repo_root=repo_root),
         poll_interval_s=_int_field(section, "poll_interval_s", defaults.poll_interval_s),
         max_runs_per_day=_int_field(section, "max_runs_per_day", defaults.max_runs_per_day),
         max_dollars_per_day=_float_field(
@@ -134,7 +195,6 @@ def _parse_loop_config(section: dict[str, object]) -> LoopConfig:
         ),
         cooldown_min=_int_field(section, "cooldown_min", defaults.cooldown_min),
         concurrency=_int_field(section, "concurrency", defaults.concurrency),
-        trusted_authors=trusted_authors,
     )
 
 

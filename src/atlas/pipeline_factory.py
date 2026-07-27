@@ -127,6 +127,7 @@ def make_pipeline(
         stages=loaded.stages,
         workflow_name=loaded.name,
         worktree=worktree,
+        loop_mode=loop_mode,
     )
     return pipeline, recorder
 

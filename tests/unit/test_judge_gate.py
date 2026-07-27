@@ -105,9 +105,7 @@ def test_score_diff_raises_when_provider_unset_no_call_attempted() -> None:
         patch("atlas.judge_gate._write_score") as write_mock,
     ):
         with pytest.raises(judge_gate.JudgeUnavailableError):
-            judge_gate.score_diff(
-                diff_text="diff", run_id=_RUN_ID, span_id=_SPAN_ID, model="haiku"
-            )
+            judge_gate.score_diff(diff_text="diff", run_id=_RUN_ID, span_id=_SPAN_ID, model="haiku")
     get_adapter_mock.assert_called_once()
     write_mock.assert_not_called()
 
@@ -122,9 +120,7 @@ def test_score_diff_wraps_unexpected_adapter_exception() -> None:
     )
     with patch("atlas.judge_gate._get_adapter", return_value=adapter):
         with pytest.raises(judge_gate.JudgeUnavailableError, match="network exploded"):
-            judge_gate.score_diff(
-                diff_text="diff", run_id=_RUN_ID, span_id=_SPAN_ID, model="haiku"
-            )
+            judge_gate.score_diff(diff_text="diff", run_id=_RUN_ID, span_id=_SPAN_ID, model="haiku")
 
 
 def test_write_score_real_path_never_raises() -> None:
@@ -162,9 +158,7 @@ def test_score_diff_raises_when_no_numeric_score_returned() -> None:
         patch("atlas.judge_gate._write_score") as write_mock,
     ):
         with pytest.raises(judge_gate.JudgeUnavailableError):
-            judge_gate.score_diff(
-                diff_text="diff", run_id=_RUN_ID, span_id=_SPAN_ID, model="haiku"
-            )
+            judge_gate.score_diff(diff_text="diff", run_id=_RUN_ID, span_id=_SPAN_ID, model="haiku")
     write_mock.assert_not_called()
 
 
