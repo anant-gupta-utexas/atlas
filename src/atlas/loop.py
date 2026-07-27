@@ -138,6 +138,18 @@ def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, 
         )
 
     worktree = WorktreeManager(repo_root)
+
+    # The loop_dev prompt asks code_gen to commit, but a prompt is not a
+    # guarantee — sweep up anything the agent left uncommitted, then verify
+    # the branch is actually ahead of main before delivering. Without both
+    # steps a "successful" run silently delivers nothing (T-L2.13).
+    _commit_all(
+        result.ctx.worktree_path,
+        message=f"atlas: {issue.title} (#{issue.number})",
+        require_changes=False,
+    )
+    _assert_branch_has_commits(result.ctx.worktree_path)
+
     deliverer = GhPrDeliverer(repo_root=repo_root, worktree=worktree)
     branch = f"atlas/{ctx.slug}-{result.ctx.run_id[:8]}"
     pr_ref = queue_gh.deliver_pr(
@@ -157,12 +169,18 @@ def _pr_body(issue: Issue, run_id: str) -> str:
     return f"Closes #{issue.number}\n\nplumb run_id: `{run_id}`"
 
 
-def _commit_all(worktree_path: Path, *, message: str) -> None:
+def _commit_all(worktree_path: Path, *, message: str, require_changes: bool = True) -> None:
     """Stage and commit everything in ``worktree_path``.
 
-    Raises WorktreeError if the agent produced no changes — an empty branch
-    would make `gh pr create` fail with "No commits between main and ..."
-    much further from the cause.
+    With ``require_changes`` (the default), raises WorktreeError when there is
+    nothing staged — an empty branch would make `gh pr create` fail with "No
+    commits between main and ..." much further from the cause.
+
+    Pass ``require_changes=False`` when the agent may legitimately have
+    committed its own work already, so an empty index means "nothing left
+    over" rather than "the agent did nothing". Callers in that mode must
+    follow up with ``_assert_branch_has_commits``, which is the check that
+    actually protects delivery.
     """
     add = subprocess.run(
         ["git", "add", "-A"], cwd=worktree_path, capture_output=True, check=False, text=True
@@ -178,6 +196,8 @@ def _commit_all(worktree_path: Path, *, message: str) -> None:
         text=True,
     )
     if staged.returncode == 0:
+        if not require_changes:
+            return
         raise WorktreeError(f"nothing to commit in {worktree_path}: agent produced no changes")
 
     commit = subprocess.run(
@@ -190,6 +210,40 @@ def _commit_all(worktree_path: Path, *, message: str) -> None:
     if commit.returncode != 0:
         raise WorktreeError(
             f"git commit failed (exit {commit.returncode}): {commit.stderr.strip()}"
+        )
+
+
+def _assert_branch_has_commits(worktree_path: Path, *, base_branch: str = "main") -> None:
+    """Fail loudly if the worktree branch is not ahead of ``base_branch``.
+
+    This is the check that actually protects delivery. `gh pr create` on a
+    branch identical to main fails with "No commits between main and ...",
+    an error that names neither the run nor the reason.
+
+    Observed live (T-L2.13, 2026-07-27): the quick lane's agent edited
+    `.gitignore` correctly, the pipeline reported success across all three
+    spans, and delivery still produced nothing — because the agent never ran
+    `git commit` and nothing verified that it had. The L2 code review's C1
+    fix closed exactly this hole in the *planned* lane; the quick lane, which
+    relies on the `loop_dev.yaml` prompt politely asking the agent to commit,
+    kept it.
+    """
+    result = subprocess.run(
+        ["git", "rev-list", "--count", f"{base_branch}..HEAD"],
+        cwd=worktree_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise WorktreeError(
+            f"git rev-list failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+    if result.stdout.strip() == "0":
+        raise WorktreeError(
+            f"branch in {worktree_path} has no commits ahead of {base_branch}; "
+            "refusing to open an empty PR"
         )
 
 
@@ -285,7 +339,16 @@ def run_planned_first_pass(
         raise AbortedRunError(f"planned-lane dev-docs-be dispatch failed: {output_text}")
 
     try:
-        _commit_all(wt_path, message=f"docs(plan): TRS triad for #{issue.number}")
+        # require_changes=False for the same reason as the quick lane: if
+        # dev-docs-be ever commits its own triad, an empty index means
+        # "nothing left over", not "the agent did nothing". The
+        # ahead-of-main assertion below is the real guard either way.
+        _commit_all(
+            wt_path,
+            message=f"docs(plan): TRS triad for #{issue.number}",
+            require_changes=False,
+        )
+        _assert_branch_has_commits(wt_path)
     except WorktreeError:
         plumb.close_run(run_id=run_id, status="failure")
         _cleanup_quietly(worktree, wt_path)
@@ -405,9 +468,18 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
 
     issue = _pull_next_ready(repos, cfg.loop)
     if issue is None:
-        record_tick_outcome(
-            state, cfg.loop, made_progress=made_progress_from_sync, error_signature=None
-        )
+        # An empty queue is NOT a failure, and must not feed the breaker.
+        # This previously called record_tick_outcome(made_progress=False),
+        # so a perfectly healthy idle loop incremented
+        # consecutive_no_progress every tick and opened its own breaker after
+        # no_progress_limit ticks — 90 seconds at the default 30s poll.
+        # Worse, an idle tick also reset last_error_signature to None, so the
+        # reason a *real* dispatch failure had just occurred was erased before
+        # any human could read it (observed live, T-L2.13, 2026-07-27).
+        # The breaker exists to stop a loop that keeps failing, not one with
+        # nothing to do.
+        if made_progress_from_sync:
+            record_tick_outcome(state, cfg.loop, made_progress=True, error_signature=None)
         state.last_tick_at = _now_iso()
         state.persist(repo_root)
         return TickResult(
@@ -531,7 +603,12 @@ def _log_tick(result: TickResult | None) -> None:
     if result is None:
         _logger.warning("tick() failed with an unhandled exception; see traceback above")
         return
-    _logger.info(
+    # A failed tick must not scroll past at the same level as an idle one —
+    # `detail` is where a dispatch or delivery failure explains itself, and
+    # state.last_error_signature is not a durable record of it (a later idle
+    # tick used to clear it).
+    _logger.log(
+        logging.WARNING if result.action == "failed" else logging.INFO,
         "tick: action=%s issue=%s lane=%s detail=%s",
         result.action,
         result.issue_number,

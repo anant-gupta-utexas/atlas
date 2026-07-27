@@ -756,6 +756,10 @@ def test_run_one_shot_returns_engine_reported_cost(tmp_path: Path) -> None:
         patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
         patch("atlas.loop.WorktreeManager"),
         patch("atlas.loop.GhPrDeliverer"),
+        # Git is exercised for real in tests/integration/test_loop_e2e.py;
+        # these tests are about the cost value run_one_shot returns.
+        patch("atlas.loop._commit_all"),
+        patch("atlas.loop._assert_branch_has_commits"),
         patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=7, url="u")),
     ):
         _pr, _run_id, cost = loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
@@ -787,6 +791,10 @@ def test_run_one_shot_reports_zero_when_engine_reports_no_cost(tmp_path: Path) -
         patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
         patch("atlas.loop.WorktreeManager"),
         patch("atlas.loop.GhPrDeliverer"),
+        # Git is exercised for real in tests/integration/test_loop_e2e.py;
+        # these tests are about the cost value run_one_shot returns.
+        patch("atlas.loop._commit_all"),
+        patch("atlas.loop._assert_branch_has_commits"),
         patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=8, url="u")),
     ):
         _pr, _run_id, cost = loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
@@ -822,6 +830,8 @@ def test_run_one_shot_dispatches_in_loop_mode(tmp_path: Path) -> None:
         patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())) as mk,
         patch("atlas.loop.WorktreeManager"),
         patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.loop._commit_all"),
+        patch("atlas.loop._assert_branch_has_commits"),
         patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=9, url="u")),
     ):
         loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
@@ -870,3 +880,143 @@ def test_tick_handles_current_gh_user_failure(tmp_path: Path) -> None:
     claim_mock.assert_not_called()
     run_mock.assert_not_called()
     assert state.consecutive_no_progress == 1
+
+
+# ---------------------------------------------------------------------------
+# T-L2.13 field findings (2026-07-27) — three bugs the faked e2e tests missed
+# ---------------------------------------------------------------------------
+
+
+def test_idle_tick_does_not_feed_the_circuit_breaker(tmp_path: Path) -> None:
+    """An empty queue is not a failure.
+
+    The idle path used to call record_tick_outcome(made_progress=False), so a
+    perfectly healthy loop with nothing to do incremented
+    consecutive_no_progress every tick and opened its own breaker after
+    no_progress_limit ticks — 90 seconds at a 30s poll. Observed live during
+    T-L2.13: the daemon halted itself while the queue was simply empty.
+    """
+    cfg = _cfg(tmp_path, no_progress_limit=3)
+    state = _state()
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready", return_value=None),
+    ):
+        for _ in range(5):
+            result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert result.action == "idle"
+    assert state.consecutive_no_progress == 0
+    assert state.breaker_open_until is None
+
+
+def test_idle_tick_preserves_a_prior_error_signature(tmp_path: Path) -> None:
+    """A later idle tick must not erase why the previous tick failed.
+
+    record_tick_outcome(error_signature=None) resets last_error_signature, so
+    the reason a real dispatch failure had just occurred was destroyed by the
+    next empty poll — leaving an opened breaker and no explanation anywhere.
+    """
+    cfg = _cfg(tmp_path)
+    state = _state()
+    state.last_error_signature = "DeliveryError:no commits ahead of main"
+    state.consecutive_no_progress = 1
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready", return_value=None),
+    ):
+        loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert state.last_error_signature == "DeliveryError:no commits ahead of main"
+
+
+def test_sync_progress_on_an_idle_tick_still_resets_counters(tmp_path: Path) -> None:
+    """Real progress from sync_prior_prs must still clear the breaker counters."""
+    cfg = _cfg(tmp_path)
+    state = _state(consecutive_no_progress=2)
+    merged = [PrStatus(issue=_issue(), outcome="merged", pr_number=9)]
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=merged),
+        patch("atlas.loop._pull_next_ready", return_value=None),
+    ):
+        loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert state.consecutive_no_progress == 0
+
+
+def _init_git_repo(path: Path) -> Path:
+    import subprocess as sp
+
+    path.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["init", "-b", "main"],
+        ["config", "user.email", "t@t"],
+        ["config", "user.name", "t"],
+    ):
+        sp.run(["git", *args], cwd=path, capture_output=True, check=True)
+    (path / "seed.txt").write_text("seed\n")
+    sp.run(["git", "add", "-A"], cwd=path, capture_output=True, check=True)
+    sp.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True, check=True)
+    return path
+
+
+def test_assert_branch_has_commits_rejects_a_branch_identical_to_main(tmp_path: Path) -> None:
+    """The guard that stops an empty PR reaching `gh pr create`.
+
+    Live T-L2.13 failure: the agent edited the file correctly, the pipeline
+    reported success on all three spans, and delivery produced nothing —
+    because the agent never committed and nothing checked.
+    """
+    from atlas.worktree import WorktreeError
+
+    repo = _init_git_repo(tmp_path / "r")
+
+    with pytest.raises(WorktreeError, match="no commits ahead of main"):
+        loop._assert_branch_has_commits(repo)
+
+
+def test_assert_branch_has_commits_passes_when_ahead(tmp_path: Path) -> None:
+    import subprocess as sp
+
+    repo = _init_git_repo(tmp_path / "r")
+    sp.run(["git", "checkout", "-q", "-b", "atlas/work"], cwd=repo, capture_output=True, check=True)
+    (repo / "new.txt").write_text("x\n")
+    sp.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    sp.run(["git", "commit", "-m", "work"], cwd=repo, capture_output=True, check=True)
+
+    loop._assert_branch_has_commits(repo)  # must not raise
+
+
+def test_commit_all_is_a_noop_when_agent_already_committed(tmp_path: Path) -> None:
+    """require_changes=False distinguishes 'nothing left over' from 'did nothing'.
+
+    The quick-lane agent is asked to commit its own work. If it does, a clean
+    index means success, not failure — the ahead-of-main assertion is what
+    decides.
+    """
+    repo = _init_git_repo(tmp_path / "r")
+    loop._commit_all(repo, message="sweep", require_changes=False)  # must not raise
+
+
+def test_commit_all_still_raises_when_changes_required(tmp_path: Path) -> None:
+    from atlas.worktree import WorktreeError
+
+    repo = _init_git_repo(tmp_path / "r")
+    with pytest.raises(WorktreeError, match="nothing to commit"):
+        loop._commit_all(repo, message="sweep", require_changes=True)
+
+
+def test_commit_all_sweeps_uncommitted_agent_work(tmp_path: Path) -> None:
+    """The exact live failure: agent edits a file but never runs git commit."""
+    import subprocess as sp
+
+    repo = _init_git_repo(tmp_path / "r")
+    sp.run(["git", "checkout", "-q", "-b", "atlas/work"], cwd=repo, capture_output=True, check=True)
+    # The agent edits a file and stops there — no git commit.
+    (repo / "seed.txt").write_text("edited by agent\n")
+
+    loop._commit_all(repo, message="atlas: sweep", require_changes=False)
+    loop._assert_branch_has_commits(repo)  # swept up, now ahead of main

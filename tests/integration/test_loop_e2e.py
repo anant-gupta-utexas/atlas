@@ -101,9 +101,19 @@ class _FakeSubprocess:
     (worktree add/remove, status) is delegated to the real subprocess.run so
     WorktreeManager genuinely exercises git against the temp repo."""
 
-    def __init__(self, pr_number: int = 42, backend_stdout: str = "ok") -> None:
+    def __init__(
+        self,
+        pr_number: int = 42,
+        backend_stdout: str = "ok",
+        writes_file: str | None = None,
+    ) -> None:
         self.pr_number = pr_number
         self.backend_stdout = backend_stdout
+        # When set, the faked agent actually writes this file into the
+        # worktree it was pointed at. A fake that writes nothing cannot prove
+        # the delivery path: the quick lane's branch stays identical to main,
+        # which is precisely the failure T-L2.13 hit for real on 2026-07-27.
+        self.writes_file = writes_file
         self.calls: list[list[str]] = []
         # Captured before `subprocess.run` gets patched out — `patch(...)`
         # replaces the `run` attribute on this exact module object (loop.py,
@@ -119,6 +129,17 @@ class _FakeSubprocess:
         if argv[:2] == ["gh", "pr"]:
             return _completed(stdout=f"https://github.com/{_REPO}/pull/{self.pr_number}\n")
         if argv[0] == "claude":
+            if self.writes_file:
+                # Mirror the real agent: write into the worktree it was given.
+                # The quick lane runs claude with cwd=repo_root and points it
+                # at the worktree via the last --add-dir; the planned lane
+                # runs with cwd=worktree.
+                target = kwargs.get("cwd")
+                if "--add-dir" in argv:
+                    last_flag = len(argv) - 1 - argv[::-1].index("--add-dir")
+                    target = argv[last_flag + 1]
+                if target:
+                    (Path(target) / self.writes_file).write_text("fake agent output\n")
             return _completed(stdout=self.backend_stdout)
         if argv[0] == "git":
             return self._real_subprocess_run(argv, **kwargs)
@@ -135,7 +156,7 @@ def test_one_shot_lane_end_to_end_faked(tmp_path: Path) -> None:
     cfg = _cfg(repo_root)
     state = loop.LoopState(day=loop._today())
     issue = _issue(labels=frozenset({"wf:quick"}))
-    fake_subprocess = _FakeSubprocess(pr_number=42)
+    fake_subprocess = _FakeSubprocess(pr_number=42, writes_file="agent_output.txt")
 
     with (
         patch("atlas.loop.sync_prior_prs", return_value=[]),
@@ -311,8 +332,13 @@ def test_planned_lane_commits_triad_before_delivering(tmp_path: Path) -> None:
 
 
 def test_planned_lane_raises_when_agent_produces_nothing(tmp_path: Path) -> None:
-    """An agent that writes no files must fail loudly at commit time rather
-    than pushing an empty branch and failing at `gh pr create`."""
+    """An agent that writes no files must fail loudly before delivery rather
+    than pushing an empty branch and failing at `gh pr create`.
+
+    The guard is now the ahead-of-main assertion rather than the commit step
+    itself: _commit_all runs with require_changes=False so an agent that
+    commits its own work is not mistaken for one that did nothing.
+    """
     repo_root = _init_repo(tmp_path / "repo")
     cfg = _cfg(repo_root)
     issue = _issue(number=8, title="Redesign the queue", labels=frozenset({"wf:planned"}))
@@ -323,7 +349,7 @@ def test_planned_lane_raises_when_agent_produces_nothing(tmp_path: Path) -> None
 
     with (
         patch("atlas.loop.subprocess.run", side_effect=fake_subprocess),
-        pytest.raises(WorktreeError, match="nothing to commit"),
+        pytest.raises(WorktreeError, match="no commits ahead of main"),
     ):
         loop.run_planned_first_pass(issue, cfg, repo_root=repo_root)
 
@@ -494,7 +520,7 @@ def test_zero_touch_smoke_faked(tmp_path: Path) -> None:
     cfg = _cfg(repo_root)
     state = loop.LoopState(day=loop._today())
     issue = _issue(number=55, title="Add a health check endpoint", labels=frozenset({"wf:quick"}))
-    fake_subprocess = _FakeSubprocess(pr_number=101)
+    fake_subprocess = _FakeSubprocess(pr_number=101, writes_file="agent_output.txt")
 
     with (
         patch("atlas.loop.sync_prior_prs", return_value=[]),

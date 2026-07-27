@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -257,8 +258,22 @@ def _tmux(*args: str) -> None:
 
 
 @loop_app.command("run")
-def loop_run() -> None:
+def loop_run(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Log every tick at DEBUG level, not just INFO."
+    ),
+) -> None:
     """Run the loop daemon in this terminal (foreground, for debugging)."""
+
+    # Without this the daemon emits NOTHING. atlas.loop logs its failures via
+    # `logging`, but no handler was ever configured, so an unattended run that
+    # died produced an empty log file and the operator's only clue was a
+    # breaker that had silently opened (observed live, T-L2.13, 2026-07-27).
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    )
 
     repo_root = _find_repo_root()
     cfg = Config.load(repo_root)
