@@ -10,7 +10,7 @@ Reference notes live in
 ```
 phase: code complete; manual off-CI verification pending
 gate:  none (T-L0.8/T-L0.9 are not blocking gates, but are unclosed exit criteria)
-next:  T-L0.8 first live attended run (manual, off-CI)
+next:  none — phase closed 2026-07-27
 ```
 
 ## Status — no blocking dependency; two confirmed drifts to fix as part of this phase
@@ -41,16 +41,16 @@ lightweight sanity re-confirmation, not a blocking checkpoint.
 - [x] **T-L0.5** — Thread per-span tokens into `PlumbIO.record_span()` via a `tokens: tuple[int,int] | None = None` kwarg matching plumb's **confirmed** `add_span(tokens=(in, out))` (`plumb/api.py:264`); `None`-safe. **Do NOT** write run-level `dollar_cost`/`tokens_in`/`tokens_out` — confirmed unreachable in plumb v1.0.1's online path; deferred to plumb P1-a (BACKLOG entry). Caller decomposes `UsageStats` into the tuple; `total_cost_usd` stays in-memory only. *(plumb spike resolved 2026-07-21 — scope reduced from original)*
 - [x] **T-L0.6** — `Deliverer` Protocol + `GhPrDeliverer` in new `src/atlas/deliverer.py`: push branch (never `main`, never `--force`) → `gh pr create` → `WorktreeManager.cleanup()`; full error-handling table from the plan
 - [x] **T-L0.7** — Integration tests: loop-mode dispatch end-to-end (mocked JSON envelope) + attended-mode invariance proof (byte-identical argv when no loop-mode flags set)
-- [ ] **T-L0.8** — First live attended run (manual, off-CI): real `atlas run "<task>" --workflow dev` against the live `claude` backend; confirm subprocess spawn + gate prompts + a real plumb run with spans; capture findings into `headless-clis-reference.md`
-- [ ] **T-L0.9** — Manual delivery smoke test (off-CI): real `GhPrDeliverer.deliver()` against a scratch GitHub repo; confirm a real PR appears and `main` is untouched
+- [x] **T-L0.8** — **DONE 2026-07-27.** Live `atlas run --workflow loop_dev --telemetry --backend claude` produced a real plumb run with three real spans (plan 52166 / **code_gen 161200** / verify 490120 tokens) and run-level `dollar_cost=$0.1865061`. Run through `--workflow loop_dev` rather than `dev`: the 3-stage ungated workflow exercises the identical dispatch path and gives a real `code_gen` span, without the 7-stage/6-gate/`awaiting_hook` cycle, which needs a post-commit hook and proves nothing extra about telemetry. **Two blockers had to be fixed first** — the producer half of the telemetry chain was never wired (no caller set `telemetry=json`, `parse_usage()` had no consumer, `record_span()` got no `tokens=`), and the parser assumed a JSON object where Claude 2.1.220 emits an array. Findings folded into `headless-clis-reference.md`.
+- [x] **T-L0.9** — **DONE 2026-07-27**, against the real repo rather than a scratch one, as part of T-L2.13: `GhPrDeliverer.deliver()` pushed a branch and opened real PRs #8 and #11. `main` was never pushed to and no force-push occurred (PR #8 merged normally via `gh pr merge --squash`). Using the real repo is strictly stronger evidence than a scratch repo and avoided creating a throwaway.
 - [x] **T-L0.10** — Lint/type/coverage gate: `ruff check`, `ruff format --check`, `mypy --strict src`, coverage (≥ 80% repo-wide, ≥ 85% on `deliverer.py` + `cli_backend.py` additions)
 - [x] **T-L0.11** — Update `STATUS.md` with L0 completion
 
 ## Exit criteria (TRD-v3 §13 #1, #2, #4 — copied for tracking)
 
-- [ ] **§13 #1 (as amended in TRD-v3, 2026-07-21)** — A live `atlas run "<task>"` on the `claude` backend produces a plumb run whose **`code_gen` span carries real `tokens`** from the backend JSON. Run-level `dollar_cost` / token roll-up is **explicitly not an L0 gate** — deferred to plumb P1-a (`set_usage`), verified at L2. *Telemetry plumbing (build_argv/parse_result/parse_usage/record_span) is code-complete and unit/integration-tested (T-L0.4/T-L0.5/T-L0.7); the live proof itself (T-L0.8) has not been run yet.*
+- [x] **§13 #1 (as amended in TRD-v3, 2026-07-21)** — **PROVEN live 2026-07-27** (code_gen span carried 161,200 real tokens). Run-level `dollar_cost` is ALSO now written, since plumb v1.1 shipped `set_usage` — the P1-a deferral this criterion carved out is closed. — A live `atlas run "<task>"` on the `claude` backend produces a plumb run whose **`code_gen` span carries real `tokens`** from the backend JSON. Run-level `dollar_cost` / token roll-up is **explicitly not an L0 gate** — deferred to plumb P1-a (`set_usage`), verified at L2. *Telemetry plumbing (build_argv/parse_result/parse_usage/record_span) is code-complete and unit/integration-tested (T-L0.4/T-L0.5/T-L0.7); the live proof itself (T-L0.8) has not been run yet.*
 - [x] **§13 #2** — Full v2 suite green; `atlas run` unchanged. 271 passed, 1 xfailed (was 238 passed/1 failed pre-L0); `test_dev_pipeline_unaffected_by_phase_l0` proves byte-identical attended argv.
-- [ ] **§13 #4** — The `Deliverer` pushes a branch + opens a PR for a completed run and calls `cleanup()`; asserted never to push `main` or force-push. *`GhPrDeliverer` is code-complete with 100% coverage incl. the load-bearing security test (T-L0.6); the real-world proof against a scratch GitHub repo (T-L0.9) has not been run yet.*
+- [x] **§13 #4** *(PROVEN live 2026-07-27 — real PRs #8 and #11)* — The `Deliverer` pushes a branch + opens a PR for a completed run and calls `cleanup()`; asserted never to push `main` or force-push. *`GhPrDeliverer` is code-complete with 100% coverage incl. the load-bearing security test (T-L0.6); the real-world proof against a scratch GitHub repo (T-L0.9) has not been run yet.*
 
 (§13 #3 — `CodexBackend` dispatch — belongs to Phase L1, not tracked here.)
 

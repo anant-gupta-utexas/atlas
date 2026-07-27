@@ -1,14 +1,58 @@
 ---
 project: atlas
-status: v2.2 shipped; loop mode Phase L2 (loop daemon) — code complete, manual off-CI verification pending (unblocked 2026-07-25)
-last_updated: 2026-07-25
-next_gate: T-L2.13 (Phase L2 manual smoke) — unblocked, needs a human operator session; also still open — T-L0.8/T-L0.9 (Phase L0) + T-L1.1/T-L1.8 (Phase L1)
+status: v2.2 shipped; loop mode Phases L0-L2 COMPLETE — all manual off-CI verification done 2026-07-27
+last_updated: 2026-07-27
+next_gate: Phase L3 (self-healing + routing) — TRS written, not implemented
 blocked_on: null
 ---
 
 # atlas — status
 
 ## Current
+
+**Loop mode L0-L2 is complete and proven end-to-end on real systems
+(2026-07-27).** Every manual off-CI check that L0/L1/L2 carried — T-L0.8,
+T-L0.9, T-L1.1, T-L1.8, T-L2.13 — has now been executed. TRD-v3 §13 #1
+through #8 all hold.
+
+**Running them found eight defects that 400+ green tests, `mypy --strict`
+and a full code review had all missed**, because each lived on a path CI
+never executed. The headline: **Phase L0's telemetry was never actually
+connected in production.** `parse_usage()` had no caller, `StageOutcome`
+had no usage field, `record_span()` was called with no `tokens=`, and
+nothing ever requested the JSON envelope — so §13 #1 was unimplementable
+rather than merely unverified. The envelope schema it parsed was also wrong
+(Claude 2.1.220 emits a JSON *array*, not an object), and the token rule
+undercounted a real 159,896-token span as **50 tokens**.
+
+Proven live, against `anant-gupta-utexas/atlas`:
+
+- **§13 #5 zero-touch** — issue #7 labeled → PR #8 with `Closes #7` and a
+  run_id comment, **zero keystrokes**; merged → next tick wrote
+  `user_signal=approved` anchored to a real span and set `atlas:done`.
+- **§13 #6 two-lane** — issue #10 (`wf:planned`) → PR #11 containing exactly
+  the three triad files, a `dev_docs_be` span and **no `code_gen` span**.
+- **§13 #8 crash recovery** — `kill -9` mid-dispatch → restart reclaimed the
+  issue and pruned the orphaned worktree.
+- **§13 #7 budgets** — `atlas loop status` reports real accumulated spend
+  (`$2.5822 / $5.00`), where it previously printed "not tracked (cap NOT
+  enforced)". plumb v1.1's `set_usage` is what unblocked this; the P1-a
+  deferral is closed.
+- **§13 #1/#3 engines** — `loop_dev` completed on both `claude`
+  ($0.1865/run) and `codex` (tokens only — that CLI reports no cost, so
+  run-level `dollar_cost` is correctly NULL rather than 0.0).
+
+**T-L1.1 also reversed a shipped assumption.** A cold/warm capture pair
+showed `cached_input_tokens` is a **subset** of `input_tokens`, not an
+addend — atlas had it backwards and was inflating every Codex span's input
+by ~70-90%. Rule is now `openai_subset_fields_v2`; spans written under v1
+stay recomputable because the raw breakdown and rule name were persisted to
+`spans.attributes` (the L1 review's M1 mechanism earning its keep).
+
+Full defect list and the live evidence for each:
+[`dev/active/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md`](dev/active/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md)
+(field-findings section).
+
 
 **v2.2 is complete.** `pyproject.toml` reads `2.2.0`; `git tag v2.2` remains
 a manual maintainer action (tracked in BACKLOG.md).

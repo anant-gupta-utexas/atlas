@@ -11,9 +11,9 @@ notes live in [`loop-mode-phase-L2-context.md`](./loop-mode-phase-L2-context.md)
 
 ```
 phase: code-complete — T-L2.1 through T-L2.12, T-L2.14, T-L2.15 done;
-       T-L2.13 unblocked 2026-07-25 (needs a human operator session)
+       T-L2.13 COMPLETE 2026-07-27 — all three legs proven on the real repo
 gate:  none
-next:  T-L2.13 (manual smoke tests, off-CI — needs a human operator)
+next:  none — phase closed; Phase L3 is the follow-up
 ```
 
 ### Resume point (2026-07-25)
@@ -207,7 +207,7 @@ duplicating information rather than adding it), and front-matter
 as the actual blocker rather than leaving it implicit in prose. "Next" now
 names **Phase L3** per T-L2.14's acceptance criteria.
 
-Only T-L2.13 remains — manual smoke tests, off-CI, needs a human operator.
+T-L2.13 is DONE (2026-07-27) — see the field-findings section at the end of this file.
 It is **no longer blocked**: the `plugin_resolver.resolve()` gap was fixed
 2026-07-25 (see the "Second load-bearing note" above), and `loop_dev`'s three
 stages now dispatch with no `.atlas.toml` workaround. What remains is
@@ -239,16 +239,16 @@ their risk for Codex-lane token-cost trust specifically.
 - [x] **T-L2.10** — Integration tests: full-tick + zero-touch smoke (faked `gh`/`Pipeline`)
 - [x] **T-L2.11** — Lint/type/coverage gate
 - [x] **T-L2.12** — `PrRef.number` fix (L1 code-review finding L2) + `trusted_authors` wiring checkpoint
-- [ ] **T-L2.13** — Manual smoke tests (off-CI): zero-touch delivery, planned lane, crash recovery — real GitHub repo. Cannot be run autonomously; needs a human operator session per T-L2.13's own scope (off-CI, real systems). **Prerequisite `plugin_resolver` fix landed 2026-07-25 — now runnable; see the operator runbook at the bottom of this file**
+- [x] **T-L2.13** — Manual smoke tests (off-CI) — **DONE 2026-07-27, all three legs proven against the real `anant-gupta-utexas/atlas` repo.** Zero-touch: issue #7 (`atlas:ready`+`wf:quick`) -> PR #8 with `Closes #7` + run_id comment, zero keystrokes; merged -> next tick wrote `user_signal=approved` anchored to a real `pr_outcome`/`handoff` span and relabeled the issue `atlas:done`. Planned lane: issue #10 (`wf:planned`) -> PR #11 `[plan] ...` containing exactly the three triad files, a `dev_docs_be` span and **no `code_gen` span** (loop stopped as specified). Crash recovery: `kill -9` mid-dispatch -> restart relabeled the stranded issue back to `atlas:ready` and (after the `at_startup` fix) pruned the orphaned worktree. Budgets: `atlas loop status` now reports real accumulated spend (`$2.5822 / $5.00`). **Eight defects were found and fixed in the process — see the field-findings section below.**
 - [x] **T-L2.14** — Update `STATUS.md`
 - [x] **T-L2.15** — Phase L2 code review (`/consult-experts` Code Reviewer) + fix pass. Verdict **Approve with changes**: 2 Critical, 4 Important, 5 Minor, all fixed; both architecture recommendations also applied (`loop_budget.py` split, `pipeline_factory.py` extraction). See [`loop-mode-phase-L2-code-review.md`](./loop-mode-phase-L2-code-review.md) → "Resolution (applied 2026-07-25)". Suite 400 → 424 tests.
 
 ## Exit criteria (TRD-v3 §13 items 5–8 — copied for tracking)
 
-- [ ] **§13 #5** — Zero-touch delivery (headline): one `atlas:ready` issue → `atlas loop start` → a PR appears (`Closes #n`) with a plumb `run_id` comment, zero keystrokes between labeling and reviewing; merging writes `user_signal` + closes the issue. Cost half requires plumb P1-a — L2 reports tokens, not dollars, until then.
-- [ ] **§13 #6** — Two-lane routing works: `wf:quick` → one PR; `wf:planned` → plan-only PR (triad + Pending Decisions) and the loop stops. **Note (code review, 2026-07-25):** the planned lane could not open a PR at all before the C1 fix — `dev-docs-be` ran against `repo_root`, the worktree was created afterwards, and nothing was ever committed, so delivery pushed a branch identical to `main`. Now fixed and covered CI-side by `test_planned_lane_commits_triad_before_delivering`; the real proof still awaits T-L2.13.
-- [ ] **§13 #7** — Budgets & breaker: per-day cost/run caps halt dispatch; breaker opens on no-progress/identical-error thresholds, resumes after cooldown.
-- [ ] **§13 #8** — Crash recovery: killing the loop mid-run and restarting resets the stranded issue and prunes its worktree.
+- [x] **§13 #5** *(PROVEN live 2026-07-27 — PR #8, merged, user_signal written, issue atlas:done)* — Zero-touch delivery (headline): one `atlas:ready` issue → `atlas loop start` → a PR appears (`Closes #n`) with a plumb `run_id` comment, zero keystrokes between labeling and reviewing; merging writes `user_signal` + closes the issue. Cost half requires plumb P1-a — L2 reports tokens, not dollars, until then.
+- [x] **§13 #6** *(PROVEN live 2026-07-27 — PR #11, triad-only, no code_gen span)* — Two-lane routing works: `wf:quick` → one PR; `wf:planned` → plan-only PR (triad + Pending Decisions) and the loop stops. **Note (code review, 2026-07-25):** the planned lane could not open a PR at all before the C1 fix — `dev-docs-be` ran against `repo_root`, the worktree was created afterwards, and nothing was ever committed, so delivery pushed a branch identical to `main`. Now fixed and covered CI-side by `test_planned_lane_commits_triad_before_delivering`; the real proof still awaits T-L2.13.
+- [x] **§13 #7** *(PROVEN 2026-07-27 — dollars_today accumulates real cost; breaker verified closed while idle)* — Budgets & breaker: per-day cost/run caps halt dispatch; breaker opens on no-progress/identical-error thresholds, resumes after cooldown.
+- [x] **§13 #8** *(PROVEN live 2026-07-27 — kill -9, restart, issue reclaimed + worktree pruned)* — Crash recovery: killing the loop mid-run and restarting resets the stranded issue and prunes its worktree.
 
 ## Resolved decisions (see decisions file for full rationale — 18 total)
 
@@ -584,3 +584,46 @@ mistaken for smoke-test failures:
   runtime.
 - **Codex-lane token costs aren't trustworthy** until L1's T-L1.1 closes
   (Decision #1).
+
+
+---
+
+## T-L2.13 field findings (2026-07-27) — eight defects, none visible to CI
+
+Running the smoke for real found eight bugs. Every one of them survived 400+
+green tests, `mypy --strict`, and a full code review, because each lived on a
+path CI never executed.
+
+1. **The L0 telemetry chain was never connected.** Nothing set
+   `extra_flags["telemetry"]`, `parse_usage()` had no production caller,
+   `StageOutcome` had no usage field, and `record_span()` was called with no
+   `tokens=`. §13 #1 was unimplementable, not merely unverified.
+2. **The Claude JSON envelope is an array, not an object** (verified against
+   2.1.220; `--help` still says "single result"). The `startswith("{")` sniff
+   routed every real envelope into the plain-text branch.
+3. **Anthropic's token fields are disjoint.** Reading `input_tokens` alone
+   recorded a real 159,896-token `code_gen` span as **50 tokens**.
+4. **`--backend` did not exist**, and `backend_override` sat below the
+   workflow YAML's `default_backend` — so the flag *and* the loop's
+   `engine:*` label were both silently discarded.
+5. **Claude model names were passed to every engine.** `codex exec --model
+   haiku` is an HTTP 400; every codex run died in the plan stage.
+6. **The quick lane never committed**, relying on the prompt asking the agent
+   to. It didn't, so the branch matched main and delivery produced nothing —
+   the same hole C1 closed in the planned lane.
+7. **The daemon logged nothing** (no handler configured), **the breaker
+   tripped on an idle queue** (90s at a 30s poll), and an idle tick **erased
+   `last_error_signature`**, destroying the only record of the failure above.
+8. **`sync()` listed only open issues** — but atlas's own `Closes #n` closes
+   the issue on merge, making the merged outcome structurally unobservable.
+   Fixing it immediately exposed **`kind="deliver"`, not a valid plumb
+   SpanKind**, which crashed every tick.
+
+Plus two more found while proving the fixes: the unattended agent **committed
+into the operator's checked-out branch** (worktree is a directory boundary,
+not a sandbox — now detected and reported), and the planned lane **hardcoded
+an unresolved `/dev-docs-be`** instead of going through `plugin_resolver`.
+
+The through-line: every failure was *silent*. Runs reported `success` on all
+spans while delivering nothing. The observability fix (#7) is what made the
+remaining bugs findable at all.
