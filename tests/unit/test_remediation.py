@@ -18,8 +18,12 @@ from atlas.orchestrator import (
     _find_atlas_root,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateStore
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Shared fakes (mirror test_pipeline.py)
@@ -40,13 +44,13 @@ class _FakeRunner:
             stage=stage,
             span_id="",
             status="success",
-            output_text=f"output of {stage.name.value}",
+            output_text=f"output of {stage.name}",
             error_type=None,
         )
 
 
 class _FakePrompter:
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         return GateDecision(label="approved", turn_count=1, reason=None)
 
 
@@ -259,10 +263,11 @@ def test_run_to_completion_blocks_on_awaiting_hook_then_continues(tmp_path):
     t = threading.Thread(target=_write_score, daemon=True)
     t.start()
 
-    returned_ctx = pipeline.run_to_completion(ctx)
+    result = pipeline.run_to_completion(ctx)
     t.join(timeout=2)
 
-    assert returned_ctx.run_id == ctx.run_id
+    assert result.ctx.run_id == ctx.run_id
+    assert result.status == "success"
     # All 7 stages should complete and the run should be closed successfully.
     assert len(plumb.spans) == 7
 
@@ -271,8 +276,9 @@ def test_run_to_completion_awaiting_hook_timeout_returns_ctx(tmp_path):
     """On timeout (no pending-scores), run_to_completion returns ctx without closing the run."""
     pipeline, plumb, _ = _make_pipeline(tmp_path, commit_wait_timeout_s=0)
     ctx = pipeline.start(task="test", slug="slug")
-    returned_ctx = pipeline.run_to_completion(ctx)
-    assert returned_ctx.run_id == ctx.run_id
+    result = pipeline.run_to_completion(ctx)
+    assert result.ctx.run_id == ctx.run_id
+    assert result.status == "paused"
     # Run should NOT be closed (no close_run call changes _closed)
     assert not plumb._closed
 

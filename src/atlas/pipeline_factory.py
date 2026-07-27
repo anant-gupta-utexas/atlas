@@ -1,0 +1,134 @@
+"""Shared Pipeline construction — used by both `atlas run` and the loop daemon.
+
+Lives outside ``cli.py`` so ``loop.py`` doesn't have to import the CLI entry
+point to build a ``Pipeline`` (which forced ``cli.py``'s loop commands to
+import ``loop`` lazily inside function bodies to dodge a circular import).
+The dependency now runs one way: ``cli.py`` -> ``pipeline_factory`` and
+``loop.py`` -> ``pipeline_factory``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from atlas.composite_runner import CompositeStageRunner
+from atlas.config import Config
+from atlas.library_runner import LibraryStageRunner
+from atlas.orchestrator import (
+    AutoPrompter,
+    ClickPrompter,
+    Pipeline,
+    RunContext,
+    StageOutcome,
+    SubprocessStageRunner,
+)
+from atlas.plumb_io import PlumbIO
+from atlas.shell_runner import ShellStageRunner
+from atlas.stages import StageSpec
+from atlas.state import StateStore
+from atlas.workflow_loader import resolve_workflow
+from atlas.worktree import WorktreeManager
+
+
+class LastOutcomeRunner:
+    """Records the last StageOutcome from each step so callers can inspect it.
+
+    Wraps CompositeStageRunner without touching Pipeline — the pipeline
+    only sees the StageRunner Protocol.  After run_to_completion() the CLI
+    checks ``last.error_type`` to surface actionable error messages.
+    """
+
+    def __init__(self, inner: CompositeStageRunner) -> None:
+        self._inner = inner
+        self.last: StageOutcome | None = None
+
+    def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        outcome = self._inner.run(ctx=ctx, stage=stage)
+        self.last = outcome
+        return outcome
+
+
+def make_pipeline(
+    repo_root: Path,
+    cfg: Config,
+    *,
+    auto_approve: bool = False,
+    workflow: str | None = None,
+    workflow_file: Path | None = None,
+    backend_override: str | None = None,
+    max_turns: int | None = None,
+    loop_mode: bool = False,
+    telemetry_json: bool = False,
+) -> tuple[Pipeline, LastOutcomeRunner]:
+    """Construct a Pipeline + recorder exactly as `atlas run` does.
+
+    Shared by cli.py::run/resume and loop.py (Decision #11) so the two
+    construction paths cannot silently drift. ``backend_override`` is the
+    **highest** tier in `cli_backend.resolve_backend` — above a stage's own
+    ``backend`` field and the workflow's ``default_backend`` — because it
+    carries an explicit run-scoped human instruction: `atlas run --backend X`
+    or a loop issue's `engine:*` label. It used to sit below the workflow
+    default, which silently disabled both surfaces for every workflow that
+    declares one (all of them). See resolve_backend's docstring.
+
+    ``max_turns`` caps agent turns per stage. ``atlas run`` leaves it None
+    (a human is watching); the loop daemon passes ``cfg.loop.max_turns`` so
+    an unattended run can't spin indefinitely.
+
+    ``loop_mode`` switches CLI dispatch to the full unattended profile: the
+    JSON telemetry envelope (the only source of token/cost data) plus TRD-v3
+    §3.6's ``acceptEdits`` permission mode.
+
+    ``telemetry_json`` requests *only* the envelope, without the permission
+    change — this is what ``atlas run --telemetry`` uses. Keeping the two
+    separable is what lets an attended run be measured (TRD-v3 §13 #1)
+    without silently widening permissions on a run a human is watching.
+    Both default off, so plain ``atlas run`` argv stays byte-identical to
+    pre-L0 (§13 #2).
+    """
+    loaded = resolve_workflow(
+        workflow_file=workflow_file, workflow_name=workflow, repo_root=repo_root
+    )
+    plumb = PlumbIO(real=True)
+    state = StateStore(repo_root)
+    worktree = WorktreeManager(repo_root)
+    default_runner = SubprocessStageRunner(
+        timeout_overrides=cfg.timeout_overrides,
+        command_overrides=cfg.plugin_commands,
+        model=cfg.model,
+        default_backend=cfg.default_backend,
+        backend_override=backend_override,
+        backend_models=cfg.backend_models,
+        loaded_workflow=loaded,
+        max_turns=max_turns,
+        telemetry_json=loop_mode or telemetry_json,
+        permission_mode="acceptEdits" if loop_mode else None,
+        loop_cwd_is_worktree=loop_mode,
+    )
+    # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
+    # CompositeStageRunner is always used so dev.yaml's plain plugin-command
+    # stages (no LIB:/RAW: prefix) still fall through to SubprocessStageRunner.
+    library: LibraryStageRunner | None = None
+    if any(s.tool.startswith("LIB:") for s in loaded.stages):
+        library = LibraryStageRunner()
+    # ShellStageRunner handles SHELL: stages (direct CLI dispatch, e.g. job_cli).
+    shell: ShellStageRunner | None = None
+    if any(s.tool.startswith("SHELL:") for s in loaded.stages):
+        shell = ShellStageRunner(timeout_overrides=cfg.timeout_overrides)
+    composite = CompositeStageRunner(default=default_runner, library=library, shell=shell)
+    recorder = LastOutcomeRunner(composite)
+    prompter: ClickPrompter | AutoPrompter = AutoPrompter() if auto_approve else ClickPrompter()
+    pipeline = Pipeline(
+        repo_root=repo_root,
+        state=state,
+        plumb=plumb,
+        runner=recorder,
+        prompter=prompter,
+        stages=loaded.stages,
+        workflow_name=loaded.name,
+        worktree=worktree,
+    )
+    return pipeline, recorder
+
+
+__all__ = ["LastOutcomeRunner", "make_pipeline"]

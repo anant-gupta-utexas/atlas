@@ -16,14 +16,17 @@ from atlas.orchestrator import (
     SubprocessStageRunner,
     _clamp_reason,
 )
-from atlas.stages import STAGES, StageName
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_CODE_GEN_STAGE = next(s for s in STAGES if s.name == StageName.CODE_GEN)
-_RESEARCH_STAGE = next(s for s in STAGES if s.name == StageName.RESEARCH)
+_CODE_GEN_STAGE = next(s for s in STAGES if s.name == "code_gen")
+_RESEARCH_STAGE = next(s for s in STAGES if s.name == "research")
 
 
 def _ctx(tmp_path: Path) -> RunContext:
@@ -152,14 +155,14 @@ def test_runner_timeout_override_respected(tmp_path: Path) -> None:
 
 
 def test_unknown_plugin_raises_routing_drift_error_before_subprocess(tmp_path: Path) -> None:
-    from atlas.stages import GateLabel, StageSpec
+    from atlas.stages import StageSpec
 
     bad_stage = StageSpec(
         index=0,
-        name=StageName.RESEARCH,
+        name="research",
         span_kind="plan",
         tool="not-in-allow-list",
-        gate_label=GateLabel.GATE_RESEARCH,
+        gate_label="gate_research",
         gate_index=0,
     )
     runner = SubprocessStageRunner()
@@ -171,6 +174,42 @@ def test_unknown_plugin_raises_routing_drift_error_before_subprocess(tmp_path: P
         with pytest.raises(RoutingDriftError):
             runner.run(ctx=ctx, stage=bad_stage)
         mock_run.assert_not_called()
+
+
+def test_resolve_passes_raw_tool_strings_through_verbatim() -> None:
+    """RAW: strings are literal prompts from workflow YAML, not plugin names,
+    so there is no third-party command to allow-list. Regression guard for the
+    docstring/code mismatch that blocked `atlas run --workflow loop_dev`."""
+    from atlas.plugin_resolver import build_prompt, resolve
+
+    tool = "RAW:Implement the change per the acceptance criteria."
+    assert resolve(tool) == tool
+    # ...and build_prompt strips the same prefix downstream, so the round trip
+    # yields the literal prompt rather than a slash command.
+    assert build_prompt(resolve(tool), "task", "hint").startswith(
+        "Implement the change per the acceptance criteria.\n\n"
+    )
+
+
+def test_resolve_raw_tool_string_still_honors_explicit_override() -> None:
+    """The RAW: bypass must not shadow an explicit .atlas.toml override."""
+    from atlas.plugin_resolver import resolve
+
+    tool = "RAW:do the thing"
+    assert resolve(tool, overrides={tool: "custom-plugin"}) == "custom-plugin"
+
+
+def test_loop_dev_workflow_stages_all_resolve_without_overrides() -> None:
+    """Every loop_dev.yaml stage must dispatch with no [plugin_commands] block
+    in .atlas.toml — the precondition for T-L2.13's manual smoke test."""
+    from atlas.plugin_resolver import resolve
+
+    loop_dev_yaml = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "loop_dev.yaml"
+    stages = load_workflow_file(loop_dev_yaml).stages
+
+    assert [s.name for s in stages] == ["plan", "code_gen", "verify"]
+    for stage in stages:
+        resolve(stage.tool)  # must not raise RoutingDriftError
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +227,31 @@ def test_click_prompter_approve(tmp_path: Path) -> None:
     assert decision.label == "approved"
     assert decision.turn_count == 1
     assert decision.reason is None
+
+
+def test_click_prompter_prints_output_text_before_prompt(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    prompter = ClickPrompter()
+    stage = _RESEARCH_STAGE
+    report = "## Shortlist\nGREEN: acme-swe (score=9)\nYELLOW: foo-corp (score=5)"
+
+    with patch("builtins.input", return_value="a"):
+        prompter.ask(stage=stage, gate_index=0, output_text=report)
+
+    captured = capsys.readouterr()
+    assert report in captured.out
+
+
+def test_click_prompter_silent_when_output_text_empty(capsys: pytest.CaptureFixture[str]) -> None:
+    prompter = ClickPrompter()
+    stage = _RESEARCH_STAGE
+
+    with patch("builtins.input", return_value="a"):
+        prompter.ask(stage=stage, gate_index=0)
+
+    captured = capsys.readouterr()
+    assert "## Shortlist" not in captured.out
 
 
 def test_click_prompter_reject_with_inline_reason(tmp_path: Path) -> None:
@@ -263,3 +327,103 @@ def test_click_prompter_turn_count_increments_on_retry() -> None:
 
     assert decision.label == "approved"
     assert decision.turn_count == 3
+
+
+# ---------------------------------------------------------------------------
+# T3.4 — Backend wiring in SubprocessStageRunner
+# ---------------------------------------------------------------------------
+
+
+def test_subprocess_runner_uses_claude_by_default(tmp_path: Path) -> None:
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed()
+        runner.run(ctx=_ctx(tmp_path), stage=_RESEARCH_STAGE)
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "claude"
+
+
+def test_subprocess_runner_respects_stage_backend_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from atlas.stages import StageSpec
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    agy_stage = StageSpec(
+        index=0,
+        name="research",
+        span_kind="plan",
+        tool=_RESEARCH_STAGE.tool,
+        gate_label=_RESEARCH_STAGE.gate_label,
+        gate_index=_RESEARCH_STAGE.gate_index,
+        backend="agy",
+    )
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout='{"response": "ok", "stats": {}}')
+        runner.run(ctx=_ctx(tmp_path), stage=agy_stage)
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "agy"
+    assert "--include-directories" in argv
+    assert "--add-dir" not in argv
+
+
+def test_subprocess_runner_respects_workflow_default_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from atlas.workflow_loader import LoadedWorkflow
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    wf = LoadedWorkflow(name="test", default_backend="agy", stages=())
+    runner = SubprocessStageRunner(loaded_workflow=wf)
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout='{"response": "ok", "stats": {}}')
+        runner.run(ctx=_ctx(tmp_path), stage=_RESEARCH_STAGE)
+    argv = mock_run.call_args.args[0]
+    assert argv[0] == "agy"
+
+
+def test_subprocess_runner_unknown_backend_returns_failure(tmp_path: Path) -> None:
+    from atlas.stages import StageSpec
+
+    bad_stage = StageSpec(
+        index=0,
+        name="research",
+        span_kind="plan",
+        tool=_RESEARCH_STAGE.tool,
+        gate_label=_RESEARCH_STAGE.gate_label,
+        gate_index=_RESEARCH_STAGE.gate_index,
+        backend="opus",
+    )
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        outcome = runner.run(ctx=_ctx(tmp_path), stage=bad_stage)
+    assert outcome.status == "failure"
+    assert outcome.error_type == "unknown_backend"
+    mock_run.assert_not_called()
+
+
+def test_subprocess_runner_agy_missing_auth_returns_failure_no_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security: subprocess.run MUST NOT be called when agy auth env vars are absent."""
+    from atlas.stages import StageSpec
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    agy_stage = StageSpec(
+        index=0,
+        name="research",
+        span_kind="plan",
+        tool=_RESEARCH_STAGE.tool,
+        gate_label=_RESEARCH_STAGE.gate_label,
+        gate_index=_RESEARCH_STAGE.gate_index,
+        backend="agy",
+    )
+    runner = SubprocessStageRunner()
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.side_effect = AssertionError("subprocess.run must not be called")
+        outcome = runner.run(ctx=_ctx(tmp_path), stage=agy_stage)
+    assert outcome.status == "failure"
+    assert outcome.error_type == "agy_missing_auth_env"
+    mock_run.assert_not_called()

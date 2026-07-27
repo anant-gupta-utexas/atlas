@@ -1,0 +1,21 @@
+[
+  {
+    "number": 4,
+    "title": "[scratch] atlas loop L2 fixture capture",
+    "body": "Temporary issue used to capture real gh --json output shapes for atlas Phase L2 test fixtures. Safe to close/delete.",
+    "labels": [
+      {
+        "id": "LA_kwDOSLRTcs8AAAACtOLPag",
+        "name": "atlas:ready",
+        "description": "Ready for atlas loop to pick up",
+        "color": "0E8A16"
+      },
+      {
+        "id": "LA_kwDOSLRTcs8AAAACtOLQBw",
+        "name": "wf:quick",
+        "description": "Quick one-shot lane",
+        "color": "1D76DB"
+      }
+    ]
+  }
+]

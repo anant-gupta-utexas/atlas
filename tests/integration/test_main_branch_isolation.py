@@ -83,13 +83,13 @@ class _FakeRunner:
             stage=stage,
             span_id="",
             status="success",
-            output_text=f"output of {stage.name.value}",
+            output_text=f"output of {stage.name}",
             error_type=None,
         )
 
 
 class _FakePrompter:
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         return GateDecision(label="approved", turn_count=1, reason=None)
 
 

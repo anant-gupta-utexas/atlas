@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.13+
 - git 2.5+ (required for `git worktree`)
 - [uv](https://astral.sh/uv) (recommended) or pip
 - [plumb](https://github.com/anant-gupta-utexas/plumb) installed as a
@@ -42,7 +42,7 @@ pip install -e .
 atlas --help
 ```
 
-You should see the three subcommands: `run`, `status`, `hook`.
+You should see `run`, `resume`, `status`, `hook`, and the `loop` command group.
 
 ### 4. Optional — install the post-commit hook
 
@@ -66,6 +66,19 @@ Atlas creates `dev/active/<task-slug>/tasks.md`, opens Stage 0
 (research), and pauses at the first gate. From there you work through
 each gate interactively.
 
+Two optional flags on `atlas run`:
+
+```bash
+atlas run "<task>" --backend codex    # dispatch through a different engine
+atlas run "<task>" --telemetry        # record tokens + cost to plumb
+```
+
+`--telemetry` is off by default because it changes the dispatched argv;
+without it an attended run is byte-identical to pre-loop-mode. It is
+deliberately independent of the permission mode, so measuring a run never
+widens what the agent is allowed to do. See
+[CLI Backends](cli_backends.md) for both.
+
 ### Check pipeline state
 
 ```bash
@@ -88,22 +101,50 @@ needed.
 Create `.atlas.toml` in your project root (or use `~/.atlas/config.toml`
 for user-wide defaults):
 
+Every key `Config.load()` actually reads, with its default:
+
 ```toml
-[models]
-plan_model   = "claude-opus-4-7@https://api.anthropic.com/v1"
-code_model   = "claude-sonnet-4-6@https://api.anthropic.com/v1"
-review_model = "claude-sonnet-4-6@https://api.anthropic.com/v1"
+# Where plumb's SQLite file lives.
+plumb_db_path = "~/.plumb/plumb.db"
 
-[pipeline]
-worktree_stage = 5
-state_file     = "dev/active/{task}/tasks.md"
+# The Claude model name. NOT portable to other engines — see [backend.models].
+model = "haiku"
 
-[plumb]
-db_path = "~/.plumb/plumb.db"
+# Per-stage timeout overrides, keyed by stage name (seconds).
+[timeout_overrides]
+code_gen = 3600
+
+# Override the slash command a plugin tool string resolves to.
+[plugin_commands]
+code-review = "DEV-ESSENTIALS:code-review"
+
+[backend]
+default = "claude"        # project-wide backend default
+
+[backend.models]
+codex = "gpt-5.1-codex"   # per-engine model names; unset engines use their CLI default
+
+[loop]                    # only needed if you run `atlas loop`
+repos = ["owner/repo"]
+poll_interval_s = 60
+max_runs_per_day = 20
+max_dollars_per_day = 10.0
+max_turns = 40
+no_progress_limit = 3
+identical_error_limit = 5
+cooldown_min = 30
+concurrency = 1           # any other value raises; frozen until Phase L4
+# trusted_authors = ["you"]   # REQUIRED if a target repo is public or multi-author
 ```
 
-The `<model>@<base_url>` shape is intentional — model swaps are config
-edits, not code changes.
+Model swaps are config edits, not code changes. Two things to know:
+
+- `model` is a **Claude** name. Handing it to another engine is a hard
+  failure, not a degraded default (`codex exec --model haiku` is an HTTP
+  400), which is why per-engine names live in `[backend.models]`.
+- `max_dollars_per_day` only accumulates **claude**-reported spend. The
+  Codex CLI reports no cost at all, so on that lane `max_runs_per_day` is
+  the real bound.
 
 ## Running tests
 

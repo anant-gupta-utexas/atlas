@@ -30,8 +30,12 @@ from atlas.orchestrator import (
     StageOutcome,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, StageName, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateStore
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Shared fakes
@@ -44,7 +48,7 @@ class _CapturingRunner:
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
         self.calls.append(ctx)
-        status = "awaiting_hook" if stage.name == StageName.CODE_GEN else "success"
+        status = "awaiting_hook" if stage.name == "code_gen" else "success"
         return StageOutcome(
             stage=stage,
             span_id="",
@@ -55,7 +59,7 @@ class _CapturingRunner:
 
 
 class _ApprovePrompter:
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         return GateDecision(label="approved", turn_count=1, reason=None)
 
 
@@ -152,7 +156,7 @@ def test_original_task_text_persists_to_tasks_md(tmp_path: Path) -> None:
         task="Add response-cache middleware to the Flask repo",
         repo_root=tmp_path,
     )
-    state.create_tasks_md(ctx)
+    state.create_tasks_md(ctx, stages=STAGES)
 
     assert state.read_task_text("t1") == ctx.task
 
@@ -326,7 +330,7 @@ def test_run_to_completion_uses_worktree_for_code_review(tmp_path: Path) -> None
     # The last call into the runner must have been stage 6 (code_review).
     last_call = runner.calls[-1]
     last_stage = STAGES[6]
-    assert last_stage.name == StageName.CODE_REVIEW
+    assert last_stage.name == "code_review"
     assert last_call.worktree_path == worktree.created[0], (
         "code_review must run with the worktree_path set, not fall back to repo_root"
     )

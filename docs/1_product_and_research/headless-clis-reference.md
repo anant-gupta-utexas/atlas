@@ -416,6 +416,214 @@ Gemini API for Gemini).
 
 ---
 
+## Part E — Codex CLI headless reference (`codex exec`)
+
+> **Verification status (updated 2026-07-26, `codex-cli 0.144.4`).** T-L1.1's write-heavy
+> capture has now been run, closing the gaps this Part previously carried. Live captures are
+> checked in at `tests/fixtures/codex_jsonl/write_heavy_real.jsonl` and
+> `sandbox_denied_real.jsonl`. Four things changed from the 2026-07-24 draft:
+>
+> 1. **Write-path event types are VERIFIED** — `item.started`/`item.completed` carry
+>    `item_type` values `command_execution`, `file_change`, and `agent_message`.
+> 2. **No failure event type exists.** A sandbox-blocked write still exits `0` and emits
+>    `turn.completed`; the agent simply narrates that it couldn't comply.
+> 3. **`--add-dir` IS writable** under `--sandbox workspace-write` (Pending Decision #3).
+> 4. **`cached_input_tokens` is a SUBSET of `input_tokens`, not an addend** (Pending
+>    Decision #4). atlas's prior assumption was backwards and inflated every Codex span's
+>    input by ~70-90%. Fixed; see the token-usage table below.
+
+### Core non-interactive flags
+
+**VERIFIED** — all present in `codex exec --help` (0.144.4):
+
+| Flag | What it does |
+| --- | --- |
+| `exec <prompt>` | Non-interactive one-shot execution; prompt is a positional string argument (also accepts stdin, not used by atlas). |
+| `--json` | Emit JSONL events to stdout instead of human-readable text. |
+| `-C`, `--cd <DIR>` | Set the single working root for the run. |
+| `-s`, `--sandbox <MODE>` | `read-only`, `workspace-write`, or `danger-full-access`. Confines writes to the working root passed via `-C`. |
+| `--add-dir <DIR>` | Repeatable. *"Additional directories that should be writable alongside the primary workspace."* Whether the sandbox actually honors this for `workspace-write` is **UNVERIFIED** by execution — see the sandbox caveat below. |
+| `-m`, `--model <MODEL>` | Model to use. |
+| `--skip-git-repo-check` | Not used by atlas — atlas always dispatches inside a git repo/worktree. |
+| `--ephemeral` | Not used by atlas. |
+| `--output-schema <FILE>` | Force structured output against a JSON Schema. Not used by atlas in L1 (no structured-output need). |
+| `-o`, `--output-last-message <FILE>` | Write the final assistant message to a file. Not used by atlas (output is read from the JSONL stream instead). |
+
+**Bypass flags that exist and must never be used** (VERIFIED present, banned by atlas policy —
+the Codex analogue of Claude's `--dangerously-skip-permissions`, TRD-v3 §3.6):
+`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`.
+
+### `--json` output schema — JSONL event stream
+
+**VERIFIED.** A real captured run of a trivial read-only prompt produced exactly this stream:
+
+```jsonl
+{"type":"thread.started","thread_id":"019f96b7-e404-7673-8853-2938007f2629"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hi"}}
+{"type":"turn.completed","usage":{"input_tokens":16668,"cached_input_tokens":13056,"output_tokens":5,"reasoning_output_tokens":0}}
+```
+
+Observed event types:
+
+| Event `type` | Fields | Notes |
+| --- | --- | --- |
+| `thread.started` | `thread_id` | First event; session identifier. |
+| `turn.started` | — | No payload observed. |
+| `item.completed` | `item.{id,type,text}` | Agent output lives here, **not** on the terminal event. `item.type == "agent_message"` holds prose; other `item.type` values (e.g. file-edit or command-execution items) are **UNVERIFIED** — not observed in the read-only sample, expected from a write-heavy run (T-L1.1). |
+| `turn.completed` | `usage` only | The terminal event. Carries **no status field and no text** — success/failure is exit-code-only (see below). |
+
+**This differs materially from both Claude's envelope (Part B) and the schema this doc
+originally assumed for Codex.** Do not reason from Claude's `result`-event shape when working
+with Codex:
+
+| Assumed (pre-verification) | Actual (VERIFIED) |
+| --- | --- |
+| Terminal event `type: "result"` with `status` + `text` | Terminal event is `type: "turn.completed"`, carrying **only** `usage` |
+| Failure detectable from a `result` subtype | **No status field anywhere in the stream** — failure is exit-code-only |
+| Agent output text on the terminal event | Output lives in separate `item.completed` events (`item.type == "agent_message"`) |
+| `total_cost_usd` present (as with Claude) | **No cost field at all** — four token fields instead |
+
+### Status determination
+
+**VERIFIED exit-code-only, including the failure path (2026-07-26).** The event stream
+carries no status field, so:
+
+- `returncode != 0` → failure.
+- `returncode == 0` + a `turn.completed` event present → success.
+- `returncode == 0` with **no** `turn.completed` (truncated/interrupted stream) → treated as
+  failure by atlas (`codex_no_turn_completed`), even though the exit code was clean.
+- **`turn.failed` and `error` events DO exist** — but only for *infrastructure* failures,
+  not for an agent that declines a task. Both distinctions were observed directly:
+  - **Agent-level refusal → looks like success.** A sandbox denial (`--sandbox read-only`,
+    asked to write a file) was correctly refused, yet exited `0` and emitted a normal
+    `turn.completed`. Nothing in the stream marks it as a failure.
+  - **Turn-level failure → three error signals at once.** A rejected `--model` (HTTP 400)
+    emitted `item.completed` with `item.type == "error"`, a top-level `error` event, **and**
+    `turn.failed` carrying `error.message` — with no `turn.completed`, and exit code `1`.
+
+  atlas keeps status **exit-code-driven** regardless (Resolved Decision #8 stands) and uses
+  these events only to render a legible message. Before that, a failed dispatch surfaced the
+  entire raw JSONL blob as its error text, which is how a plain bad-model error reached the
+  operator as an unreadable wall of JSON.
+- A **hard** failure (preflight, e.g. an untrusted directory) exits non-zero with **empty
+  stdout** and the message on stderr — hence the exit-code branch must come first.
+
+> **Corrects an earlier claim in this doc.** A 2026-07-26 revision stated "no distinct
+> failure-path event type exists," generalizing from the sandbox-denial capture alone. That
+> capture genuinely has no error event — but it is the *agent-refusal* case, not the
+> *turn-failure* case. The two paths differ, and only the latter emits `turn.failed`.
+
+A clean exit with a completed turn is reported as `success` even if the agent's actual work
+failed (tests still red, task not accomplished) — Codex's JSONL gives atlas no way to
+distinguish "did nothing useful" from "did the task," which is why loop-mode workflows always
+follow Codex dispatch with a separate `verify` stage rather than trusting exit code alone.
+
+### Token usage fields
+
+**VERIFIED.** `turn.completed.usage` carries exactly four fields, no dollar figure:
+
+| Field | Notes |
+| --- | --- |
+| `input_tokens` | **Total** prompt tokens — the whole prompt, cached portion included. |
+| `cached_input_tokens` | **VERIFIED (2026-07-26) to be a SUBSET of `input_tokens`**, i.e. the served-from-cache portion of it — matching OpenAI's documented convention (`prompt_tokens_details.cached_tokens` ⊆ `prompt_tokens`) and **opposite to Anthropic's**. Do not add it to `input_tokens`. |
+| `output_tokens` | Total output tokens, including tool-call arguments and (see below) reasoning. |
+| `reasoning_output_tokens` | Reasoning-model output tokens. `> 0` now **observed** (9, 50, and 159 across captured runs), closing that gap. Treated as a **subset** of `output_tokens` on OpenAI's convention (`completion_tokens_details.reasoning_tokens` ⊆ `completion_tokens`) — this one is convention plus consistency with the measured cache result, **not an independent measurement**: a run with `output_tokens=206`/`reasoning=50` against a ~46-token visible message fits either model arithmetically, because tool-call arguments are billed output too. |
+
+#### How the cache question was settled
+
+Same prompt, same directory, two runs back to back on `codex-cli 0.144.4`:
+
+| Run | `input_tokens` | `cached_input_tokens` |
+| --- | --- | --- |
+| A (colder) | 68719 | 48384 |
+| B (warmer) | 69161 | 62464 |
+
+`input_tokens` held flat (+0.6%) while `cached_input_tokens` rose 29%. Under the addend model
+`input_tokens` had to *fall* by ~14k as more of the prompt became cacheable — it did not.
+Therefore `input_tokens` is the total and `cached_input_tokens` is a portion of it.
+
+atlas's reduction rule is now `openai_subset_fields_v2` (`cli_backend.codex_usage_to_tokens`):
+`(input_tokens, output_tokens)`, adding neither sub-field. Spans written under the superseded
+`cached_input_as_addend_v1` rule remain recomputable, because
+`codex_usage_attributes()` persists the raw four-field breakdown *and* the rule name into
+`spans.attributes` — the L1 code review's finding M1 mechanism doing exactly the job it was
+added for.
+
+**No cost field exists anywhere in the schema.** Codex does not report a dollar figure at all
+— this is a **data-availability** gap, not a storage gap. Contrast with Claude's
+`total_cost_usd`, which the CLI *does* report (see Part B) and which atlas now persists as
+run-level `dollar_cost` via plumb v1.1's `set_usage()` — the P1-a blocker this paragraph used
+to cite closed on 2026-07-27. Codex's gap does not close with it: there is nothing to store.
+Cross-engine cost comparison is therefore **tokens-only**, and no price table is implemented
+anywhere in atlas's v3 loop-mode arc.
+
+### Exit codes
+
+**UNVERIFIED beyond the binary success/failure split.** Only `0` (success) and non-zero
+(failure) were exercised by the read-only capture; Codex's documented exit-code taxonomy (if
+one exists beyond 0/non-zero, analogous to `agy`'s `42`/`53` in Part C) has not been confirmed.
+
+### Authentication
+
+**VERIFIED.** `OPENAI_API_KEY` env var (checked first), or a `codex login` session file at
+`$CODEX_HOME/auth.json` (default `~/.codex/auth.json` when `CODEX_HOME` is unset — the path was
+confirmed present on this machine after `codex login`). `--ignore-user-config`'s own help text
+states *"auth still uses `CODEX_HOME`"*, so a preflight check must honor the env var rather than
+hardcoding `~/.codex`. Fails closed with no subprocess spawned if neither is present — same
+posture as `AntigravityBackend.preflight()` (Part C).
+
+### Sandbox — writability of `--add-dir` paths
+
+**VERIFIED writable (2026-07-26).** A real write attempt under `--sandbox workspace-write`
+with `-C <main>` and `--add-dir <extra>` created files in **both** directories. Pending
+Decision #3 resolves to "honored as documented" — the contemplated fallback (`-C <worktree>`
+only, dropping the extra `--add-dir` entries) is not needed, so atlas keeps passing
+`repo_root` via `--add-dir` and Codex runs stay as context-rich as Claude runs.
+
+The sandbox does still enforce its boundary: under `--sandbox read-only`, a write attempt was
+refused with *"operation not permitted"* and no file appeared.
+
+### Example commands
+
+```bash
+# Headless one-shot, JSONL output, workspace-write sandbox
+codex exec "Add a hello.py that prints hi" --json -C ./my-repo --sandbox workspace-write
+
+# Read-only exploration (no edits, no commands run)
+codex exec "Explain what auth.py does" --json -C ./my-repo --sandbox read-only
+
+# Extra writable directory alongside the primary workspace
+codex exec "Implement the change" --json -C ./worktree --sandbox workspace-write \
+  --add-dir ./my-repo --model gpt-5-codex
+```
+
+---
+
+## Part F — Claude Code vs Antigravity vs Codex: quick comparison
+
+| Dimension | Claude Code (`claude -p`) | Antigravity (`agy -p`) | Codex (`codex exec`) |
+| --- | --- | --- | --- |
+| Headless trigger | `-p` / `--print` | `-p` / `--prompt` (or non-TTY) | `exec` subcommand |
+| Output formats | `text` / `json` / `stream-json` | `text` / `json` / `stream-json` (JSONL) | `text` / `--json` (JSONL) |
+| Terminal event | `result` (status + text + stats) | `result` (JSONL) | `turn.completed` (**usage only** — no status, no text) |
+| Status signal | `subtype` field | exit codes only | **exit code only** — no status field anywhere |
+| Output text location | terminal `result.result` field | terminal `result.response` field | separate `item.completed` events (`item.type == "agent_message"`) |
+| Cost telemetry | `total_cost_usd` + per-model breakdown | `stats` (tokens + latency) | **none** — tokens only (`input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`) |
+| Sandbox / confinement | worktree (atlas-managed) only | worktree (atlas-managed) only | `--sandbox {read-only,workspace-write,danger-full-access}` (Codex-native) **+** worktree |
+| Dangerous bypass flag | `--dangerously-skip-permissions` (banned) | none documented | `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-bypass-hook-trust` (banned) |
+| Headless auth | `ANTHROPIC_API_KEY` | browser OAuth by default; API-key headless contested | `OPENAI_API_KEY` or `codex login` session (`$CODEX_HOME/auth.json`) |
+| Extra directories | `--add-dir` (verified writable) | `--include-directories` | `--add-dir` (writability **unverified** under `workspace-write`) |
+
+**Net for atlas loop mode:** Codex's JSONL schema is the least self-describing of the three —
+no status field, no cost field, output text on a different event type than the terminal event.
+`CodexBackend` compensates by treating the `verify` stage (not backend exit-code parsing) as
+the actual quality gate — the same posture atlas already takes toward Antigravity's coarser
+exit-code taxonomy, just pushed one step further because Codex's stream carries even less
+signal than `agy`'s.
+
+---
+
 ## Sources
 
 - Claude Code headless guide — <https://code.claude.com/docs/en/headless>
@@ -434,10 +642,16 @@ Gemini API for Gemini).
 - The New Stack — Gemini CLI vs Antigravity — <https://thenewstack.io/gemini-cli-antigravity-replacement/>
 - amux — Gemini CLI → Antigravity migration guide — <https://amux.io/guides/gemini-cli-to-antigravity-cli/>
 - Gemini in Chrome — <https://gemini.google/overview/gemini-in-chrome/>
+- Codex CLI (`codex exec`) schema — verified directly against `codex-cli 0.144.4` output and
+  `codex exec --help` (real capture, 2026-07-24); see
+  `dev/archive/loop-mode-phase-L1/loop-mode-phase-L1-context.md` for the raw sample and
+  verification log. No public URL captured for this source — pin to the version string if
+  cross-checking later.
 
 ## Cross-references
 
-- Project README: [`README.md`](./README.md)
-- Repo: <https://github.com/anant-gupta-utexas/content-pipeline>
-- LLM port & adapters: `src/application/ports/llm.py`, `src/infrastructure/llm/{anthropic,openrouter,ollama}_client.py`
-- **Layer-ownership decision** (atlas owns CLI-subprocess dispatch; this project stays API-only) and the `CliBackend` implementation spec that consumes Parts B–D above: [`../atlas/cli-backend-dispatch.md`](../atlas/cli-backend-dispatch.md)
+- Docs hub: [`../README.md`](../README.md)
+- content-pipeline repo (the project Part A's decision is about): <https://github.com/anant-gupta-utexas/content-pipeline>
+- Its LLM port & adapters: `src/application/ports/llm.py`, `src/infrastructure/llm/{anthropic,openrouter,ollama}_client.py`
+- **Layer-ownership decision** (atlas owns CLI-subprocess dispatch; content-pipeline stays API-only) and the `CliBackend` implementation spec that consumes Parts B–D above: [`cli-backend-dispatch.md`](../../dev/archive/yaml-workflow-engine-design-notes/cli-backend-dispatch.md) *(archived design note — the decision shipped in v2.2)*
+- Current backend behavior, as shipped: [`../3_guides/cli_backends.md`](../3_guides/cli_backends.md). Prefer it over this reference for atlas's own resolution order, model handling, and error types.

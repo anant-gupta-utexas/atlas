@@ -1,12 +1,13 @@
 [project]
 name = "atlas"
-version = "1.0.0"
+version = "3.1.0"
 description = "Local-CLI agent orchestrator + metrics logger for a phase-gated dev workflow."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "plumb",
     "typer>=0.12",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -18,10 +19,16 @@ dev = [
     "pytest-cov>=6",
     "ruff>=0.4",
     "mypy>=1.10",
+    "types-PyYAML",
 ]
+# Install content-pipeline in-process integration (Mode A, LIB: stages).
+# Requires content-pipeline checked out as a sibling at ../content-pipeline.
+# Without this extra, --workflow job fails cleanly and names --workflow job_cli.
+job = ["content-pipeline"]
 
 [tool.uv.sources]
 plumb = { path = "../plumb", editable = true }
+content-pipeline = { path = "../content-pipeline", editable = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -53,6 +60,25 @@ show_missing = true
 strict = true
 python_version = "3.13"
 files = ["src/atlas"]
+
+[[tool.mypy.overrides]]
+# content-pipeline's top-level packages — an optional dependency (T2.6) whose
+# src-layout installs these as importable top-level names. library_adapters/*
+# import them lazily (function-local), so atlas's own code is unaffected whether
+# or not content-pipeline is installed in the environment running mypy; this
+# override stops mypy treating those imports as errors when the extra is absent.
+module = ["application.*", "infrastructure.*", "domain.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The library adapters' `Settings()` call needs a `type: ignore[call-arg]`
+# because content-pipeline's pydantic BaseSettings loads required fields from
+# the environment (invisible to mypy). That ignore is *needed* when the job
+# extra is installed but *unused* when it isn't (Settings resolves to Any via
+# ignore_missing_imports). Disable warn_unused_ignores here so both the plain
+# `dev` mypy leg and the `job`-extra leg pass on the same source.
+module = ["atlas.library_adapters.*"]
+warn_unused_ignores = false
 
 [tool.ruff]
 line-length = 100

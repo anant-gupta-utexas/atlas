@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from atlas.stages import STAGE_BY_NAME, STAGES, GateLabel, StageName, StageSpec
+from atlas.stages import StageSpec
 
 if TYPE_CHECKING:
+    from atlas.cli_backend import SpanUsage
     from atlas.plumb_io import PlumbIO
     from atlas.state import StateStore
     from atlas.worktree import WorktreeManager
@@ -20,7 +21,9 @@ _ROUTING_FIXTURE_PATH = (
     Path(__file__).parent.parent.parent / "tests" / "fixtures" / "routing_ground_truth.json"
 )
 
-# Per-stage subprocess timeouts (seconds). code_gen gets extra headroom.
+# Per-stage subprocess timeouts (seconds), dev-pipeline tier-3 fallback.
+# code_gen gets extra headroom. Retained as the final fallback when neither
+# .atlas.toml nor the workflow YAML's timeout_s specifies one (§6.7).
 _DEFAULT_TIMEOUT_S: dict[str, int] = {
     "research": 600,
     "prd_draft": 600,
@@ -30,6 +33,9 @@ _DEFAULT_TIMEOUT_S: dict[str, int] = {
     "code_gen": 1800,
     "code_review": 600,
 }
+
+# Fallback for stage names absent from _DEFAULT_TIMEOUT_S (non-dev workflows).
+_GLOBAL_FALLBACK_TIMEOUT_S = 600
 
 _GATE_MAX_REASON_BYTES = 4096
 _GATE_MAX_RETRIES = 3
@@ -47,6 +53,33 @@ class NoActiveRunError(Exception):
 
 class AwaitingHookExceededError(Exception):
     """Raised when awaiting_hook repeats more than _AWAITING_HOOK_MAX_ATTEMPTS times."""
+
+
+def resolve_timeout(stage: StageSpec, timeout_overrides: dict[str, int]) -> int:
+    """Resolve a stage's subprocess timeout in priority order (§6.7):
+
+    1. ``.atlas.toml`` per-stage override (highest priority).
+    2. The workflow YAML's ``timeout_s`` field on the stage.
+    3. The hardcoded dev-pipeline ``_DEFAULT_TIMEOUT_S`` table.
+    4. ``_GLOBAL_FALLBACK_TIMEOUT_S``, for stage names absent from tier 3
+       (non-dev workflows that omit ``timeout_s``).
+    """
+    if stage.name in timeout_overrides:
+        return timeout_overrides[stage.name]
+    if stage.timeout_s is not None:
+        return stage.timeout_s
+    return _DEFAULT_TIMEOUT_S.get(stage.name, _GLOBAL_FALLBACK_TIMEOUT_S)
+
+
+def namespaced_metric(workflow_name: str, gate_label: str) -> str:
+    """Return the metric name for a gate score, namespaced by workflow.
+
+    The ``dev`` workflow preserves v1-era bare names (e.g. ``gate_research``)
+    for backward compatibility; any other workflow gets ``<name>.<gate_label>``.
+    """
+    if workflow_name == "dev":
+        return gate_label
+    return f"{workflow_name}.{gate_label}"
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +110,31 @@ class StageOutcome:
     status: str  # "success" | "failure" | "awaiting_hook" | "rejected"
     output_text: str
     error_type: str | None
+    # Per-dispatch token/cost telemetry, when the backend reports any.
+    # None for every non-CLI runner (LIB:/SHELL:), for backends that report
+    # no usage (agy), and for attended runs, which never request the JSON
+    # envelope. Populated by SubprocessStageRunner in loop mode and consumed
+    # by Pipeline.step() to write spans.tokens / spans.attributes.
+    usage: SpanUsage | None = None
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """Terminal outcome of a completed or paused run.
+
+    Wraps RunContext (unchanged) with the status Pipeline already computes
+    internally in run_to_completion()'s loop but previously discarded after
+    writing it to plumb. Additive: every existing call site that only reads
+    `ctx` fields continues to work via `.ctx`.
+    """
+
+    ctx: RunContext
+    status: str  # "success" | "failure" | "paused"  (paused = awaiting_hook timeout)
+    # Summed engine-reported cost for this run, or None when no stage reported
+    # one (every attended run, and every all-Codex run — the Codex CLI emits no
+    # cost figure at all). None and 0.0 are deliberately distinct: the loop's
+    # budget must not treat "unknown" as "free".
+    dollar_cost: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +143,7 @@ class StageOutcome:
 
 
 class GatePrompter(Protocol):
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision: ...
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision: ...
 
 
 class StageRunner(Protocol):
@@ -106,6 +164,8 @@ class Pipeline:
         plumb: PlumbIO,
         runner: StageRunner,
         prompter: GatePrompter,
+        stages: tuple[StageSpec, ...] | None = None,
+        workflow_name: str = "dev",
         worktree: WorktreeManager | None = None,
         commit_wait_timeout_s: int = _DEFAULT_COMMIT_WAIT_TIMEOUT_S,
     ) -> None:
@@ -117,10 +177,28 @@ class Pipeline:
         self._worktree = worktree
         self._commit_wait_timeout_s = commit_wait_timeout_s
         self._last_code_gen_span_id: str = ""
+        # Run-level usage roll-up across every stage of this run. plumb
+        # auto-fills run tokens from buffered spans at close, but NEVER
+        # auto-fills dollar_cost (plumb v1.1 FR-USAGE-3a), so atlas has to
+        # sum and write it explicitly. `_run_cost_seen` distinguishes "no
+        # engine reported cost" (leave NULL) from "cost genuinely was $0".
+        self._run_dollar_cost: float = 0.0
+        self._run_cost_seen: bool = False
         # Latest RunContext as mutated inside step() (e.g. with worktree_path
         # after stage 5).  run_to_completion() reads this back so caller-owned
         # ctx in same-process flow does not drift from in-flight ctx.
         self._latest_ctx: RunContext | None = None
+
+        if stages is None:
+            from atlas.workflow_loader import resolve_workflow
+
+            loaded = resolve_workflow(
+                workflow_file=None, workflow_name=workflow_name, repo_root=repo_root
+            )
+            stages = loaded.stages
+        self._stages = stages
+        self._stage_by_name: dict[str, StageSpec] = {s.name: s for s in stages}
+        self._workflow_name = workflow_name
         self._validate_routing_fixture()
 
     # ------------------------------------------------------------------
@@ -134,7 +212,7 @@ class Pipeline:
         """
         run_id = self._plumb.open_run(task=task)
         ctx = RunContext(run_id=run_id, slug=slug, task=task, repo_root=self._repo_root)
-        self._state.create_tasks_md(ctx)
+        self._state.create_tasks_md(ctx, stages=self._stages, workflow_name=self._workflow_name)
         self._state.write_current_run(run_id, slug)
         return ctx
 
@@ -155,6 +233,23 @@ class Pipeline:
         run_id, slug, worktree_path, code_gen_span_id = quad
         tasks_path = self._repo_root / "dev" / "active" / slug / "tasks.md"
         task = self._state.read_task_text(slug) or _parse_task_from_tasks_md(tasks_path)
+
+        # Reload the workflow this run was started with — tasks.md is the
+        # canonical source, not whatever stages this Pipeline was constructed
+        # with (a fresh CLI invocation always constructs with the "dev"
+        # default before resume() corrects it here).
+        workflow_name = self._state.read_workflow_name(slug) or "dev"
+        from atlas.workflow_loader import WorkflowNotFoundError, resolve_workflow
+
+        try:
+            loaded = resolve_workflow(
+                workflow_file=None, workflow_name=workflow_name, repo_root=self._repo_root
+            )
+        except WorkflowNotFoundError as exc:
+            raise WorkflowNotFoundError(f"Cannot resume run {run_id!r}: {exc}") from exc
+        self._stages = loaded.stages
+        self._stage_by_name = {s.name: s for s in loaded.stages}
+        self._workflow_name = loaded.name
 
         # Validate state under the *original* run_id before any handoff.
         original_ctx = RunContext(
@@ -177,12 +272,17 @@ class Pipeline:
         # If the handoff produced a new run id, propagate it into atlas state
         # so all subsequent reads/writes use the active id.
         if active_run_id != run_id:
+            # Preserve the async-gate metric (line 5) across the rewrite — a
+            # bare rewrite would truncate it, silently reverting non-dev
+            # workflows' commit gate to the literal "gate_commit".
+            async_gate_metric = self._state.read_async_gate_metric()
             self._state.update_run_id(slug, active_run_id)
             self._state.write_current_run(
                 active_run_id,
                 slug,
                 worktree_path,
                 code_gen_span_id=code_gen_span_id,
+                async_gate_metric=async_gate_metric,
             )
 
         return RunContext(
@@ -216,16 +316,12 @@ class Pipeline:
         if next_name is None:
             return None
 
-        stage = STAGE_BY_NAME[next_name]
+        stage = self._stage_by_name[next_name]
 
-        # Stage 5 (code_gen) runs inside a git worktree; create it before invoking the runner.
-        # The path must outlive this step() call so stage 6 (code_review) operates on the
+        # An isolate stage runs inside a git worktree; create it before invoking the runner.
+        # The path must outlive this step() call so later stages operate on the
         # generated code, not main. Persist it to .atlas/current-run.
-        if (
-            stage.name == StageName.CODE_GEN
-            and self._worktree is not None
-            and ctx.worktree_path is None
-        ):
+        if stage.isolate and self._worktree is not None and ctx.worktree_path is None:
             worktree_path = self._worktree.create(slug=ctx.slug, run_id=ctx.run_id)
             ctx = RunContext(
                 run_id=ctx.run_id,
@@ -248,17 +344,21 @@ class Pipeline:
         span_id = self._plumb.record_span(
             run_id=ctx.run_id,
             kind=stage.span_kind,
-            name=stage.name.value,
+            name=stage.name,
             status=outcome.status if outcome.status != "rejected" else "failure",
             latency_ms=latency_ms,
             error_type=outcome.error_type,
+            tokens=outcome.usage.tokens if outcome.usage is not None else None,
+            attributes=outcome.usage.attributes if outcome.usage is not None else None,
         )
+        self._accumulate_usage(outcome.usage)
         outcome = StageOutcome(
             stage=stage,
             span_id=span_id,
             status=outcome.status,
             output_text=outcome.output_text,
             error_type=outcome.error_type,
+            usage=outcome.usage,
         )
 
         # NOTE: tasks.md checkbox is NOT marked here. We only check the box once
@@ -270,15 +370,23 @@ class Pipeline:
             return outcome
 
         if stage.gate_label is None:
-            # Stage 3 — no gate; advance directly
+            # No gate; advance directly
             self._state.check_box(ctx, stage.name)
-            next_stage = STAGES[stage.index + 1]
-            self._state.update_current_block(
-                ctx,
-                phase=next_stage.name,
-                gate=f"none (entering {next_stage.name.value})",
-                next_action=f"run stage {next_stage.index} ({next_stage.name.value})",
-            )
+            if stage.index < len(self._stages) - 1:
+                next_stage = self._stages[stage.index + 1]
+                self._state.update_current_block(
+                    ctx,
+                    phase=next_stage.name,
+                    gate=f"none (entering {next_stage.name})",
+                    next_action=f"run stage {next_stage.index} ({next_stage.name})",
+                )
+            else:
+                self._state.update_current_block(
+                    ctx,
+                    phase=stage.name,
+                    gate="none",
+                    next_action="run complete",
+                )
             return StageOutcome(
                 stage=stage,
                 span_id=span_id,
@@ -287,16 +395,20 @@ class Pipeline:
                 error_type=None,
             )
 
-        if stage.gate_label == GateLabel.GATE_COMMIT:
-            # Gate 4 — written by post-commit hook; orchestrator returns awaiting_hook.
-            # No gate_commit user_signal score is written here. Remember the
-            # span_id so the next step()'s flush can attribute hook scores to it.
-            # The stage's *work* succeeded, so check the box; the hook score is
-            # a separate, asynchronous concern.
+        if stage.gate_is_async:
+            # Written by post-commit hook; orchestrator returns awaiting_hook.
+            # No score is written here. Remember the span_id so the next
+            # step()'s flush can attribute hook scores to it. The stage's
+            # *work* succeeded, so check the box; the hook score is a
+            # separate, asynchronous concern.
             self._state.check_box(ctx, stage.name)
             self._last_code_gen_span_id = span_id
             self._state.write_current_run(
-                ctx.run_id, ctx.slug, ctx.worktree_path, code_gen_span_id=span_id
+                ctx.run_id,
+                ctx.slug,
+                ctx.worktree_path,
+                code_gen_span_id=span_id,
+                async_gate_metric=namespaced_metric(self._workflow_name, stage.gate_label),
             )
             return StageOutcome(
                 stage=stage,
@@ -307,11 +419,13 @@ class Pipeline:
             )
 
         assert stage.gate_index is not None
-        decision = self._prompter.ask(stage=stage, gate_index=stage.gate_index)
+        decision = self._prompter.ask(
+            stage=stage, gate_index=stage.gate_index, output_text=outcome.output_text
+        )
         self._plumb.record_user_signal(
             run_id=ctx.run_id,
             span_id=span_id,
-            metric=stage.gate_label.value,
+            metric=namespaced_metric(self._workflow_name, stage.gate_label),
             decision=decision,
         )
 
@@ -332,19 +446,19 @@ class Pipeline:
 
         # Approved — check the box and advance current block
         self._state.check_box(ctx, stage.name)
-        if stage.index < len(STAGES) - 1:
-            next_stage = STAGES[stage.index + 1]
+        if stage.index < len(self._stages) - 1:
+            next_stage = self._stages[stage.index + 1]
             self._state.update_current_block(
                 ctx,
                 phase=next_stage.name,
-                gate=stage.gate_label.value,
-                next_action=f"run stage {next_stage.index} ({next_stage.name.value})",
+                gate=stage.gate_label,
+                next_action=f"run stage {next_stage.index} ({next_stage.name})",
             )
         else:
             self._state.update_current_block(
                 ctx,
                 phase=stage.name,
-                gate=stage.gate_label.value,
+                gate=stage.gate_label,
                 next_action="run complete",
             )
 
@@ -356,14 +470,14 @@ class Pipeline:
             error_type=None,
         )
 
-    def run_to_completion(self, ctx: RunContext) -> RunContext:
+    def run_to_completion(self, ctx: RunContext) -> RunResult:
         """
         Loop: step() until all 7 stages done OR a gate rejects OR a stage fails.
 
         On ``awaiting_hook`` (code_gen gate): block until pending-scores.jsonl
-        contains a record for this run, then continue.  On timeout, return the
-        ctx so the user can ``atlas resume`` later.  Raises
-        ``AwaitingHookExceededError`` if awaiting_hook repeats more than
+        contains a record for this run, then continue.  On timeout, return a
+        ``RunResult(status="paused")`` so the user can ``atlas resume`` later.
+        Raises ``AwaitingHookExceededError`` if awaiting_hook repeats more than
         ``_AWAITING_HOOK_MAX_ATTEMPTS`` times (indicates a loop in the plugin).
 
         Reads ``self._latest_ctx`` after each step so updates made inside
@@ -377,13 +491,16 @@ class Pipeline:
             if self._latest_ctx is not None:
                 ctx = self._latest_ctx
             if outcome is None:
+                self._flush_run_usage(run_id=ctx.run_id)
                 self._plumb.close_run(run_id=ctx.run_id, status="success")
                 self._state.delete_current_run()
-                return ctx
+                return RunResult(ctx=ctx, status="success", dollar_cost=self.run_dollar_cost)
             if outcome.status in ("failure", "rejected"):
+                self._flush_run_usage(run_id=ctx.run_id)
                 self._plumb.close_run(run_id=ctx.run_id, status="failure")
                 self._state.delete_current_run()
-                return ctx
+                # A failed run still spent money — the budget must see it.
+                return RunResult(ctx=ctx, status="failure", dollar_cost=self.run_dollar_cost)
             if outcome.status == "awaiting_hook":
                 awaiting_attempts += 1
                 if awaiting_attempts > _AWAITING_HOOK_MAX_ATTEMPTS:
@@ -395,13 +512,39 @@ class Pipeline:
                     run_id=ctx.run_id,
                     timeout_s=self._commit_wait_timeout_s,
                 ):
-                    # Timed out waiting for the commit; leave the run open for resume.
-                    return ctx
+                    # Timed out waiting for the commit; leave the run open for
+                    # resume. Deliberately no _flush_run_usage here: the run is
+                    # still open and more stages may spend, and set_usage is
+                    # last-call-wins, so the resumed process writes the total.
+                    return RunResult(ctx=ctx, status="paused", dollar_cost=self.run_dollar_cost)
             # success: continue to next stage
+
+    @property
+    def run_dollar_cost(self) -> float | None:
+        """Summed engine-reported cost so far, or None if nothing reported any."""
+        return self._run_dollar_cost if self._run_cost_seen else None
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _accumulate_usage(self, usage: SpanUsage | None) -> None:
+        if usage is None or usage.dollar_cost is None:
+            return
+        self._run_dollar_cost += usage.dollar_cost
+        self._run_cost_seen = True
+
+    def _flush_run_usage(self, *, run_id: str) -> None:
+        """Write the run-level cost roll-up to plumb before the run closes.
+
+        Tokens are left to plumb, which auto-fills run-level `tokens_in`/
+        `tokens_out` from the buffered spans at close time (v1.1 FR-USAGE-3).
+        `dollar_cost` is never auto-filled, so it must be written here or it
+        stays NULL forever.
+        """
+        if not self._run_cost_seen:
+            return
+        self._plumb.set_usage(run_id=run_id, dollar_cost=self._run_dollar_cost)
 
     def _wait_for_commit_score(
         self,
@@ -430,16 +573,21 @@ class Pipeline:
         return False
 
     def _validate_routing_fixture(self) -> None:
+        # routing_ground_truth.json only describes the dev pipeline.
+        if self._workflow_name != "dev":
+            return
         if not _ROUTING_FIXTURE_PATH.exists():
             raise RoutingDriftError(f"Routing fixture not found: {_ROUTING_FIXTURE_PATH}")
         rows = json.loads(_ROUTING_FIXTURE_PATH.read_text())
-        if len(rows) != len(STAGES):
-            raise RoutingDriftError(f"Fixture has {len(rows)} rows; STAGES has {len(STAGES)}")
-        for spec, row in zip(STAGES, rows, strict=True):
+        if len(rows) != len(self._stages):
+            raise RoutingDriftError(
+                f"Fixture has {len(rows)} rows; workflow has {len(self._stages)} stages"
+            )
+        for spec, row in zip(self._stages, rows, strict=True):
             if (
                 spec.tool != row["expected_tool"]
                 or spec.span_kind != row["expected_span_kind"]
-                or spec.name.value != row["stage_name"]
+                or spec.name != row["stage_name"]
             ):
                 raise RoutingDriftError(f"Stage {spec.index} drifted from fixture: {spec} vs {row}")
 
@@ -460,7 +608,8 @@ def _parse_task_from_tasks_md(path: Path) -> str:
 
 class SubprocessStageRunner:
     """
-    Invokes plugins via ``claude -p "/<plugin> <task>" --no-session-persistence``.
+    Thin subprocess dispatcher — delegates argv construction and result parsing
+    to a ``CliBackend`` strategy (ClaudeCodeBackend by default).
 
     All subprocess calls are list-form (no ``shell=True``).  Plugin names are
     validated against the allow-list in ``plugin_resolver`` before any
@@ -473,20 +622,60 @@ class SubprocessStageRunner:
         timeout_overrides: dict[str, int] | None = None,
         command_overrides: dict[str, str] | None = None,
         model: str = "haiku",
+        default_backend: str = "claude",
+        loaded_workflow: object = None,  # LoadedWorkflow | None; typed as object to avoid cycle
+        max_turns: int | None = None,
+        telemetry_json: bool = False,
+        permission_mode: str | None = None,
+        backend_override: str | None = None,
+        backend_models: dict[str, str] | None = None,
+        loop_cwd_is_worktree: bool = False,
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
         self._model = model
+        self._default_backend = default_backend
+        # Explicit, run-scoped backend choice (`atlas run --backend X`, or a
+        # loop issue's `engine:X` label). Outranks the workflow YAML's
+        # default_backend — see resolve_backend's docstring for why.
+        self._backend_override = backend_override
+        # Per-engine model names; `model` above is the Claude one and is not
+        # portable across engines. See cli_backend.resolve_model.
+        self._backend_models = backend_models or {}
+        # Unattended runs dispatch with cwd set to the worktree rather than
+        # the atlas install root — see the comment at the subprocess.run call.
+        self._loop_cwd_is_worktree = loop_cwd_is_worktree
+        self._workflow = loaded_workflow
+        # Per-run turn cap, passed through to the backend as --max-turns.
+        # None (the default for `atlas run`) leaves the backend's own default
+        # in place; the loop daemon sets it from cfg.loop.max_turns so an
+        # unattended run can't spin indefinitely.
+        self._max_turns = max_turns
+        # Request the JSON envelope — the only way any token/cost telemetry
+        # exists at all. Kept separate from the permission mode on purpose:
+        # `atlas run --telemetry` should be able to *measure* an attended run
+        # without also silently granting acceptEdits to a run a human is
+        # watching. Both default off, so plain `atlas run` argv stays
+        # byte-identical to pre-L0 (test_dev_pipeline_unaffected_by_phase_l0).
+        self._telemetry_json = telemetry_json
+        # TRD-v3 §3.6's headless profile value ("acceptEdits"), set only by the
+        # loop daemon. Never "bypassPermissions".
+        self._permission_mode = permission_mode
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        from atlas.cli_backend import (
+            UnknownBackendError,
+            UsageReporting,
+            make_backend,
+            resolve_backend,
+            resolve_model,
+        )
         from atlas.plugin_resolver import build_prompt, resolve  # local import to avoid cycles
 
         # T4.3 — allow-list check before any subprocess call
         plugin_cmd = resolve(stage.tool, overrides=self._command_overrides)
 
-        timeout_s = self._timeout_overrides.get(
-            stage.name.value, _DEFAULT_TIMEOUT_S[stage.name.value]
-        )
+        timeout_s = resolve_timeout(stage, self._timeout_overrides)
 
         # Plugin slash-commands are workspace-scoped; run claude from the atlas
         # install root so local plugins resolve. Traverse up from __file__ to
@@ -503,22 +692,84 @@ class SubprocessStageRunner:
 
         prompt = build_prompt(plugin_cmd, ctx.task, context_hint)
 
-        add_dirs = [str(ctx.repo_root)]
+        # Resolve backend per TRD-v2 §3.4's tier order (+ the override tier).
+        backend_name = resolve_backend(
+            stage=stage,
+            workflow=self._workflow,  # type: ignore[arg-type]
+            config_default=self._default_backend,
+            override=self._backend_override,
+        )
+        try:
+            backend = make_backend(backend_name)
+        except UnknownBackendError as exc:
+            return StageOutcome(
+                stage=stage,
+                span_id="",
+                status="failure",
+                output_text=str(exc),
+                error_type="unknown_backend",
+            )
+
+        preflight = backend.preflight()
+        if preflight is not None:
+            msg, error_type = preflight
+            return StageOutcome(
+                stage=stage,
+                span_id="",
+                status="failure",
+                output_text=msg,
+                error_type=error_type,
+            )
+
+        add_dirs = [ctx.repo_root]
         if ctx.worktree_path is not None:
-            add_dirs.append(str(ctx.worktree_path))
+            add_dirs.append(ctx.worktree_path)
+
+        extra_flags: dict[str, str] = {}
+        if self._max_turns is not None:
+            extra_flags["max_turns"] = str(self._max_turns)
+        if self._telemetry_json:
+            extra_flags["telemetry"] = "json"
+        if self._permission_mode:
+            # TRD-v3 §3.6: acceptEdits, never --dangerously-skip-permissions.
+            # The --allowedTools allowlist is deliberately NOT passed here —
+            # the TRD stores it in the target repo's checked-in
+            # .claude/settings.json, which the CLI reads on its own, so
+            # duplicating it into argv would create a second place to sync.
+            extra_flags["permission_mode"] = self._permission_mode
+
+        argv = backend.build_argv(
+            prompt=prompt,
+            model=resolve_model(
+                backend_name=backend_name,
+                config_model=self._model,
+                backend_models=self._backend_models,
+            ),
+            add_dirs=add_dirs,
+            timeout_s=timeout_s,
+            extra_flags=extra_flags,
+        )
+
+        # Attended runs keep cwd=atlas_root so workspace-scoped plugin
+        # slash-commands resolve — unchanged, and dev.yaml depends on it.
+        #
+        # Unattended runs cd into the worktree instead. Telling an agent its
+        # working directory in prose while starting it in the operator's own
+        # checkout is not isolation, and T-L2.13 broke on it twice in two
+        # different ways on 2026-07-27: first the agent committed its change
+        # into repo_root (outside the worktree entirely), then — once
+        # repo_root already contained the change and the worktree did not —
+        # it read repo_root, concluded the task was already done, and
+        # returned success having written nothing. Both spans reported
+        # success; both runs delivered nothing.
+        run_cwd = atlas_root
+        if self._loop_cwd_is_worktree and ctx.worktree_path is not None:
+            run_cwd = ctx.worktree_path
 
         try:
             result = subprocess.run(
-                [
-                    "claude",
-                    "-p",
-                    prompt,
-                    "--no-session-persistence",
-                    "--model",
-                    self._model,
-                    *[arg for d in add_dirs for arg in ("--add-dir", d)],
-                ],
-                cwd=str(atlas_root),
+                argv,
+                cwd=str(run_cwd),
                 capture_output=True,
                 check=False,
                 timeout=timeout_s,
@@ -533,21 +784,21 @@ class SubprocessStageRunner:
                 error_type="plugin_timeout",
             )
 
-        if result.returncode != 0:
-            return StageOutcome(
-                stage=stage,
-                span_id="",
-                status="failure",
-                output_text=result.stdout,
-                error_type="plugin_nonzero_exit",
-            )
-
+        status, output_text, error_type = backend.parse_result(
+            result.stdout, result.stderr, result.returncode
+        )
+        # Usage is only present when the backend was asked for a machine-readable
+        # envelope (loop mode) AND implements UsageReporting — agy does not.
+        usage: SpanUsage | None = None
+        if isinstance(backend, UsageReporting):
+            usage = backend.span_usage(result.stdout)
         return StageOutcome(
             stage=stage,
             span_id="",
-            status="success",
-            output_text=result.stdout,
-            error_type=None,
+            status=status,
+            output_text=output_text,
+            error_type=error_type,
+            usage=usage,
         )
 
 
@@ -569,9 +820,12 @@ class ClickPrompter:
     length-clamped to ``_GATE_MAX_REASON_BYTES`` bytes.
     """
 
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
+        if output_text:
+            print(f"\n{output_text}")
+
         prompt = (
-            f"\nGate {gate_index} — {stage.name.value}\n"
+            f"\nGate {gate_index} — {stage.name}\n"
             "Output reviewed. [a]pprove / [r]eject reason / q to quit: "
         )
 
@@ -638,6 +892,6 @@ def _clamp_reason(reason: str) -> str:
 class AutoPrompter:
     """Non-interactive prompter that auto-approves all gates (for testing)."""
 
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
-        print(f"\nGate {gate_index} — {stage.name.value} [AUTO-APPROVED]")
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
+        print(f"\nGate {gate_index} — {stage.name} [AUTO-APPROVED]")
         return GateDecision(label="approved", turn_count=1, reason=None)

@@ -2,17 +2,17 @@
 
 **Project:** atlas — YAML-driven gated-workflow engine
 **Scope:** v2 (engine generalization + first non-dev workflow). Builds on v1 TRD; does not supersede it.
-**Status:** Draft, pre-implementation
+**Status:** Shipped (v2.0–v2.2, complete 2026-06-30). This TRD is now a historical planning record — for current schema, runner mechanics, and dispatch behavior, see [`docs/3_guides/yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md) and [`docs/3_guides/cli_backends.md`](../3_guides/cli_backends.md), which reflect what actually shipped.
 **Created:** 2026-06-29
 **Grounds on:**
 
-- [`yaml-driven-workflows-analysis.md`](../1_product_and_research/yaml-driven-workflows-analysis.md) — abstract engine plan + plumb impact analysis
-- [`job-workflow-scope.md`](../1_product_and_research/job-workflow-scope.md) — first worked-example + hub-and-spoke model
-- [`cli-backend-dispatch.md`](../1_product_and_research/cli-backend-dispatch.md) — multi-CLI `StageRunner` spec + layer-ownership decision
+- [`yaml-driven-workflows-analysis.md`](../../dev/archive/yaml-workflow-engine-design-notes/yaml-driven-workflows-analysis.md) — abstract engine plan + plumb impact analysis (archived design note; decisions shipped)
+- [`job-workflow-scope.md`](../../dev/archive/yaml-workflow-engine-design-notes/job-workflow-scope.md) — first worked-example + hub-and-spoke model (archived design note; decisions shipped)
+- [`cli-backend-dispatch.md`](../../dev/archive/yaml-workflow-engine-design-notes/cli-backend-dispatch.md) — multi-CLI `StageRunner` spec + layer-ownership decision (archived design note; decisions shipped)
 - [`headless-clis-reference.md`](../1_product_and_research/headless-clis-reference.md) — per-CLI flag/auth/quota reference
 - [v1 TRD](./TRD.md) — existing NFRs, integration contracts, success criteria
 
-> **Assumption:** The PRD's future-releases table (v1.1–v2) predates the YAML-workflow analysis. This TRD maps phases to the sequencing defined in `yaml-driven-workflows-analysis.md` §7.4 and `job-workflow-scope.md` §3, which collectively constitute the de facto release plan for this scope. A formal PRD update should follow.
+> **Assumption:** The PRD's future-releases table (v1.1–v2) predates the YAML-workflow analysis. This TRD maps phases to the sequencing defined in the archived `yaml-driven-workflows-analysis.md` §7.4 and `job-workflow-scope.md` §3, which collectively constituted the de facto release plan for this scope. A formal PRD update should follow.
 
 ---
 
@@ -34,7 +34,7 @@ The defensible core remains unchanged: **human gates + durable state + plumb mea
 
 Claude Code's dynamic workflows (shipped ~2026-05) commoditize sequential agent orchestration. Atlas's commodity part — the linear runner — is now something Claude authors on the fly. Atlas's defensible part — gates, durable state, measurement — is exactly what dynamic workflows lack. v2 leans into this positioning by extending the gate+measurement discipline to *any* domain, not just dev.
 
-See [`yaml-driven-workflows-analysis.md`](../1_product_and_research/yaml-driven-workflows-analysis.md) §2.5 and §5 for the full competitive framing.
+See [`yaml-driven-workflows-analysis.md`](../../dev/archive/yaml-workflow-engine-design-notes/yaml-driven-workflows-analysis.md) §2.5 and §5 for the full competitive framing.
 
 ### Objectives
 
@@ -124,7 +124,7 @@ class StageSpec:
 
 ### 3.4 CLI backend dispatch (`CliBackend` strategy)
 
-**Decision:** atlas owns headless-CLI subprocess dispatch. See [`cli-backend-dispatch.md`](../1_product_and_research/cli-backend-dispatch.md).
+**Decision:** atlas owns headless-CLI subprocess dispatch. See [`cli-backend-dispatch.md`](../../dev/archive/yaml-workflow-engine-design-notes/cli-backend-dispatch.md).
 
 **Implementation:** Make the backend CLI a strategy on `SubprocessStageRunner`:
 
@@ -194,7 +194,7 @@ For the dev pipeline, v1-era metric names (`gate_research`, `gate_prd`, etc.) ar
 
 ### 3.8 Job workflow (`job.yaml`) — first non-dev instance
 
-The concrete worked-example from [`job-workflow-scope.md`](../1_product_and_research/job-workflow-scope.md) §3:
+The concrete worked-example from [`job-workflow-scope.md`](../../dev/archive/yaml-workflow-engine-design-notes/job-workflow-scope.md) §3:
 
 ```yaml
 name: job
@@ -269,7 +269,7 @@ All v1 security requirements carry forward. Additionally:
 All v1 constraints carry forward. Additionally:
 
 - **PyYAML dependency:** v2 adds `pyyaml >= 6.0` (or uses `ruamel.yaml` if round-trip preservation matters — unlikely for v2). Added to `pyproject.toml [project.dependencies]`.
-- **v1 → v2 philosophy relaxation:** v1's "300 LoC / no registry / no new file type" vow is **deliberately relaxed** for v2. The YAML loader is a new module (`workflow_loader.py`), and the `CliBackend` strategy is a new abstraction. This is a conscious scope decision, not scope creep — called out explicitly per [`yaml-driven-workflows-analysis.md`](../1_product_and_research/yaml-driven-workflows-analysis.md) §3.4.
+- **v1 → v2 philosophy relaxation:** v1's "300 LoC / no registry / no new file type" vow is **deliberately relaxed** for v2. The YAML loader is a new module (`workflow_loader.py`), and the `CliBackend` strategy is a new abstraction. This is a conscious scope decision, not scope creep — called out explicitly per [`yaml-driven-workflows-analysis.md`](../../dev/archive/yaml-workflow-engine-design-notes/yaml-driven-workflows-analysis.md) §3.4.
 - **LoC target revised:** v2 target is ≤ ~600 lines across the engine (orchestrator + loader + backends + state). Individual files stay under the 400-line guideline from `CLAUDE.md`.
 - **content-pipeline as optional dependency:** In Phase 2, `content-pipeline` is added as an editable path dependency (`pip install -e ../content-pipeline`). It is optional — the job workflow falls back to `RAW:` CLI dispatch if content-pipeline is not installed.
 - **Antigravity CLI stability caveat:** `agy` is in flux (Gemini CLI retired 2026-06-18; headless API-key auth is contested — issue #78). The `AntigravityBackend` is implemented but treated as experimental until auth stabilizes.
@@ -559,9 +559,9 @@ Comprehensive list of hardcoded references that Phase 1 must address, grounded i
 
 ## Appendix B — Cross-references
 
-- Engine plan: [`yaml-driven-workflows-analysis.md`](../1_product_and_research/yaml-driven-workflows-analysis.md)
-- Job workflow scope: [`job-workflow-scope.md`](../1_product_and_research/job-workflow-scope.md)
-- CLI dispatch decision: [`cli-backend-dispatch.md`](../1_product_and_research/cli-backend-dispatch.md)
+- Engine plan: [`yaml-driven-workflows-analysis.md`](../../dev/archive/yaml-workflow-engine-design-notes/yaml-driven-workflows-analysis.md)
+- Job workflow scope: [`job-workflow-scope.md`](../../dev/archive/yaml-workflow-engine-design-notes/job-workflow-scope.md)
+- CLI dispatch decision: [`cli-backend-dispatch.md`](../../dev/archive/yaml-workflow-engine-design-notes/cli-backend-dispatch.md)
 - Headless CLI reference: [`headless-clis-reference.md`](../1_product_and_research/headless-clis-reference.md)
 - v1 TRD: [`TRD.md`](./TRD.md)
 - v1 System Design: [`system_design.md`](./system_design.md)

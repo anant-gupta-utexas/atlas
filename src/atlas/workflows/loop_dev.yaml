@@ -1,0 +1,17 @@
+name: loop_dev
+default_backend: claude
+stages:
+  - name: plan
+    span_kind: plan
+    tool: "RAW:Read the issue and the repo; produce a short plan for this one change. Keep the plan to the acceptance criteria only — do not expand scope."
+    isolate: false
+
+  - name: code_gen
+    span_kind: llm
+    tool: "RAW:Implement the change to satisfy the issue's acceptance criteria. Commit your work with a descriptive message. Do not touch files outside the stated scope."
+    isolate: true
+
+  - name: verify
+    span_kind: verify
+    tool: "verify"
+    isolate: false

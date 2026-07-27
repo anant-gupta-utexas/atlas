@@ -6,15 +6,24 @@ Values are passed to ``claude -p`` as the prompt prefix.
 
 Commands from installed plugins use their namespaced form ``PLUGIN:command-name``
 where required; skills use their bare name.
-Override individual entries via .atlas.toml [plugin_commands] table.
+
+Resolution order (§3.5): ``.atlas.toml [plugin_commands.<tool>]`` overrides >
+the workflow YAML's ``tool`` field (i.e. ``StageSpec.tool`` itself, already the
+primary source — there's no separate lookup for it) > ``PLUGIN_COMMANDS``.
+``PLUGIN_COMMANDS`` below is the **dev-pipeline-only** fallback table; non-dev
+workflows are expected to either use a ``RAW:``-prefixed ``tool`` string
+(bypassing resolution entirely — see ``resolve``) or supply a ``.atlas.toml``
+override — a non-``RAW:`` tool string absent from both raises
+``RoutingDriftError``.
 """
 
 from __future__ import annotations
 
 from atlas.orchestrator import RoutingDriftError
 
-# Maps StageSpec.tool strings to the command to invoke.
-# Prefix with "RAW:" for stages that use a plain prompt instead of a slash command.
+# Dev-pipeline-only fallback. Maps StageSpec.tool strings to the command to
+# invoke. Prefix with "RAW:" for stages that use a plain prompt instead of a
+# slash command. Non-dev workflows must not rely on this table.
 PLUGIN_COMMANDS: dict[str, str] = {
     # consult-experts is a DEV-ESSENTIALS skill (bare name, no namespace)
     "consult-experts:research": "consult-experts",
@@ -29,6 +38,10 @@ PLUGIN_COMMANDS: dict[str, str] = {
     "code-gen-agent": "RAW:Implement the following task by writing and committing code:",
     # code-review is a DEV-ESSENTIALS plugin command (namespaced)
     "code-review": "DEV-ESSENTIALS:code-review",
+    # verify is a DEV-ESSENTIALS plugin command (namespaced); loop_dev.yaml's
+    # verify stage resolves through here rather than carrying a literal
+    # "/verify" tool string, which build_prompt would render as "//verify".
+    "verify": "DEV-ESSENTIALS:verify",
 }
 
 
@@ -39,10 +52,19 @@ def resolve(tool: str, *, overrides: dict[str, str] | None = None) -> str:
     Checks the optional *overrides* dict first (from .atlas.toml), then
     falls back to ``PLUGIN_COMMANDS``.  Raises ``RoutingDriftError`` if
     the tool is not in either mapping.
+
+    ``RAW:``-prefixed tool strings bypass the allow-list and are returned
+    verbatim: the text after ``RAW:`` is a literal prompt written in the
+    workflow YAML, not a plugin or slash-command name, so there is no
+    third-party command to validate — ``build_prompt`` consumes the same
+    ``RAW:`` prefix downstream.  An explicit ``overrides`` entry still wins,
+    so a repo can redirect a RAW: stage via ``.atlas.toml`` if it needs to.
     """
     mapping = dict(PLUGIN_COMMANDS)
     if overrides:
         mapping.update(overrides)
+    if tool.startswith("RAW:") and tool not in mapping:
+        return tool
     if tool not in mapping:
         raise RoutingDriftError(
             f"Tool {tool!r} is not in the plugin allow-list. "

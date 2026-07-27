@@ -1,15 +1,36 @@
 # System Design
 
-> **Status:** v1 finalized (Tech Lead pass complete 2026-04-24).
-> Captures the architecture as it will ship for the Week 4 local CLI.
-> Subsequent releases get their own SDD revisions.
+> **Status:** v1 architecture finalized 2026-04-24 (Tech Lead pass). Updated
+> 2026-07-15 to reflect the v2.0–v2.2 YAML workflow engine (shipped
+> 2026-06-30): the hardcoded 7-stage pipeline described below is now one
+> workflow (`dev.yaml`) among several, loaded through a generic
+> `StageRunner`/`CliBackend` seam. Sections below are annotated where v2
+> changed the shape. For the full YAML schema, runner dispatch chain, and
+> backend resolution, see
+> [`docs/3_guides/yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md)
+> — that guide is the current source of truth for engine mechanics; this
+> document covers architecture-level structure and trade-offs.
+>
+> **v3 (planning):** an autonomous, minimal-input **loop mode** is designed on
+> top of the v2 engine — a long-running driver that pulls tickets from a
+> GitHub Issues queue, runs the existing pipeline in a worktree with a
+> selectable engine (`claude` / `codex`), and opens a PR (never merges). It
+> reuses `Pipeline` / `WorktreeManager` / `CliBackend` / `PlumbIO` unchanged;
+> the only additions are a queue adapter, a loop driver, a delivery hook, and
+> the `CodexBackend`. See the new [Loop mode (v3)](#loop-mode-v3) section below,
+> [`TRD-v3.md`](./TRD-v3.md) for the phase contract, and
+> [`loop-mode-design.md`](../1_product_and_research/loop-mode-design.md) for the
+> source-of-truth design note.
 
 ## Problem Statement & Requirements
 
-Atlas is a local CLI runtime that walks a fixed 7-stage dev-workflow
-pipeline, stops at six human gates, and writes every run as a typed
-span tree into [plumb](https://github.com/anant-gupta-utexas/plumb) —
-the measurement spine.
+Atlas is a local CLI runtime that walks a human-gated workflow defined in
+YAML (the `dev` workflow, by default, encodes the original 7-stage
+dev-workflow pipeline), stops at explicit human gates, and writes every
+run as a typed span tree into [plumb](https://github.com/anant-gupta-utexas/plumb) —
+the measurement spine. As of v2, atlas can run any workflow expressed as a
+YAML stage list — not only the dev pipeline — through the same gate
+machinery.
 
 The full scope is in [`../1_product_and_research/PRD.md`](../1_product_and_research/PRD.md).
 This document covers the *how*: component shape, data flow, boundary
@@ -68,6 +89,18 @@ imports. Atlas itself owns only:
 
 ## System Components & Services
 
+> **v2 update:** the diagram and component list below are v1-era (one
+> hardcoded pipeline). As of v2.2, `atlas.cli` resolves a workflow through
+> `workflow_loader.py` before constructing the pipeline, and stage dispatch
+> goes through a `CompositeStageRunner` that routes to `SubprocessStageRunner`
+> (plugin commands + `RAW:`, now backed by a `CliBackend` strategy),
+> `LibraryStageRunner` (`LIB:`), or `ShellStageRunner` (`SHELL:`) by tool-string
+> prefix. `Pipeline` itself is unchanged in shape — it still only sees the
+> `StageRunner` Protocol — but it now consumes `tuple[StageSpec, ...]` loaded
+> from YAML instead of a hardcoded tuple. See
+> [`yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md#architecture-overview)
+> for the current data-flow diagram covering all five v2 modules.
+
 ```mermaid
 graph TD
     User([Operator])
@@ -95,6 +128,9 @@ graph TD
     PlumbIO --> Plumb
 ```
 
+*(v1-era diagram; `Pipeline` node above now sits behind `workflow_loader.py`
++ `CompositeStageRunner`, see the guide linked above for the current shape.)*
+
 ### `atlas.cli` — CLI surface
 
 - `run(task: str)` — inserts a `runs` row, creates
@@ -103,20 +139,259 @@ graph TD
   if no active run.
 - `hook install` / `hook uninstall` — writes to / removes from
   `.git/hooks/post-commit` (idempotent).
+- **v2:** `run` and `resume` also accept `--workflow <name>` /
+  `--workflow-file <path>`, resolved via `workflow_loader.py` before the
+  pipeline is constructed. `_make_pipeline()` wires up
+  `SubprocessStageRunner`, and conditionally `LibraryStageRunner` /
+  `ShellStageRunner`, into a `CompositeStageRunner`.
 
 One command entrypoint registered via `pyproject.toml`.
 
 ### `atlas.pipeline` — state machine
 
-- Seven stages, hardcoded in order: `research`, `prd_draft`,
-  `trd_draft`, `tds_gen`, `plan_review`, `code_gen`, `code_review`.
+- Seven stages for the default `dev` workflow, in order: `research`,
+  `prd_draft`, `trd_draft`, `tds_gen`, `plan_review`, `code_gen`,
+  `code_review`. **v2:** these are no longer hardcoded — they are loaded
+  from `src/atlas/workflows/dev.yaml` via `workflow_loader.py` into the
+  same `tuple[StageSpec, ...]` shape `Pipeline` always consumed. Other
+  workflows (`job`, `job_cli`, or user-authored YAML) supply their own
+  stage tuples through the identical loader path.
 - Each stage: open span → invoke tool (or surface prompt for manual
   stages like research) → close span → check gate → either advance
   or pause.
-- Gates: six hard stops, each a one-line user prompt (approve /
-  reject), each writes one `scores` row.
-- No dynamic routing in v1: stage → tool mapping is a 7-row constant
-  (also committed as `tests/fixtures/routing_ground_truth.json`).
+- Gates: hard stops, each a one-line user prompt (approve / reject),
+  each writes one `scores` row. Gate score metric names are namespaced
+  by workflow (`dev` keeps bare names for backward compatibility; other
+  workflows prefix `<workflow>.<gate_label>`).
+- No dynamic routing: stage → tool mapping for the `dev` workflow is a
+  7-row constant validated against `tests/fixtures/routing_ground_truth.json`
+  regardless of whether it's loaded from YAML or (pre-v2) a hardcoded
+  tuple — the fixture and its test are dev-workflow-only.
+
+### Runner dispatch (v2) — `CompositeStageRunner` and friends
+
+Added in Phase 2/3 of the v2 build. `Pipeline` is unaware of any of this —
+it depends only on the `StageRunner` Protocol.
+
+- **`CompositeStageRunner`** (`composite_runner.py`) — routes each stage by
+  its `tool` string prefix: `LIB:` → `LibraryStageRunner`, `SHELL:` →
+  `ShellStageRunner`, anything else (plugin commands, `RAW:`) →
+  `SubprocessStageRunner`.
+- **`SubprocessStageRunner`** (`orchestrator.py`) — the v1 runner,
+  generalized in Phase 3 to dispatch through a `CliBackend` strategy
+  (`ClaudeCodeBackend`, `AntigravityBackend`, or `CodexBackend`) instead of a
+  hardcoded `claude -p` argv build. Backend resolution is a **5-tier**
+  cascade: explicit run-scoped override (`atlas run --backend`, or the loop's
+  `engine:*` label) → per-stage YAML → workflow `default_backend` →
+  `.atlas.toml [backend]` → hard default `"claude"`. The override tier was
+  added 2026-07-26 — it previously sat *below* the workflow default, which
+  silently disabled both surfaces that use it.
+- **`LibraryStageRunner`** (`library_runner.py`) — dispatches `LIB:` tool
+  strings to in-process content-pipeline adapters via a closed registry
+  (`atlas/library_adapters/`). Used by the `job` workflow.
+- **`ShellStageRunner`** (`shell_runner.py`) — dispatches `SHELL:` tool
+  strings as direct list-form subprocesses against an allow-listed set of
+  binaries. Used by the `job_cli` workflow (the dependency-free variant of
+  `job`).
+
+Full schema, dispatch chain diagram, and error-type tables:
+[`yaml_workflow_engine.md`](../3_guides/yaml_workflow_engine.md).
+
+### Loop mode (v3)
+
+> **Status: SHIPPED through Phase L2 (`v3.1`), verified live 2026-07-27.**
+> Phases L0/L1/L2 are complete; L3 (self-healing + routing) is next. This
+> section is the architecture-level view; the phase contract is
+> [`TRD-v3.md`](./TRD-v3.md) — read its "Where reality diverged from this
+> contract" table before trusting any design-time claim in the older
+> [`loop-mode-design.md`](../1_product_and_research/loop-mode-design.md), which
+> is a frozen research artifact from 2026-07-21. Loop mode is **additive** —
+> everything in v1/v2 above is unchanged in shape. The loop constructs and
+> drives `Pipeline` instances the same way `atlas.cli::run` does, through the
+> shared `pipeline_factory.make_pipeline()`.
+
+Loop mode turns atlas from a single-run, operator-present orchestrator into a
+long-running driver. The operator's involvement collapses to two points:
+**filing a ticket** (a GitHub issue) and **reviewing a PR**. Between them the
+loop runs unattended. The moat is unchanged — human gate + durable state +
+plumb measurement — but the gate moves from an inline `input()` prompt to an
+**asynchronous, batchable PR review**.
+
+**What is genuinely new** (a queue adapter, a loop driver, a delivery hook, one
+backend) vs. **what is reused verbatim** (`Pipeline`, `WorktreeManager`,
+`CliBackend`, `PlumbIO`, `StateStore`, the whole runner-dispatch chain above):
+
+```mermaid
+graph TD
+    Issues[(GitHub Issues<br/>label atlas:ready)]
+    subgraph loop_new["loop mode — NEW (src/atlas/loop.py, queue_gh.py, deliverer.py)"]
+        Loop[loop driver<br/>tick / run_forever / reconcile]
+        Queue[queue_gh<br/>gh CLI adapter]
+        Triage[triage router<br/>wf:* label, else haiku]
+        Deliver[Deliverer<br/>push branch + gh pr create]
+    end
+    subgraph reused["REUSED from v1/v2 — unchanged"]
+        Pipeline[Pipeline<br/>state machine + gates]
+        Backends[CliBackend<br/>claude / codex]
+        Worktree[WorktreeManager]
+        PlumbIO[plumb_io]
+    end
+    Plumb[(plumb<br/>SQLite)]
+    Ops([Operator])
+
+    Ops -->|files issue| Issues
+    Loop -->|poll / claim / sync| Queue
+    Queue --> Issues
+    Loop --> Triage
+    Loop -->|construct + run per issue| Pipeline
+    Pipeline --> Backends
+    Pipeline --> Worktree
+    Pipeline --> PlumbIO
+    PlumbIO --> Plumb
+    Loop -->|on success| Deliver
+    Deliver -->|branch + PR| Issues
+    Issues -->|PR merged / closed| Loop
+    Loop -->|user_signal score| PlumbIO
+    Ops -->|review / merge PR| Issues
+```
+
+#### The loop cycle (`loop.py`)
+
+One **`tick()`** is a linear state machine — deliberately not a scheduler or a
+DAG engine:
+
+1. **Sync first.** For every in-flight (`atlas:working`) issue, read its PR
+   state: merged → write a `user_signal` **success** score (1.0), relabel
+   `atlas:done`, close the issue; closed-unmerged → `user_signal` **0.0**,
+   relabel `atlas:rejected`. Idempotent on re-tick.
+2. **Pull** the next `atlas:ready` issue across the configured repos (none →
+   idle sleep).
+3. **Triage** the lane (§below).
+4. **Claim** — swap `atlas:ready` → `atlas:working`, assign self.
+5. **Build the prompt** — issue title + body + guardrail "signs" + the existing
+   `context_hint` that points the agent at `tasks.md` and the worktree.
+6. **Dispatch** — one-shot: run `Pipeline(loop_dev)` to completion, then the
+   `Deliverer`; planned: run `dev-docs-be`, open a plan-only PR, **stop**.
+7. **Comment + relabel** — post the plumb `run_id` and a score summary on the PR.
+
+**`run_forever()`** wraps `tick()` with the configured interval, a per-day
+budget, and a circuit breaker (consecutive no-progress ticks or identical
+errors → cooldown → resume). It configures logging and accepts `--verbose`;
+before it did, the daemon logged nothing, which is what hid every other defect
+the first live run turned up. The budget is two caps kept in
+`.atlas/loop-state.json` (`loop_budget.py`): a **run count**, and a **dollar
+cap** accumulated from the backend-reported cost each run returns — the same
+figure atlas writes to plumb's `runs.dollar_cost` via `set_usage`. Both are
+live as of 2026-07-27; **only `claude` feeds the dollar cap**, because the
+Codex CLI reports no cost at all, so a Codex-heavy day is bounded by the run
+count alone. `atlas loop status` prints that caveat rather than implying the
+dollar figure is complete.
+It first calls **`reconcile_orphans()`** — a crash-recovery pass that resets any
+`atlas:working` issue with no open PR back to `atlas:ready` and prunes stale
+`.atlas/worktrees/*`. The loop processes **one issue per tick** and is
+**sequential** in v3.0–v3.2 (`concurrency=1`), so the v2 single-run-per-repo
+state model (`.atlas/current-run` holds one run) is preserved; concurrency > 1
+is deferred to Phase L4 and is the one change that requires per-run state keys.
+
+#### Two-lane routing
+
+The router **is** the v2 workflow-selection seam (`wf:*` label → workflow YAML),
+with a classifier fallback:
+
+- **One-shot lane** (`wf:quick` → `loop_dev.yaml`, an ungated
+  `plan → code_gen[isolate] → verify`): the whole issue is one work item.
+  Delivers a single PR (`Closes #n`). Quality is enforced by `verify` + the PR
+  review, not inline gates.
+- **Planned lane** (`wf:planned`): the loop produces a per-phase TRS via
+  `dev-docs-be`, opens a **plan-only PR** carrying just the `dev/active/<slug>/`
+  triad with the TRS's Pending Decisions surfaced in the PR body, and **stops**
+  for review. Later passes implement task-by-task (each its own worktree run +
+  `/code-review`) → **multiple PRs per issue** (`Refs #n`, then `Closes #n` on
+  the last). This is the loop driving the operator's own TRS discipline
+  autonomously, escalating decisions as a PR review.
+- **Router = hybrid:** an explicit `wf:*` label wins; otherwise a fast triage
+  step (haiku, single structured call) reads title + body and picks the lane,
+  recording its choice as a span on the run.
+
+#### Delivery (`Deliverer`)
+
+Delivery is a **post-success side-effect**, an injected collaborator (like
+`GatePrompter`) — **not** a `StageSpec`. Keeping it out of the workflow YAML
+means attended workflows never construct a `Deliverer` and delivery is not a
+measured pipeline stage. `GhPrDeliverer` pushes the worktree branch, runs
+`gh pr create`, and calls `WorktreeManager.cleanup()` — retiring the previously
+unwired `merge_back()` path. It **pushes a branch and opens a PR only**: never
+`main`, never a merge, never a force-push (asserted by test).
+
+#### Engines & telemetry
+
+Engine per run resolves through the `CliBackend` cascade above, with the loop
+injecting the backend from an `engine:*` label at **tier 1**. **`CodexBackend`**
+is the one new backend (`codex exec --json -C <worktree> --sandbox
+workspace-write`, JSONL result parsing, fail-closed `preflight`), registered in
+`_KNOWN_BACKENDS` alongside `claude` and the experimental `agy`. Model names are
+**engine-specific** — `Config.model` is a Claude name, and handing it to codex
+is an HTTP 400, so per-engine names live in `.atlas.toml`'s `[backend.models]`
+and an engine with no entry falls back to its own CLI default.
+
+With telemetry requested, `ClaudeCodeBackend` emits `--output-format json` and
+the parsed cost/tokens flow to plumb: tokens per span via
+`add_span(tokens=(in, out))` plus the raw per-engine breakdown in
+`spans.attributes`, and run-level `dollar_cost` via plumb v1.1's `set_usage()`.
+Telemetry is **opt-in** — the loop always requests it; attended runs need
+`atlas run --telemetry` — so `dev` runs keep their plain-text stdout for
+gate-parity and their argv byte-identical to pre-loop-mode. The flag is
+deliberately independent of the `acceptEdits` permission mode below, so
+measuring an attended run never widens what the agent may do.
+
+Three things a reader should not assume here, all corrected by live capture:
+Claude's JSON mode emits an **array** of stream events ending in a
+`type: "result"` element, not a single object; Anthropic's token fields are
+**disjoint** (billed input sums `input_tokens` + both cache fields) while
+OpenAI's are **nested** (`cached_input_tokens ⊆ input_tokens`); and Codex
+reports **no cost figure at all**, so a Codex run's `runs.dollar_cost` is
+`NULL` by design rather than `0.0`. Detail and evidence:
+[`TRD-v3.md`](./TRD-v3.md) §3.3 and §3.6.
+
+#### Security posture (loop mode)
+
+- **Permission profile, not YOLO.** Loop runs use `--permission-mode
+  acceptEdits` + a curated `--allowedTools` allowlist (in the *target* repo's
+  checked-in `.claude/settings.json`) + a `--max-turns` cap. Never
+  `--dangerously-skip-permissions`; the worktree is a directory boundary, not a
+  filesystem sandbox. `CodexBackend` uses `--sandbox workspace-write` for the
+  equivalent confinement. **That distinction is not theoretical:** the first
+  live loop run had an unattended agent commit into the operator's own
+  checked-out branch. Unattended dispatch now runs with `cwd` set to the
+  worktree (attended runs keep the atlas root, which plugin discovery resolves
+  against), and a commit landing outside the worktree is detected and
+  reported rather than silently delivering an empty branch.
+- **PR-only delivery.** The loop never pushes `main`, merges, or force-pushes.
+- **Prompt injection via issue bodies.** Issue text becomes part of the agent
+  prompt. In a **private, single-author** repo (the v3 target) this equals the
+  operator typing the command. If a target repo is **public or multi-author**,
+  the loop MUST require an allowlisted issue author (`[loop].trusted_authors`)
+  before dispatch, or sanitize the body — a hard requirement gated on repo
+  visibility.
+- **Runaway bound.** A per-day **cost cap** and a **no-progress circuit
+  breaker** both bound the loop; neither alone is sufficient. The cost cap
+  only sees `claude` spend (Codex reports none), so on that lane the **run
+  count is the load-bearing cap, not the backstop** — set it conservatively
+  enough to bound spend on its own.
+
+#### New on-disk / config surface
+
+| File / config | Purpose |
+|---|---|
+| `.atlas.toml [loop]` / `~/.atlas/config.toml [loop]` | repos, poll interval, budgets, breaker thresholds, concurrency |
+| `.atlas.toml [backend.models]` | per-engine model names, e.g. `codex = "gpt-5.1-codex"` |
+| `.atlas/loop-state.json` | flat `LoopState` — day, runs today, dollars today, last tick, breaker state. Read by `atlas loop status`. |
+| target repo `.claude/settings.json` | loop-run tool allowlist (per target repo) |
+| `.atlas/runs/<run_id>.log` | per-run log — the primary `atlas loop attach` tail surface |
+
+CLI: `atlas loop run` (foreground) / `start` (detached tmux session) / `stop` /
+`status` / `attach`. **tmux is observability only** — control is the CLI + files,
+never tmux send-keys.
 
 ### `atlas.state` — `tasks.md` and `.atlas/current-run`
 
@@ -129,6 +404,11 @@ One command entrypoint registered via `pyproject.toml`.
   `atlas status`, the `run_id` in `.atlas/current-run` must match
   the `run_id` in the referenced `tasks.md` header. Mismatch → exit
   non-zero with a recovery hint naming both values.
+- **v2:** the `## current` block gained a `workflow:` field. On resume,
+  atlas re-reads this field and re-resolves the workflow YAML through
+  `workflow_loader.py` to reconstruct the `StageSpec` tuple. If the YAML
+  has since been deleted or edited in a breaking way, resume fails
+  loudly rather than silently falling back to `dev`.
 
 ### `atlas.hook` — post-commit hook
 
@@ -175,6 +455,8 @@ erDiagram
         status enum
         start_ts timestamp
         end_ts timestamp
+        tokens_in integer
+        tokens_out integer
         dollar_cost numeric
     }
     spans {
@@ -186,6 +468,9 @@ erDiagram
         input_hash string
         start_ts timestamp
         end_ts timestamp
+        tokens_in integer
+        tokens_out integer
+        attributes json
     }
     scores {
         id PK
@@ -209,6 +494,16 @@ erDiagram
 Full schema lives in plumb's repo. `runs.kind` is intentionally absent
 in v1 (resolved 2026-04-24 — added later as a single column + backfill
 to `"dev_workflow"` if a second run kind appears).
+
+The usage columns above are plumb **v1.1**. Atlas writes `spans.tokens_in` /
+`tokens_out` per stage, the raw per-engine token breakdown plus the name of
+the reduction rule that produced the pair into `spans.attributes`, and
+run-level `dollar_cost` via `RunHandle.set_usage()` — leaving the run-level
+token fields unset so plumb auto-fills them from buffered spans. Storing the
+rule name alongside the raw fields is what made a reduction rule that later
+proved wrong (Codex's cached tokens) a recomputable error rather than
+permanently corrupt data. There is **no per-span cost column** and there is
+not intended to be one.
 
 ### Atlas-owned on-disk state
 
@@ -356,9 +651,9 @@ Restated from PRD §6.4 for completeness:
   against a sacrificial Flask repo.
 - **"Production."** There is no production for v1. The tool runs on
   the author's laptop.
-- **CI.** GitHub Actions on push + PR: `pytest`, `ruff check`,
-  `mypy src`, and the routing-ground-truth fixture test. No deployment
-  step.
+- **CI.** GitHub Actions, manual `workflow_dispatch` only (single-maintainer
+  repo): `pytest`, `ruff check`, `mypy src`, and the routing-ground-truth
+  fixture test. No deployment step.
 - **Release.** No release mechanism in v1 — the repo *is* the
   artifact. A tagged `v1.0` when Week 4 ships and a full end-to-end
   run completes on the real target.
@@ -424,20 +719,12 @@ in [`../1_product_and_research/PRD.md`](../1_product_and_research/PRD.md) §"Ris
 
 ## Future Considerations
 
-- **v1.1 — HTTP shell.** A thin FastAPI or Flask layer around the
-  CLI so a mobile shortcut can trigger `atlas run`. Adds
-  authentication, request validation, and a small queue; none of
-  that is in v1. This is also when the atlas ↔ plumb boundary
-  warrants reconsideration as IPC rather than direct calls.
-- **v1.2 — Bounded auto-retry in the worktree.** Stage 5 retries
-  `/verify` failures automatically with a hard iteration cap. This
-  is where paired `examples` rows (failed span → passing span) start
-  appearing at zero marginal authoring cost.
-- **v2 — Multiple run kinds.** If atlas picks up non-dev-workflow
-  tasks (content-pipeline runs, data-migration runs), `runs.kind`
-  becomes meaningful and the schema gains the column.
-- **v2 — `/dev-resume` slash command.** Replaces the CLAUDE.md
-  resume-instruction paragraph once drift is felt twice.
+The v2 YAML workflow engine (multiple run kinds via named workflows,
+per-stage CLI backend choice) shipped and is covered above. Remaining
+forward-looking items — HTTP shell, bounded auto-retry, `runs.kind`
+schema column, `/dev-resume` slash command, and others — are tracked in
+one place going forward: [`BACKLOG.md`](../1_product_and_research/BACKLOG.md).
+
 - **Upstream contribution path.** If a reference repo ends up
   implementing the phase-gated-pipeline-with-state-file pattern
   first, atlas should fork-and-trim rather than ship a third

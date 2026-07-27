@@ -2,14 +2,17 @@
 
 > Phase-gated agent orchestrator for a structured dev workflow.
 
-[![Tests](https://img.shields.io/badge/tests-82%20passing-brightgreen)](tests/)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-484%20passing-brightgreen)](tests/)
+[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-atlas walks a fixed 7-stage dev pipeline — research → PRD → SDD+TRD → TDS
-→ plan review → code → review — stops at six explicit human gates, and writes
-every run as a typed span tree into [plumb](https://github.com/anant-gupta-utexas/plumb)
-for later analysis.
+atlas is a YAML-driven, human-gated workflow engine. Its default workflow
+walks a 7-stage dev pipeline — research → PRD → SDD+TRD → TDS → plan review
+→ code → review — stopping at six explicit human gates, and writes every run
+as a typed span tree into [plumb](https://github.com/anant-gupta-utexas/plumb)
+for later analysis. Other workflows (job search, or one you author) run
+through the same gate machinery — see
+[Documentation](#documentation) below.
 
 The design premise: **humans keep the pen on decisions, the agent does everything
 in between, and both sides of that split are measured.**
@@ -38,12 +41,23 @@ so the data is analyzable after the fact.
 
 ## What you get
 
-- **One command:** `atlas run "<task>"` walks all 7 stages.
-- **Six human gates.** Hard stops at: research reviewed, PRD finalized,
-  SDD+TRD finalized, TDS approved, commit accepted, phase complete.
-  Each gate writes a `user_signal` score into plumb.
-- **git worktree boundary for Stage 5.** Code generation runs in an
-  isolated worktree — main is never touched by the agent directly.
+- **One command:** `atlas run "<task>"` walks the default 7-stage dev
+  workflow; `--workflow <name>` runs any other YAML-defined workflow
+  (built-in `job`/`job_cli`, or one you author).
+- **Six human gates (dev workflow).** Hard stops at: research reviewed,
+  PRD finalized, SDD+TRD finalized, TDS approved, commit accepted, phase
+  complete. Each gate writes a `user_signal` score into plumb. Other
+  workflows define their own gates in YAML.
+- **git worktree boundary for isolated stages.** Any stage with
+  `isolate: true` (code_gen in the dev workflow) runs in an isolated
+  worktree — main is never touched by the agent directly.
+- **CLI backend dispatch.** Stages can run through `claude -p`,
+  `codex exec`, or `agy -p` (Antigravity/Gemini, experimental), selected
+  per-run (`--backend`), per-stage, per-workflow, or via `.atlas.toml`.
+- **An autonomous loop mode (v3.1).** `atlas loop run` pulls labeled
+  GitHub issues, runs the pipeline unattended in a worktree, and opens a
+  PR — never merging, never pushing `main`. The human gate becomes the PR
+  review. Bounded by per-day run and cost caps and a circuit breaker.
 - **Post-commit hook.** `atlas hook install` writes deterministic
   `verify_pass` and `gate_commit` scores on every commit.
 - **Compaction-safe state file.** `dev/active/<task>/tasks.md` is the
@@ -51,9 +65,10 @@ so the data is analyzable after the fact.
   is not.
 - **Model-routing config.** `.atlas.toml` per project; model swaps
   are config edits, not code changes.
-- **Full plumb integration.** Every run produces a `runs` row, 7 typed
-  spans, 6 gate scores, and an `examples` row per gate rejection.
-- **82 tests, 91% coverage, CI on every push.**
+- **Full plumb integration.** Every run produces a `runs` row, one typed
+  span per stage, one gate score per gate, and an `examples` row per gate
+  rejection.
+- **484 tests, 95% coverage.**
 
 ---
 
@@ -70,21 +85,25 @@ atlas status
 atlas hook install
 ```
 
-Prerequisites: Python 3.11+, git 2.5+ (worktrees), [plumb](https://github.com/anant-gupta-utexas/plumb) installed.
+Prerequisites: Python 3.13+, git 2.5+ (worktrees), [plumb](https://github.com/anant-gupta-utexas/plumb) installed.
 
 ---
 
-## The 7-stage pipeline
+## The default (dev) workflow — 7 stages
 
 | Stage | Name | Tool | Span kind |
 |-------|------|------|-----------|
-| 0 | research | Claude Code + web search | plan |
-| 1 | prd_draft | consult-experts → PM persona | plan |
-| 2 | trd_draft | consult-experts → Tech Lead persona | plan |
-| 3 | tds_gen | /dev-docs-be | plan |
+| 0 | research | consult-experts:research | plan |
+| 1 | prd_draft | consult-experts:pm | plan |
+| 2 | trd_draft | consult-experts:tech-lead | plan |
+| 3 | tds_gen | dev-docs-be | plan |
 | 4 | plan_review | plan-reviewer agent | verify |
 | 5 | code_gen | Claude Code (inside git worktree) | subagent |
-| 6 | code_review | /code-review + /verify | verify |
+| 6 | code_review | code-review + verify | verify |
+
+This is one workflow among several — see
+[docs/3_guides/yaml_workflow_engine.md](docs/3_guides/yaml_workflow_engine.md)
+to write your own or run the built-in `job`/`job_cli` workflows.
 
 Gate rejections write an `examples` row in plumb — a regression-set row per
 rejection at zero marginal authoring cost.
@@ -107,6 +126,9 @@ state_file     = "dev/active/{task}/tasks.md"
 
 [plumb]
 db_path = "~/.plumb/plumb.db"
+
+[backend]
+default = "claude"   # project-wide CLI backend default; per-stage `backend:` overrides
 ```
 
 ---
@@ -138,11 +160,16 @@ unchecked box — no human re-briefing.
 
 | What you need | Where |
 |---------------|-------|
-| Product requirements + scope | [PRD](docs/1_product_and_research/PRD.md) |
-| System design + span tree | [System Design](docs/2_architecture/system_design.md) |
-| Technical requirements | [TRD](docs/2_architecture/TRD.md) |
-| Dev environment setup | [Getting Started](docs/3_guides/getting_started.md) |
-| Testing strategy | [Testing](docs/4_testing/index.md) |
+| All docs (entry point) | [docs/README.md](docs/README.md) |
+| YAML workflow engine — schema, runners, phases | [docs/3_guides/yaml_workflow_engine.md](docs/3_guides/yaml_workflow_engine.md) |
+| Job-search workflow (`job` / `job_cli`) | [docs/3_guides/job_workflow.md](docs/3_guides/job_workflow.md) |
+| CLI backend dispatch (claude, agy) | [docs/3_guides/cli_backends.md](docs/3_guides/cli_backends.md) |
+| System design + span tree | [docs/2_architecture/system_design.md](docs/2_architecture/system_design.md) |
+| v2 technical requirements | [docs/2_architecture/TRD-v2.md](docs/2_architecture/TRD-v2.md) |
+| Dev environment setup | [docs/3_guides/getting_started.md](docs/3_guides/getting_started.md) |
+| Testing strategy (484 tests) | [docs/4_testing/index.md](docs/4_testing/index.md) |
+| What's shipped now | [STATUS.md](STATUS.md) |
+| What's pending / future work | [docs/1_product_and_research/BACKLOG.md](docs/1_product_and_research/BACKLOG.md) |
 | Repo conventions | [CLAUDE.md](CLAUDE.md) |
 
 ---

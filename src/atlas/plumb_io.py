@@ -48,6 +48,7 @@ class PlumbIO:
         self.spans: list[dict] = []  # type: ignore[type-arg]
         self.scores: list[dict] = []  # type: ignore[type-arg]
         self.examples: list[dict] = []  # type: ignore[type-arg]
+        self.usage: list[dict] = []  # type: ignore[type-arg]
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -131,8 +132,26 @@ class PlumbIO:
         status: str,
         latency_ms: float,
         error_type: str | None,
+        tokens: tuple[int, int] | None = None,
+        attributes: dict[str, object] | None = None,
     ) -> str:
-        """Buffer a span in plumb. Returns span_id."""
+        """Buffer a span in plumb. Returns span_id.
+
+        ``tokens``, when given, is an ``(input, output)`` pair threaded to
+        plumb's ``RunHandle.add_span(tokens=(in, out))``. Plumb persists it
+        *summed* into a single ``spans.tokens`` column — the in/out split is
+        not durable there. ``None`` (every pre-Phase-L0 call site) preserves
+        today's exact behavior.
+
+        ``attributes`` is a JSON-serializable dict written to plumb's
+        ``spans.attributes`` column (landed in plumb v1.1.0). Loop mode uses
+        it to persist the *raw* per-engine token breakdown alongside the
+        reduced ``tokens`` total, so a reduction rule that later proves wrong
+        (see ``cli_backend.codex_usage_to_tokens`` and L1 code review finding
+        M1) can be recomputed from stored data instead of silently corrupting
+        history. Run-level ``dollar_cost``/token roll-up is still not writable
+        from this path — see docs/1_product_and_research/BACKLOG.md (plumb P1-a).
+        """
         if self._real and self._run_handle is not None:
             span_id: str = self._run_handle.add_span(
                 kind,
@@ -140,6 +159,8 @@ class PlumbIO:
                 latency_ms=latency_ms,
                 status=status,
                 error_type=error_type,
+                tokens=tokens,
+                attributes=attributes,
             )
             return span_id
 
@@ -153,9 +174,52 @@ class PlumbIO:
                 "status": status,
                 "latency_ms": latency_ms,
                 "error_type": error_type,
+                "tokens": tokens,
+                "attributes": attributes,
             }
         )
         return span_id
+
+    def set_usage(
+        self,
+        *,
+        run_id: str,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        dollar_cost: float | None = None,
+    ) -> None:
+        """Write run-level usage/cost via plumb v1.1's ``RunHandle.set_usage``.
+
+        This is the plumb **P1-a** capability that atlas's Phase L0 had to
+        defer: in v1.0.1 ``runs.dollar_cost`` existed in the schema but was
+        unreachable from the online ``with run()`` path, so cost could only be
+        held in memory. v1.1.0 added the setter, which is what lets
+        ``max_dollars_per_day`` be a real budget rather than a documented
+        intention.
+
+        Last call wins per field (plumb FR-USAGE-1). Omitted fields are left
+        untouched — in particular, leaving ``tokens_in``/``tokens_out`` unset
+        lets plumb auto-fill them from the buffered spans at close time
+        (FR-USAGE-3), which is strictly better than atlas re-summing what
+        plumb already has. ``dollar_cost`` is never auto-filled (FR-USAGE-3a),
+        so it is the one field atlas must write itself.
+        """
+        if self._real and self._run_handle is not None:
+            self._run_handle.set_usage(
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                dollar_cost=dollar_cost,
+            )
+            return
+
+        self.usage.append(
+            {
+                "run_id": run_id,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "dollar_cost": dollar_cost,
+            }
+        )
 
     def record_user_signal(
         self,

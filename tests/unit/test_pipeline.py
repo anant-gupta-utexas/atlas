@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from atlas.cli_backend import SpanUsage
 from atlas.orchestrator import (
     GateDecision,
     NoActiveRunError,
@@ -14,8 +15,12 @@ from atlas.orchestrator import (
     StageOutcome,
 )
 from atlas.plumb_io import PlumbIO
-from atlas.stages import STAGES, GateLabel, StageName, StageSpec
+from atlas.stages import StageSpec
 from atlas.state import StateInconsistencyError, StateStore
+from atlas.workflow_loader import load_workflow_file
+
+_DEV_YAML_PATH = Path(__file__).parents[2] / "src" / "atlas" / "workflows" / "dev.yaml"
+STAGES = load_workflow_file(_DEV_YAML_PATH).stages
 
 # ---------------------------------------------------------------------------
 # Fakes / stubs
@@ -39,7 +44,7 @@ class _FakeRunner:
             stage=stage,
             span_id="",
             status="success",
-            output_text=f"output of {stage.name.value}",
+            output_text=f"output of {stage.name}",
             error_type=None,
         )
 
@@ -51,7 +56,7 @@ class _FakePrompter:
         self._decisions = list(decisions or [])
         self._idx = 0
 
-    def ask(self, *, stage: StageSpec, gate_index: int) -> GateDecision:
+    def ask(self, *, stage: StageSpec, gate_index: int, output_text: str = "") -> GateDecision:
         if self._decisions and self._idx < len(self._decisions):
             d = self._decisions[self._idx]
             self._idx += 1
@@ -167,7 +172,7 @@ def test_step_advance_on_approve_writes_user_signal_score(tmp_path):
     assert outcome.status == "success"
     assert len(plumb.scores) == 1
     assert plumb.scores[0]["value_label"] == "approved"
-    assert plumb.scores[0]["metric"] == GateLabel.GATE_RESEARCH.value
+    assert plumb.scores[0]["metric"] == "gate_research"
 
 
 def test_step_writes_one_span_per_stage(tmp_path):
@@ -280,7 +285,7 @@ def test_resume_finds_first_unchecked_box(tmp_path):
     assert ctx2.run_id == ctx.run_id
 
     next_unchecked = state.first_unchecked(ctx2)
-    assert next_unchecked == StageName.TRD_DRAFT
+    assert next_unchecked == "trd_draft"
 
 
 def test_resume_raises_when_no_active_run(tmp_path):
@@ -334,8 +339,9 @@ def test_run_to_completion_happy_path(tmp_path):
     ctx = pipeline.start(task="task", slug="slug")
 
     # run_to_completion will stop at awaiting_hook (stage 5)
-    returned_ctx = pipeline.run_to_completion(ctx)
-    assert returned_ctx.run_id == ctx.run_id
+    result = pipeline.run_to_completion(ctx)
+    assert result.ctx.run_id == ctx.run_id
+    assert result.status == "paused"
 
     # 5 spans for stages 0-4 (stage 5 is awaiting_hook)
     # Actually: stages 0-4 run (5 spans), stage 5 returns awaiting_hook
@@ -353,3 +359,109 @@ def test_run_to_completion_on_rejection_closes_with_failure(tmp_path):
 
     # Examples row written on rejection
     assert len(plumb.examples) == 1
+
+
+# ---------------------------------------------------------------------------
+# Usage plumbing (2026-07-26) — StageOutcome.usage -> spans + run-level cost
+#
+# Before this, Pipeline.step() called record_span() with no tokens= and no
+# attributes=, so TRD-v3 §13 #1 ("the code_gen span carries real tokens")
+# could not hold no matter what the backend parsed.
+# ---------------------------------------------------------------------------
+
+
+class _UsageRunner:
+    """Emits a fixed SpanUsage on every stage, like a loop-mode CLI dispatch."""
+
+    def __init__(self, usage: SpanUsage | None) -> None:
+        self._usage = usage
+
+    def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        return StageOutcome(
+            stage=stage,
+            span_id="",
+            status="success",
+            output_text=f"output of {stage.name}",
+            error_type=None,
+            usage=self._usage,
+        )
+
+
+def _usage(cost: float | None) -> SpanUsage:
+    return SpanUsage(
+        tokens=(100, 20),
+        attributes={"engine": "claude", "token_reduction_rule": "test_v1"},
+        dollar_cost=cost,
+    )
+
+
+def test_step_writes_span_tokens_and_attributes_from_outcome_usage(tmp_path):
+    pipeline, plumb, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(0.01)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+
+    assert plumb.spans[-1]["tokens"] == (100, 20)
+    assert plumb.spans[-1]["attributes"]["engine"] == "claude"
+
+
+def test_step_leaves_tokens_none_when_backend_reports_no_usage(tmp_path):
+    """Attended runs and agy dispatches must keep today's exact behavior."""
+    pipeline, plumb, _ = _make_pipeline(tmp_path, runner=_UsageRunner(None))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+
+    assert plumb.spans[-1]["tokens"] is None
+    assert plumb.spans[-1]["attributes"] is None
+
+
+def test_run_dollar_cost_accumulates_across_stages(tmp_path):
+    pipeline, _, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(0.25)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+    pipeline.step(ctx)
+
+    assert pipeline.run_dollar_cost == pytest.approx(0.50)
+
+
+def test_run_dollar_cost_is_none_when_no_engine_reports_cost(tmp_path):
+    """None and 0.0 must stay distinct — 'unknown' is not 'free'.
+
+    Codex reports no cost at all, so a Codex-only run must not look like a
+    $0.00 run to the loop's daily budget.
+    """
+    pipeline, _, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(None)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+
+    assert pipeline.run_dollar_cost is None
+
+
+def test_run_to_completion_writes_run_level_cost_to_plumb(tmp_path):
+    pipeline, plumb, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(0.1)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    result = pipeline.run_to_completion(ctx)
+
+    assert result.dollar_cost == pytest.approx(0.6)  # 6 stages dispatched
+    # Tokens are deliberately omitted so plumb auto-fills them from the spans.
+    assert plumb.usage == []  # paused run: flush happens at terminal status only
+
+
+def test_failed_run_still_reports_cost_to_the_budget(tmp_path):
+    """A run that fails still spent money; the daily cap must see it."""
+    reject = GateDecision(label="rejected", turn_count=1, reason="bad")
+    pipeline, plumb, _ = _make_pipeline(
+        tmp_path, runner=_UsageRunner(_usage(0.3)), prompter=_FakePrompter(decisions=[reject])
+    )
+    ctx = pipeline.start(task="task", slug="slug")
+
+    result = pipeline.run_to_completion(ctx)
+
+    assert result.status == "failure"
+    assert result.dollar_cost == pytest.approx(0.3)
+    assert plumb.usage[-1]["dollar_cost"] == pytest.approx(0.3)
+    assert plumb.usage[-1]["tokens_in"] is None

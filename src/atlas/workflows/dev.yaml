@@ -1,0 +1,38 @@
+name: dev
+
+stages:
+  - name: research
+    span_kind: plan
+    tool: consult-experts:research
+    gate: gate_research
+
+  - name: prd_draft
+    span_kind: plan
+    tool: consult-experts:pm
+    gate: gate_prd
+
+  - name: trd_draft
+    span_kind: plan
+    tool: consult-experts:tech-lead
+    gate: gate_trd
+
+  - name: tds_gen
+    span_kind: plan
+    tool: dev-docs-be
+
+  - name: plan_review
+    span_kind: verify
+    tool: plan-reviewer
+    gate: gate_tds
+
+  - name: code_gen
+    span_kind: subagent
+    tool: code-gen-agent
+    gate: gate_commit
+    isolate: true
+    gate_is_async: true
+
+  - name: code_review
+    span_kind: verify
+    tool: code-review
+    gate: gate_phase_complete
