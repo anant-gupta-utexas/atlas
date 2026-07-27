@@ -811,6 +811,16 @@ def test_codex_backend_parse_usage_skips_blank_lines() -> None:
 
 
 def test_codex_backend_usage_to_plumb_tokens() -> None:
+    """Pending Decision #4 RESOLVED (T-L1.1, 2026-07-26): sub-fields are subsets.
+
+    Measured on codex-cli 0.144.4 with a cold/warm capture pair: input_tokens
+    held flat (68719 -> 69161) while cached_input_tokens rose 29% (48384 ->
+    62464). Under the old addend rule input_tokens had to fall by ~14k; it
+    did not. cached_input_tokens is the served-from-cache portion OF
+    input_tokens, per OpenAI's convention.
+
+    Adding them, as the v1 rule did, inflated this fixture's input by 78%.
+    """
     usage = CodexUsageStats(
         input_tokens=16668,
         output_tokens=5,
@@ -818,8 +828,19 @@ def test_codex_backend_usage_to_plumb_tokens() -> None:
         reasoning_output_tokens=0,
     )
     in_tokens, out_tokens = codex_usage_to_tokens(usage)
-    assert in_tokens == usage.input_tokens + usage.cached_input_tokens
-    assert out_tokens == usage.output_tokens + usage.reasoning_output_tokens
+    assert in_tokens == 16668
+    assert out_tokens == 5
+
+
+def test_codex_reasoning_tokens_are_not_added_to_output() -> None:
+    """reasoning_output_tokens is a subset of output_tokens (OpenAI convention)."""
+    usage = CodexUsageStats(
+        input_tokens=100,
+        output_tokens=662,
+        cached_input_tokens=50,
+        reasoning_output_tokens=159,
+    )
+    assert codex_usage_to_tokens(usage) == (100, 662)
 
 
 def test_codex_usage_attributes_preserves_raw_breakdown() -> None:
@@ -827,9 +848,10 @@ def test_codex_usage_attributes_preserves_raw_breakdown() -> None:
 
     plumb collapses tokens=(in, out) into one summed spans.tokens column, so
     neither the in/out split nor the cached/reasoning breakdown survives there.
-    If Pending Decision #4's cached-as-addend assumption proves backwards, the
-    ONLY thing that makes stored history recomputable rather than permanently
-    corrupt is this raw breakdown plus the rule name that produced the total.
+    This mechanism has now proven itself: Pending Decision #4's
+    cached-as-addend assumption WAS backwards (T-L1.1, 2026-07-26), and spans
+    written under the v1 rule are recomputable precisely because the raw
+    breakdown and the rule name were both persisted here.
     """
     usage = CodexUsageStats(
         input_tokens=16668,
@@ -849,10 +871,14 @@ def test_codex_usage_attributes_preserves_raw_breakdown() -> None:
     assert attrs["engine"] == "codex"
 
     # The recorded breakdown must actually reproduce the reduced total, or the
-    # "recomputable" claim above is false.
+    # "recomputable" claim above is false. Under the v2 subset rule the totals
+    # ARE the raw top-level fields; the cached/reasoning sub-fields are kept
+    # so the superseded v1 addend total stays derivable from stored history.
     in_tokens, out_tokens = codex_usage_to_tokens(usage)
-    assert attrs["input_tokens"] + attrs["cached_input_tokens"] == in_tokens
-    assert attrs["output_tokens"] + attrs["reasoning_output_tokens"] == out_tokens
+    assert attrs["input_tokens"] == in_tokens
+    assert attrs["output_tokens"] == out_tokens
+    v1_in = attrs["input_tokens"] + attrs["cached_input_tokens"]
+    assert v1_in == 29724  # what a v1-stamped span recorded, recomputable
 
 
 def test_codex_usage_attributes_is_json_serializable() -> None:
@@ -987,3 +1013,58 @@ def test_make_backend_unknown_name_raises() -> None:
 
 def test_known_backends_set() -> None:
     assert _KNOWN_BACKENDS == frozenset({"claude", "agy", "codex"})
+
+
+# ---------------------------------------------------------------------------
+# T-L1.1 — real captured Codex output (codex-cli 0.144.4, 2026-07-26)
+#
+# These fixtures are live captures, not constructed. They close the write-path
+# and failure-path gaps the L1 TRS flagged UNVERIFIED.
+# ---------------------------------------------------------------------------
+
+_REAL_FIXTURES = Path(__file__).parents[1] / "fixtures" / "codex_jsonl"
+
+
+def test_codex_real_write_heavy_capture_parses() -> None:
+    """Write-path event types: item.started/completed x command_execution,
+    file_change, agent_message. The edit really landed under workspace-write."""
+    stdout = (_REAL_FIXTURES / "write_heavy_real.jsonl").read_text(encoding="utf-8")
+    backend = CodexBackend()
+
+    status, text, error_type = backend.parse_result(stdout, "", 0)
+    assert status == "success"
+    assert error_type is None
+    assert text
+
+    usage = backend.span_usage(stdout)
+    assert usage is not None
+    # Subset rule: the reduced input is input_tokens itself, not input+cached.
+    assert usage.tokens == (68700, 392)
+    assert usage.attributes["cached_input_tokens"] == 61440
+    assert usage.dollar_cost is None
+
+
+def test_codex_real_sandbox_denial_still_reports_success() -> None:
+    """No failure event type exists in 0.144.4 — VERIFIED, not assumed.
+
+    A sandbox-blocked write exits 0 and still emits turn.completed; the agent
+    just says it couldn't comply. This is the honest consequence of L1
+    Resolved Decision #8 (status is exit-code-only) and is exactly what the
+    `verify` stage and the PR gate exist to catch. A parser that inferred
+    failure from event content would be guessing.
+    """
+    stdout = (_REAL_FIXTURES / "sandbox_denied_real.jsonl").read_text(encoding="utf-8")
+    status, _text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert status == "success"
+    assert error_type is None
+
+
+def test_codex_hard_failure_emits_no_stdout() -> None:
+    """A preflight failure (e.g. untrusted dir) exits nonzero with empty stdout.
+
+    Captured live: stdout was 0 bytes, the message went to stderr. parse_result
+    must report failure from the exit code rather than looking for an event.
+    """
+    status, _text, error_type = CodexBackend().parse_result("", "not a trusted directory", 1)
+    assert status == "failure"
+    assert error_type is not None

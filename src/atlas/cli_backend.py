@@ -575,28 +575,45 @@ def claude_usage_attributes(usage: UsageStats) -> dict[str, object]:
     }
 
 
-CODEX_TOKEN_REDUCTION_RULE = "cached_input_as_addend_v1"
+CODEX_TOKEN_REDUCTION_RULE = "openai_subset_fields_v2"
 
 
 def codex_usage_to_tokens(usage: CodexUsageStats) -> tuple[int, int]:
     """Reduce CodexUsageStats to the (in, out) tuple plumb's record_span expects.
 
-    Per Pending Decision #4, ``cached_input_tokens`` is **assumed** to be an
-    addend to ``input_tokens`` rather than a subset of it. This is an
-    inference from Anthropic's convention (Claude's ``input_tokens`` excludes
-    its own cache fields), **not** a verified fact about OpenAI's schema —
-    T-L1.1's cold/warm-cache capture pair is what settles it.
+    **Pending Decision #4 is RESOLVED (T-L1.1, 2026-07-26): the sub-fields are
+    subsets, not addends.** The prior rule
+    (``cached_input_as_addend_v1``) assumed Anthropic's convention and was
+    wrong — it inflated every Codex span's input by ~70-90%.
 
-    If the assumption is backwards, every Codex span's input count is inflated
-    (~78% on the `success.jsonl` fixture's real figures). That error is
-    recoverable rather than silent: ``codex_usage_attributes()`` persists the
-    raw four-field breakdown plus ``CODEX_TOKEN_REDUCTION_RULE`` into
-    ``spans.attributes``, so history can be recomputed. Change the rule here
-    and bump the constant — do not edit stored spans.
+    Measured directly with a cold/warm capture pair on codex-cli 0.144.4,
+    same prompt and directory, run back to back::
+
+        run A (colder):  input_tokens=68719  cached_input_tokens=48384
+        run B (warmer):  input_tokens=69161  cached_input_tokens=62464
+
+    ``input_tokens`` held flat (+0.6%) while ``cached_input_tokens`` rose 29%.
+    Under the addend model ``input_tokens`` had to fall by ~14k as more of the
+    prompt became cacheable; it did not. ``input_tokens`` is therefore the
+    whole prompt and ``cached_input_tokens`` is the served-from-cache portion
+    of it — matching OpenAI's documented convention
+    (``prompt_tokens_details.cached_tokens`` ⊆ ``prompt_tokens``), which is
+    the opposite of Anthropic's.
+
+    ``reasoning_output_tokens`` is treated as a subset of ``output_tokens`` on
+    the same OpenAI convention (``completion_tokens_details.reasoning_tokens``
+    ⊆ ``completion_tokens``). That one is **convention plus consistency with
+    the measured cached result, not an independent measurement** — a run with
+    ``output_tokens=206``/``reasoning=50`` against a ~46-token visible message
+    fits either model arithmetically, since tool-call arguments are also
+    billed output. Flagged rather than overclaimed.
+
+    The raw four-field breakdown and this rule's name are persisted to
+    ``spans.attributes`` by ``codex_usage_attributes()``, so spans written
+    under the old v1 rule stay recomputable. Change the rule here and bump
+    the constant — do not edit stored spans.
     """
-    in_tokens = (usage.input_tokens or 0) + (usage.cached_input_tokens or 0)
-    out_tokens = (usage.output_tokens or 0) + (usage.reasoning_output_tokens or 0)
-    return (in_tokens, out_tokens)
+    return (usage.input_tokens or 0, usage.output_tokens or 0)
 
 
 def codex_usage_attributes(usage: CodexUsageStats) -> dict[str, object]:

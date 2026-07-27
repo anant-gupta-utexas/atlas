@@ -418,15 +418,19 @@ Gemini API for Gemini).
 
 ## Part E — Codex CLI headless reference (`codex exec`)
 
-> **Verification status (as of 2026-07-24, `codex-cli 0.144.4`).** Everything in this Part
-> marked **VERIFIED** comes from a real captured `codex exec --json` run plus a direct read of
-> `codex exec --help` on this machine. Everything marked **UNVERIFIED** is inferred (from
-> `--help` text or cross-vendor convention) and has not been observed by execution — atlas's
-> `CodexBackend` (Phase L1) is designed defensively around this gap, per
-> `dev/active/loop-mode-phase-L1/`. A write-heavy run (file edits, command execution, a
-> deliberately-failed run, and a cold/warm-cache pair) is still outstanding (T-L1.1) — anything
-> below about the write path, failure-path events, or the cached-token accounting rule should
-> be re-checked against that capture before being treated as settled.
+> **Verification status (updated 2026-07-26, `codex-cli 0.144.4`).** T-L1.1's write-heavy
+> capture has now been run, closing the gaps this Part previously carried. Live captures are
+> checked in at `tests/fixtures/codex_jsonl/write_heavy_real.jsonl` and
+> `sandbox_denied_real.jsonl`. Four things changed from the 2026-07-24 draft:
+>
+> 1. **Write-path event types are VERIFIED** — `item.started`/`item.completed` carry
+>    `item_type` values `command_execution`, `file_change`, and `agent_message`.
+> 2. **No failure event type exists.** A sandbox-blocked write still exits `0` and emits
+>    `turn.completed`; the agent simply narrates that it couldn't comply.
+> 3. **`--add-dir` IS writable** under `--sandbox workspace-write` (Pending Decision #3).
+> 4. **`cached_input_tokens` is a SUBSET of `input_tokens`, not an addend** (Pending
+>    Decision #4). atlas's prior assumption was backwards and inflated every Codex span's
+>    input by ~70-90%. Fixed; see the token-usage table below.
 
 ### Core non-interactive flags
 
@@ -482,17 +486,19 @@ with Codex:
 
 ### Status determination
 
-**VERIFIED (exit-code-only) for the read-only path; UNVERIFIED for the failure-path event
-question.** The event stream carries no status field, so:
+**VERIFIED exit-code-only, including the failure path (2026-07-26).** The event stream
+carries no status field, so:
 
 - `returncode != 0` → failure.
 - `returncode == 0` + a `turn.completed` event present → success.
 - `returncode == 0` with **no** `turn.completed` (truncated/interrupted stream) → treated as
   failure by atlas (`codex_no_turn_completed`), even though the exit code was clean.
-- Whether a distinct failure-path event type exists (e.g. a hypothetical `turn.failed`) for a
-  deliberately-failed run is **UNVERIFIED** — not observed in the read-only sample. If a
-  future write-heavy capture (T-L1.1) finds one, this doc and `CodexBackend.parse_result`
-  should both gain a branch for it.
+- **No distinct failure-path event type exists.** T-L1.1 deliberately triggered a sandbox
+  denial (`--sandbox read-only`, asked to write a file): the write was correctly refused,
+  yet the run exited `0` and emitted a normal `turn.completed`. There is no `turn.failed`,
+  no error event, nothing to branch on — so `parse_result` correctly does not look for one.
+- A **hard** failure (preflight, e.g. an untrusted directory) exits non-zero with **empty
+  stdout** and the message on stderr — hence the exit-code branch must come first.
 
 A clean exit with a completed turn is reported as `success` even if the agent's actual work
 failed (tests still red, task not accomplished) — Codex's JSONL gives atlas no way to
@@ -505,10 +511,30 @@ follow Codex dispatch with a separate `verify` stage rather than trusting exit c
 
 | Field | Notes |
 | --- | --- |
-| `input_tokens` | Uncached input tokens. |
-| `cached_input_tokens` | Cache-read tokens. **UNVERIFIED whether this is additive to `input_tokens` or a subset of it** — the read-only sample (`input_tokens: 16668`, `cached_input_tokens: 13056`) is consistent with either reading. atlas assumes additive (matching Anthropic's own convention, where `input_tokens` excludes cache fields), but this is a cross-vendor inference, not an observation. A cold-cache/warm-cache capture pair (T-L1.1) is the resolution path; getting this wrong overcounts a span's tokens by roughly 4×. |
-| `output_tokens` | Output tokens. |
-| `reasoning_output_tokens` | Reasoning-model output tokens, reported separately from `output_tokens`. The read-only sample used a non-reasoning model (`0` observed) — a reasoning-capable-model run producing `reasoning_output_tokens > 0` is **UNVERIFIED**, outstanding in T-L1.1. |
+| `input_tokens` | **Total** prompt tokens — the whole prompt, cached portion included. |
+| `cached_input_tokens` | **VERIFIED (2026-07-26) to be a SUBSET of `input_tokens`**, i.e. the served-from-cache portion of it — matching OpenAI's documented convention (`prompt_tokens_details.cached_tokens` ⊆ `prompt_tokens`) and **opposite to Anthropic's**. Do not add it to `input_tokens`. |
+| `output_tokens` | Total output tokens, including tool-call arguments and (see below) reasoning. |
+| `reasoning_output_tokens` | Reasoning-model output tokens. `> 0` now **observed** (9, 50, and 159 across captured runs), closing that gap. Treated as a **subset** of `output_tokens` on OpenAI's convention (`completion_tokens_details.reasoning_tokens` ⊆ `completion_tokens`) — this one is convention plus consistency with the measured cache result, **not an independent measurement**: a run with `output_tokens=206`/`reasoning=50` against a ~46-token visible message fits either model arithmetically, because tool-call arguments are billed output too. |
+
+#### How the cache question was settled
+
+Same prompt, same directory, two runs back to back on `codex-cli 0.144.4`:
+
+| Run | `input_tokens` | `cached_input_tokens` |
+| --- | --- | --- |
+| A (colder) | 68719 | 48384 |
+| B (warmer) | 69161 | 62464 |
+
+`input_tokens` held flat (+0.6%) while `cached_input_tokens` rose 29%. Under the addend model
+`input_tokens` had to *fall* by ~14k as more of the prompt became cacheable — it did not.
+Therefore `input_tokens` is the total and `cached_input_tokens` is a portion of it.
+
+atlas's reduction rule is now `openai_subset_fields_v2` (`cli_backend.codex_usage_to_tokens`):
+`(input_tokens, output_tokens)`, adding neither sub-field. Spans written under the superseded
+`cached_input_as_addend_v1` rule remain recomputable, because
+`codex_usage_attributes()` persists the raw four-field breakdown *and* the rule name into
+`spans.attributes` — the L1 code review's finding M1 mechanism doing exactly the job it was
+added for.
 
 **No cost field exists anywhere in the schema.** Codex does not report a dollar figure at all
 — this is a data-availability gap, not a plumb-storage gap (contrast with Claude's
@@ -531,15 +557,16 @@ states *"auth still uses `CODEX_HOME`"*, so a preflight check must honor the env
 hardcoding `~/.codex`. Fails closed with no subprocess spawned if neither is present — same
 posture as `AntigravityBackend.preflight()` (Part C).
 
-### Sandbox caveat — writability of `--add-dir` paths
+### Sandbox — writability of `--add-dir` paths
 
-**UNVERIFIED by execution.** `--sandbox workspace-write` confines writes to the *primary*
-workspace set via `-C`. `--help`'s own text says `--add-dir` directories *"should be
-writable alongside the primary workspace,"* but whether the sandbox actually honors this in
-practice has not been confirmed by a real write attempt. atlas's `CodexBackend` passes the
-worktree as `-C` and `repo_root` via `--add-dir` (so the agent can still read
-`dev/active/<slug>/tasks.md`); if a write-heavy capture (T-L1.1) finds the sandbox is stricter
-than documented, the fallback is `-C <worktree>` only, dropping the extra `--add-dir` entries.
+**VERIFIED writable (2026-07-26).** A real write attempt under `--sandbox workspace-write`
+with `-C <main>` and `--add-dir <extra>` created files in **both** directories. Pending
+Decision #3 resolves to "honored as documented" — the contemplated fallback (`-C <worktree>`
+only, dropping the extra `--add-dir` entries) is not needed, so atlas keeps passing
+`repo_root` via `--add-dir` and Codex runs stay as context-rich as Claude runs.
+
+The sandbox does still enforce its boundary: under `--sandbox read-only`, a write attempt was
+refused with *"operation not permitted"* and no file appeared.
 
 ### Example commands
 
