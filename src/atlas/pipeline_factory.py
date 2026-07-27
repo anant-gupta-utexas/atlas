@@ -63,11 +63,13 @@ def make_pipeline(
     """Construct a Pipeline + recorder exactly as `atlas run` does.
 
     Shared by cli.py::run/resume and loop.py (Decision #11) so the two
-    construction paths cannot silently drift. ``backend_override``, when
-    given, takes priority over ``cfg.default_backend`` (but still below a
-    stage's own ``backend`` field or the workflow's ``default_backend`` —
-    the existing 4-tier order in `cli_backend.resolve_backend`) — used by
-    loop.py to honor an issue's `engine:*` label.
+    construction paths cannot silently drift. ``backend_override`` is the
+    **highest** tier in `cli_backend.resolve_backend` — above a stage's own
+    ``backend`` field and the workflow's ``default_backend`` — because it
+    carries an explicit run-scoped human instruction: `atlas run --backend X`
+    or a loop issue's `engine:*` label. It used to sit below the workflow
+    default, which silently disabled both surfaces for every workflow that
+    declares one (all of them). See resolve_backend's docstring.
 
     ``max_turns`` caps agent turns per stage. ``atlas run`` leaves it None
     (a human is watching); the loop daemon passes ``cfg.loop.max_turns`` so
@@ -94,7 +96,8 @@ def make_pipeline(
         timeout_overrides=cfg.timeout_overrides,
         command_overrides=cfg.plugin_commands,
         model=cfg.model,
-        default_backend=backend_override or cfg.default_backend,
+        default_backend=cfg.default_backend,
+        backend_override=backend_override,
         loaded_workflow=loaded,
         max_turns=max_turns,
         telemetry_json=loop_mode or telemetry_json,

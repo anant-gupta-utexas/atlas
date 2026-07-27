@@ -1068,3 +1068,55 @@ def test_codex_hard_failure_emits_no_stdout() -> None:
     status, _text, error_type = CodexBackend().parse_result("", "not a trusted directory", 1)
     assert status == "failure"
     assert error_type is not None
+
+
+# ---------------------------------------------------------------------------
+# resolve_backend — the override tier (2026-07-26)
+# ---------------------------------------------------------------------------
+
+
+def test_override_beats_workflow_default_backend() -> None:
+    """Regression: `--backend codex --workflow loop_dev` silently ran claude.
+
+    Every shipped loop workflow declares `default_backend:`, so folding the
+    override into the config tier made it permanently unreachable. Confirmed
+    live 2026-07-26 — the run's spans came back stamped engine: claude.
+    """
+    assert (
+        resolve_backend(
+            stage=_stage(),
+            workflow=_workflow(default_backend="claude"),
+            config_default=None,
+            override="codex",
+        )
+        == "codex"
+    )
+
+
+def test_override_beats_stage_pin() -> None:
+    """An explicit run-scoped instruction outranks a per-stage YAML pin too."""
+    assert (
+        resolve_backend(
+            stage=_stage(backend="claude"),
+            workflow=_workflow(default_backend="claude"),
+            config_default=None,
+            override="codex",
+        )
+        == "codex"
+    )
+
+
+def test_no_override_preserves_original_tier_order() -> None:
+    """Absent an override, TRD-v2 §3.4's original order is untouched."""
+    assert (
+        resolve_backend(
+            stage=_stage(backend="agy"), workflow=_workflow("claude"), config_default="codex"
+        )
+        == "agy"
+    )
+    assert (
+        resolve_backend(stage=_stage(), workflow=_workflow("claude"), config_default="codex")
+        == "claude"
+    )
+    assert resolve_backend(stage=_stage(), workflow=None, config_default="codex") == "codex"
+    assert resolve_backend(stage=_stage(), workflow=None, config_default=None) == "claude"

@@ -641,14 +641,34 @@ def resolve_backend(
     stage: StageSpec,
     workflow: LoadedWorkflow | None,
     config_default: str | None,
+    override: str | None = None,
 ) -> str:
-    """4-tier backend resolution per TRD-v2 §3.4.
+    """5-tier backend resolution (TRD-v2 §3.4, plus an explicit override tier).
 
-    1. Per-stage StageSpec.backend (highest priority)
-    2. Workflow LoadedWorkflow.default_backend
-    3. Config.default_backend (from .atlas.toml [backend] default)
-    4. Hard default 'claude'
+    1. ``override`` — an explicit, run-scoped human instruction: ``atlas run
+       --backend X`` or a loop issue's ``engine:X`` label
+    2. Per-stage StageSpec.backend
+    3. Workflow LoadedWorkflow.default_backend
+    4. Config.default_backend (from .atlas.toml [backend] default)
+    5. Hard default 'claude'
+
+    **Why override sits above the workflow default (added 2026-07-26).**
+    Originally an override was folded into tier 4, so any workflow declaring
+    `default_backend:` silently beat it. Every shipped loop workflow declares
+    one — `loop_dev.yaml` says `default_backend: claude` — which made two
+    surfaces inert without any error:
+
+    * ``atlas run --backend codex --workflow loop_dev`` ran claude. Confirmed
+      live on 2026-07-26: the run's spans came back stamped ``engine: claude``.
+    * The loop daemon's ``engine:*`` issue label, which `run_one_shot` passes
+      as `backend_override`, could **never** take effect — so TRD-v3 §13 #3
+      ("a `loop_dev` run under `engine:codex`") was unreachable by design.
+
+    A silently-discarded explicit instruction is the worst of the options
+    here: worse than overriding a YAML default the operator can see and edit.
     """
+    if override is not None:
+        return override
     if stage.backend is not None:
         return stage.backend
     if workflow is not None and workflow.default_backend is not None:

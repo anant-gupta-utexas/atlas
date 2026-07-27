@@ -627,11 +627,16 @@ class SubprocessStageRunner:
         max_turns: int | None = None,
         telemetry_json: bool = False,
         permission_mode: str | None = None,
+        backend_override: str | None = None,
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
         self._model = model
         self._default_backend = default_backend
+        # Explicit, run-scoped backend choice (`atlas run --backend X`, or a
+        # loop issue's `engine:X` label). Outranks the workflow YAML's
+        # default_backend — see resolve_backend's docstring for why.
+        self._backend_override = backend_override
         self._workflow = loaded_workflow
         # Per-run turn cap, passed through to the backend as --max-turns.
         # None (the default for `atlas run`) leaves the backend's own default
@@ -678,11 +683,12 @@ class SubprocessStageRunner:
 
         prompt = build_prompt(plugin_cmd, ctx.task, context_hint)
 
-        # Resolve backend per TRD-v2 §3.4's 4-tier order.
+        # Resolve backend per TRD-v2 §3.4's tier order (+ the override tier).
         backend_name = resolve_backend(
             stage=stage,
             workflow=self._workflow,  # type: ignore[arg-type]
             config_default=self._default_backend,
+            override=self._backend_override,
         )
         try:
             backend = make_backend(backend_name)
