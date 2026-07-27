@@ -202,6 +202,72 @@ a third time here.
 | `loop.tick()` → `queue_gh.relabel(issue, state="blocked")` | Typed call, first-ever use of `"blocked"` | N/A (relabel already handles `GhCliError` per L2) | Integration (T-L3.7) |
 | `judge_gate.py` → `plumb.adapters.get_judge_adapter` | In-process import, sibling repo | Missing `PLUMB_JUDGE_PROVIDER` → `ValueError` inside plumb, caught and re-raised as `JudgeUnavailableError` | Unit (T-L3.2, T-L3.3) |
 
+## Implementation notes (added 2026-07-26, after T-L3.2–T-L3.9 landed)
+
+> Read this before touching `judge_gate.py`/`self_heal.py`/`loop.py` again —
+> it's where the design docs above and the actual shipped code diverge.
+
+**Status: code-complete.** T-L3.2 through T-L3.9 are implemented, unit- and
+integration-tested, and clean (`pytest` 520 passed/1 xfailed, `ruff check`,
+`mypy --strict src` all clean, coverage `judge_gate.py` 86%/`self_heal.py`
+100%/`loop.py` 90%, total 95%). T-L3.10 (manual smoke) and T-L3.11 (STATUS.md
+close-out) remain — both need a human operator session with a real repo and
+a configured `PLUMB_JUDGE_PROVIDER`.
+
+**Three things this TRS's design docs got wrong, found only by reading
+plumb's actual source rather than trusting the prose summary:**
+
+1. **`plumb/adapters/_judge_common.py::parse_reply` only accepts a verdict of
+   `"pass"`, `"fail"`, or a bare number — never an arbitrary label.**
+   `classify_failure`'s four-way mode (`flaky`/`wrong_approach`/
+   `missing_context`/`infeasible`) can't ride `JudgeResult.value_label`
+   directly, as the design's pseudocode assumed. Fix: `judge_prompts/
+   failure_mode.md` always asks for `verdict: "fail"` and encodes the real
+   mode as a leading token in `rationale` (`"<mode>: <explanation>"`),
+   parsed back out by `judge_gate._parse_failure_mode`.
+2. **Neither `Pipeline` nor the `LastOutcomeRunner` recorder
+   `make_pipeline()` returns expose the `PlumbIO` instance** the design's
+   pseudocode calls `reopen_run()` on (`plumb = recorder's PlumbIO
+   instance`). Fixed with the one sanctioned exception to "Pipeline
+   unchanged": a single read-only `Pipeline.plumb` property
+   (`orchestrator.py`) returning the existing private `self._plumb` — no
+   behavior change, confirmed with the user before making it.
+3. **`PlumbIO(real=True)`'s default `task_id=""` breaks `write_example`
+   in real mode** — plumb's `Example` entity requires a non-empty
+   `task_id`, and that validation happens *outside* `write_example`'s own
+   try/except, so it wasn't a graceful degradation, it was an uncaught
+   crash. `self_heal.py` fixes this locally by constructing
+   `PlumbIO(real=True, task_id=f"issue-{issue.number}")`. A parallel bug
+   existed in `judge_gate._write_score` (`Score(...)` construction was
+   also outside its own try/except) — fixed there directly since it's new
+   L3 code, not a pre-existing gap. **`plumb_io.py`'s own `write_example`
+   still has the `task_id=""` exposure for any *other* future caller that
+   constructs `PlumbIO(real=True)` without a task_id — not fixed here,
+   since `plumb_io.py` is explicitly on the "unchanged, reused as-is" list
+   above; flag it if it bites a future phase.**
+
+**One task-list gap, not a design error:** `run_planned_first_pass` needed
+`parent_run_id`/`diagnosis` params too (for the planned-lane retry
+`self_heal.handle_failure` dispatches through), but no numbered L3 task
+named it explicitly — T-L3.5's title only says `run_one_shot`. Added as part
+of T-L3.6's work since `self_heal.py` couldn't be built without it. Simpler
+than the quick lane's version: the planned lane owns its own `PlumbIO`
+directly (bypasses `Pipeline` entirely), so it's a straight `reopen_run`
+instead of `open_run`, no `pipeline.plumb` indirection needed.
+
+**A real bug an integration test caught before it could land:** the first
+draft of T-L3.8's retry-cap test patched `atlas.judge_gate.classify_failure`
+and `atlas.loop.run_one_shot`, which passed in isolation but failed when run
+inside the full suite. Root cause: `self_heal.py` does `from atlas.judge_gate
+import classify_failure` / `from atlas.loop import run_one_shot` — plain name
+imports bind their own reference in `self_heal`'s namespace at first import,
+which patching the *origin* module's attribute doesn't reach once any other
+test has already imported `atlas.self_heal` (several do, at module level).
+Fix: patch `atlas.self_heal.classify_failure` / `atlas.self_heal.run_one_shot`
+directly — the same rule `test_self_heal.py`'s own tests already followed
+correctly. Worth remembering for any future test that reaches through
+`self_heal.py` into its re-exported names.
+
 ## Where this TRS's task list maps to TRD-v3 §14 Phase L3 scope bullets
 
 | TRD-v3 §14 Phase L3 bullet | This TRS's task |

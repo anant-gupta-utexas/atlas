@@ -205,6 +205,17 @@ class Pipeline:
     # Public interface
     # ------------------------------------------------------------------
 
+    @property
+    def plumb(self) -> PlumbIO:
+        """The PlumbIO instance backing this run (Phase L3, T-L3.5).
+
+        Read-only access to the same handle ``start()``/``step()`` write
+        through, so a caller can hand off to a child run (``reopen_run``)
+        before ``run_to_completion()`` — the one integration point Phase L3's
+        diagnosis-injected retry needs from an otherwise-unchanged Pipeline.
+        """
+        return self._plumb
+
     def start(self, *, task: str, slug: str) -> RunContext:
         """
         Create a new run. Writes tasks.md + .atlas/current-run.

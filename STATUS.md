@@ -1,8 +1,8 @@
 ---
 project: atlas
-status: v3.1 shipped — loop mode L0/L1/L2 complete and verified live 2026-07-27
-last_updated: 2026-07-27
-next_gate: Phase L3 (self-healing + routing) — TRS written, not implemented
+status: v3.1 shipped — loop mode L0/L1/L2 complete and verified live 2026-07-27; Phase L3 code-complete 2026-07-26, not yet verified live
+last_updated: 2026-07-26
+next_gate: Phase L3 (self-healing + routing) — code-complete; T-L3.10 manual smoke + T-L3.11 STATUS close-out pending a human operator session
 blocked_on: null
 ---
 
@@ -126,12 +126,25 @@ Full pending list: [`docs/1_product_and_research/BACKLOG.md`](docs/1_product_and
 
 ## Next
 
-**Phase L3 — self-healing + routing (`v3.2`).** TRS written and sitting in
-[`dev/active/loop-mode-phase-L3/`](dev/active/loop-mode-phase-L3/); no code
-yet. Scope: a pre-PR plumb judge gate, a diagnosis-injected single child-run
-retry (`parent_run_id`), failed runs captured as plumb examples, and
-score-informed engine/workflow routing (stretch). Exit criteria are TRD-v3
-§13 #9 and #10.
+**Phase L3 — self-healing + routing (`v3.2`) — code-complete, not yet
+verified live.** TRS in
+[`dev/active/loop-mode-phase-L3/`](dev/active/loop-mode-phase-L3/). Shipped:
+`judge_gate.py` (pre-PR task-completion scoring + failure-mode
+classification via plumb's library `JudgeAdapter`) and `self_heal.py`
+(diagnosis-injected single child-run retry via `parent_run_id`), wired into
+`loop.py`'s `run_one_shot`/`run_planned_first_pass`/`tick()`. TRD-v3 §13 #9
+and #10 are implemented and covered by unit + a dedicated retry-cap
+integration test (T-L3.8), but — like every prior phase — code-complete is
+not the same as verified: **T-L3.10** (manual smoke against a real repo,
+needs a configured `PLUMB_JUDGE_PROVIDER`) and **T-L3.11** (this section's
+own final close-out) are still open, tracked in
+[`loop-mode-phase-L3-tasks.md`](dev/active/loop-mode-phase-L3/loop-mode-phase-L3-tasks.md).
+Router v1 (score-informed engine/workflow routing) remains a named-but-
+unimplemented stretch seam at `loop.py::_engine_for_issue` — see
+[BACKLOG.md](docs/1_product_and_research/BACKLOG.md).
+
+Local suite: **520 passed, 1 xfailed, 95% coverage** (measured 2026-07-26;
+`judge_gate.py` 86%, `self_heal.py` 100%, `loop.py` 90%).
 
 ## Pointers
 

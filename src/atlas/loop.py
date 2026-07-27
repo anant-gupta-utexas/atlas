@@ -15,9 +15,9 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from atlas import queue_gh
+from atlas import judge_gate, queue_gh
 from atlas.cli_backend import UnknownBackendError, UsageReporting, make_backend, resolve_model
 from atlas.config import Config, LoopConfig
 from atlas.deliverer import DeliveryError, GhPrDeliverer, PrRef
@@ -44,13 +44,59 @@ from atlas.queue_gh import GhCliError, Issue
 from atlas.triage import TriageResult, triage
 from atlas.worktree import WorktreeError, WorktreeManager
 
+if TYPE_CHECKING:
+    # Local-only at runtime (see tick()'s inline import) — self_heal.py
+    # imports this module, so a module-level import here would cycle.
+    from atlas.self_heal import SelfHealResult
+
 _logger = logging.getLogger("atlas.loop")
 
 _WORKFLOW_NAME = "loop_dev"
 
 
 class AbortedRunError(Exception):
-    """Raised when a loop_dev run completes with a non-success RunResult.status."""
+    """Raised when a loop_dev run completes with a non-success RunResult.status.
+
+    ``worktree_path``, when set, points at the worktree the failed run left
+    behind (never cleaned up by ``run_one_shot`` on any failure path — that
+    has always been true, not new in Phase L3) so ``self_heal.handle_failure``
+    can read its diff to build a diagnosis without re-deriving the path.
+
+    ``run_id``, when set, is the plumb run_id of the failed dispatch itself —
+    tick()'s self-heal wiring (T-L3.7) anchors the diagnosis/retry child run
+    to this, not the earlier triage run_id.
+    """
+
+    def __init__(
+        self, message: str, *, worktree_path: Path | None = None, run_id: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.worktree_path = worktree_path
+        self.run_id = run_id
+
+
+class JudgeGateFailedError(AbortedRunError):
+    """Raised when judge_gate.score_diff() returns passed=False (T-L3.4).
+
+    Carries the JudgeGateResult so self_heal.handle_failure can build the
+    retry diagnosis without re-scoring. Inherits AbortedRunError's
+    worktree_path/run_id so the same recovery path works for both.
+    """
+
+    def __init__(
+        self,
+        result: judge_gate.JudgeGateResult,
+        *,
+        worktree_path: Path | None,
+        run_id: str | None,
+    ) -> None:
+        super().__init__(
+            f"judge gate failed: value_numeric={result.value_numeric:.2f} "
+            f"rationale={result.rationale!r}",
+            worktree_path=worktree_path,
+            run_id=run_id,
+        )
+        self.result = result
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +131,17 @@ _SCOPE_PREAMBLE = (
 )
 
 
-def build_issue_prompt(issue: Issue) -> str:
-    return f"{issue.title}\n\n{issue.body}\n\n{_SCOPE_PREAMBLE}"
+def build_issue_prompt(issue: Issue, *, diagnosis: str | None = None) -> str:
+    """Title, body, an optional prior-failure diagnosis (T-L3.5), then the
+    scope preamble — in that order. ``diagnosis`` sits between the issue's
+    own text and the preamble so the preamble's scope constraint still
+    applies last and is not diluted or overridden by anything above it
+    (Security Considerations, TRD-v3 §14 Phase L3)."""
+    parts = [issue.title, issue.body]
+    if diagnosis is not None:
+        parts.append(f"Prior attempt failed. Diagnosis: {diagnosis}\nAddress this specifically.")
+    parts.append(_SCOPE_PREAMBLE)
+    return "\n\n".join(parts)
 
 
 def _slugify(text: str) -> str:
@@ -95,6 +150,12 @@ def _slugify(text: str) -> str:
 
 
 def _engine_for_issue(issue: Issue) -> str | None:
+    # Router v1 seam: an explicit engine:* label always wins today. TRD-v3
+    # §14 Phase L3 names a stretch goal — when no label is present, consult
+    # plumb run stats for the engine/workflow that scores best for this
+    # issue's task class and prefer it over cfg.default_backend — but this
+    # is NOT implemented (Pending Decision #4: no defined "task class"
+    # taxonomy exists yet). See docs/1_product_and_research/BACKLOG.md.
     if "engine:codex" in issue.labels:
         return "codex"
     if "engine:claude" in issue.labels:
@@ -111,9 +172,30 @@ def current_gh_user() -> str:
 # ---------------------------------------------------------------------------
 
 
-def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, str, float]:
+def run_one_shot(
+    issue: Issue,
+    cfg: Config,
+    *,
+    repo_root: Path,
+    parent_run_id: str | None = None,
+    diagnosis: str | None = None,
+) -> tuple[PrRef, str, float]:
+    """Dispatch one quick-lane run and deliver its PR.
+
+    ``parent_run_id``/``diagnosis`` are additive, keyword-only (T-L3.5): when
+    omitted, behavior is byte-identical to pre-L3. When ``parent_run_id`` is
+    set, this call is a self-heal retry — the plumb child-run handoff
+    (``reopen_run``) happens right after ``pipeline.start()`` and before
+    ``run_to_completion()`` so every span the retry produces lands under the
+    child run_id from the start, mirroring ``sync_prior_prs()``'s own
+    reopen-then-write ordering. ``ctx.run_id`` (used for local bookkeeping —
+    tasks.md, worktree naming) is unaffected by the handoff and stays the
+    id this call's own ``pipeline.start()`` opened; the plumb-side active run
+    changes underneath it, which is fine because every write after the
+    handoff goes through ``pipeline.plumb``, not through ``ctx.run_id``.
+    """
     engine = _engine_for_issue(issue)
-    prompt_context = build_issue_prompt(issue)
+    prompt_context = build_issue_prompt(issue, diagnosis=diagnosis)
     # Pinned before dispatch so a post-run comparison can catch an agent that
     # committed into the operator's checkout instead of its worktree.
     repo_head_before = _head_sha(repo_root)
@@ -128,17 +210,26 @@ def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, 
         loop_mode=True,
     )
     ctx = pipeline.start(task=prompt_context, slug=_slugify(issue.title))
+    if parent_run_id is not None:
+        pipeline.plumb.reopen_run(parent_run_id)
     try:
         result: RunResult = pipeline.run_to_completion(ctx)
     except AbortedError as exc:
-        raise AbortedRunError(f"loop_dev run for issue #{issue.number} aborted: {exc}") from exc
+        raise AbortedRunError(
+            f"loop_dev run for issue #{issue.number} aborted: {exc}", run_id=ctx.run_id
+        ) from exc
 
     if result.status != "success":
-        raise AbortedRunError(f"loop_dev run {result.ctx.run_id} ended with status={result.status}")
+        raise AbortedRunError(
+            f"loop_dev run {result.ctx.run_id} ended with status={result.status}",
+            worktree_path=result.ctx.worktree_path,
+            run_id=result.ctx.run_id,
+        )
 
     if result.ctx.worktree_path is None:
         raise AbortedRunError(
-            f"loop_dev run {result.ctx.run_id} succeeded but produced no worktree_path"
+            f"loop_dev run {result.ctx.run_id} succeeded but produced no worktree_path",
+            run_id=result.ctx.run_id,
         )
 
     worktree = WorktreeManager(repo_root)
@@ -154,6 +245,41 @@ def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, 
         require_changes=False,
     )
     _assert_branch_has_commits(result.ctx.worktree_path)
+
+    # Pre-PR judge gate (T-L3.4, TRD-v3 §13 #10) — scored after the branch is
+    # confirmed ahead of main (so the diff is non-empty by construction) and
+    # before delivery. Fails OPEN when the judge is unconfigured (Pending
+    # Decision #5): an operator who hasn't set PLUMB_JUDGE_PROVIDER gets L2's
+    # un-gated behavior, not a stalled loop.
+    diff_text = _read_worktree_diff(result.ctx.worktree_path)
+    judge_span_id = pipeline.plumb.record_span(
+        run_id=result.ctx.run_id,
+        kind="llm",
+        name="task_completion_gate",
+        status="success",
+        latency_ms=0.0,
+        error_type=None,
+    )
+    try:
+        gate: judge_gate.JudgeGateResult | None = judge_gate.score_diff(
+            diff_text=diff_text,
+            run_id=result.ctx.run_id,
+            span_id=judge_span_id,
+            model=cfg.model,
+        )
+    except judge_gate.JudgeUnavailableError as exc:
+        _logger.warning("judge gate unavailable, failing open (delivering anyway): %s", exc)
+        gate = None
+
+    if gate is not None and not gate.passed:
+        # Worktree is deliberately NOT cleaned up here — self_heal needs the
+        # diff on disk to build its diagnosis; cleanup happens after it's
+        # done with it. run_one_shot has never cleaned up on any other
+        # failure path either (orphan sweep handles it), so this adds no new
+        # gap.
+        raise JudgeGateFailedError(
+            gate, worktree_path=result.ctx.worktree_path, run_id=result.ctx.run_id
+        )
 
     deliverer = GhPrDeliverer(repo_root=repo_root, worktree=worktree)
     branch = f"atlas/{ctx.slug}-{result.ctx.run_id[:8]}"
@@ -216,6 +342,26 @@ def _commit_all(worktree_path: Path, *, message: str, require_changes: bool = Tr
         raise WorktreeError(
             f"git commit failed (exit {commit.returncode}): {commit.stderr.strip()}"
         )
+
+
+def _read_worktree_diff(worktree_path: Path, *, base_branch: str = "main") -> str:
+    """Return ``git diff <base_branch>`` output for the judge gate (T-L3.4).
+
+    Called after ``_assert_branch_has_commits`` has already confirmed the
+    branch is ahead of ``base_branch``, so a non-empty diff is expected —
+    but not re-asserted here; an empty result is passed to the judge as-is
+    (Pending Decision #7 — not special-cased in this phase).
+    """
+    result = subprocess.run(
+        ["git", "diff", base_branch],
+        cwd=worktree_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise WorktreeError(f"git diff failed (exit {result.returncode}): {result.stderr.strip()}")
+    return result.stdout
 
 
 def _assert_branch_has_commits(worktree_path: Path, *, base_branch: str = "main") -> None:
@@ -303,7 +449,12 @@ def _cleanup_quietly(worktree: WorktreeManager, worktree_path: Path) -> None:
 
 
 def run_planned_first_pass(
-    issue: Issue, cfg: Config, *, repo_root: Path
+    issue: Issue,
+    cfg: Config,
+    *,
+    repo_root: Path,
+    parent_run_id: str | None = None,
+    diagnosis: str | None = None,
 ) -> tuple[PrRef, str, float]:
     """Planned lane, first-pass-only (Decision #2): produce the TRS triad via
     dev-docs-be, open a plan-only PR, stop. No code_gen dispatch this tick.
@@ -313,11 +464,19 @@ def run_planned_first_pass(
     commit the triad, then deliver. Running dev-docs-be against ``repo_root``
     and creating the worktree afterwards would write the triad into the main
     working tree and push a branch with zero commits ahead of main.
+
+    ``parent_run_id``/``diagnosis`` are additive, keyword-only (T-L3.6): this
+    lane owns its ``PlumbIO`` directly (it bypasses ``Pipeline`` entirely),
+    so the child-run handoff is a straight ``reopen_run`` instead of
+    ``open_run`` — no ``pipeline.plumb`` indirection needed here.
     """
-    prompt_context = build_issue_prompt(issue)
+    prompt_context = build_issue_prompt(issue, diagnosis=diagnosis)
 
     plumb = PlumbIO(real=True)
-    run_id = plumb.open_run(task=prompt_context)
+    if parent_run_id is not None:
+        run_id = plumb.reopen_run(parent_run_id)
+    else:
+        run_id = plumb.open_run(task=prompt_context)
     ctx_slug = _slugify(issue.title)
     repo_head_before = _head_sha(repo_root)
 
@@ -326,7 +485,7 @@ def run_planned_first_pass(
         backend = make_backend(engine)
     except UnknownBackendError as exc:
         plumb.close_run(run_id=run_id, status="failure")
-        raise AbortedRunError(f"planned-lane dispatch failed: {exc}") from exc
+        raise AbortedRunError(f"planned-lane dispatch failed: {exc}", run_id=run_id) from exc
 
     worktree = WorktreeManager(repo_root)
     try:
@@ -392,7 +551,9 @@ def run_planned_first_pass(
     if status != "success":
         plumb.close_run(run_id=run_id, status="failure")
         _cleanup_quietly(worktree, wt_path)
-        raise AbortedRunError(f"planned-lane dev-docs-be dispatch failed: {output_text}")
+        raise AbortedRunError(
+            f"planned-lane dev-docs-be dispatch failed: {output_text}", run_id=run_id
+        )
 
     try:
         # require_changes=False for the same reason as the quick lane: if
@@ -591,7 +752,60 @@ def tick(cfg: Config, state: LoopState, *, repos: list[str], repo_root: Path) ->
             detail="ok",
         )
 
-    except (DeliveryError, GhCliError, AbortedRunError, WorktreeError) as exc:
+    except AbortedRunError as exc:
+        # Diagnosis-injected single retry (T-L3.7, TRD-v3 §13 #9) — replaces
+        # L2's bare "leave atlas:working for manual triage" for this specific
+        # exception type. DeliveryError/GhCliError/WorktreeError (below) are
+        # infrastructure failures, not agent-diagnosable ones, and keep L2's
+        # original handling unchanged.
+        from atlas import self_heal  # local import: self_heal imports loop
+
+        heal = self_heal.handle_failure(
+            issue,
+            exc,
+            cfg,
+            repo_root=repo_root,
+            original_run_id=exc.run_id or run_id_for_triage,
+            diff_text=_read_diff_for_diagnosis(exc),
+            lane=triage_result.lane,
+        )
+
+        if heal.outcome == "retried_success":
+            assert heal.pr_ref is not None and heal.run_id is not None
+            # Exact same shape as a first-try success (operator-visible
+            # parity) — comment + record_tick_outcome, no relabel (the issue
+            # stays atlas:working until sync_prior_prs sees the PR merge,
+            # same as any other successful dispatch).
+            queue_gh.comment(issue, body=_format_run_summary(heal.run_id, heal.pr_ref))
+            record_tick_outcome(state, cfg.loop, made_progress=True, error_signature=None)
+            state.runs_today += 1
+            state.dollars_today += heal.cost
+            state.last_tick_at = _now_iso()
+            state.persist(repo_root)
+            return TickResult(
+                action="dispatched",
+                issue_number=issue.number,
+                lane=triage_result.lane,
+                pr_ref=heal.pr_ref,
+                detail="ok (retried)",
+            )
+
+        queue_gh.relabel(issue, state="blocked")
+        queue_gh.comment(issue, body=_format_blocked_comment(exc, heal))
+        record_tick_outcome(
+            state, cfg.loop, made_progress=False, error_signature=_error_signature(exc)
+        )
+        state.last_tick_at = _now_iso()
+        state.persist(repo_root)
+        return TickResult(
+            action="failed",
+            issue_number=issue.number,
+            lane=triage_result.lane,
+            pr_ref=None,
+            detail=heal.detail,
+        )
+
+    except (DeliveryError, GhCliError, WorktreeError) as exc:
         queue_gh.comment(
             issue,
             body=f"loop_dev run failed: {exc}. Left atlas:working for manual triage.",
@@ -633,6 +847,38 @@ def _format_run_summary(run_id: str, pr_ref: PrRef) -> str:
     # No cost line: per-run cost is unavailable until plumb P1-a (TRD-v3
     # §3.6). Add one here when run_one_shot returns a real figure.
     return f"atlas loop dispatched this issue.\n\nplumb run_id: `{run_id}`\nPR: {pr_ref.url}"
+
+
+def _read_diff_for_diagnosis(exc: AbortedRunError) -> str | None:
+    """Best-effort diff read for self_heal's diagnosis (T-L3.7).
+
+    None when the failed run left no worktree behind (a dispatch failure
+    before code_gen ran, or the planned lane's own cleanup-on-failure) —
+    self_heal falls back to the issue body in that case.
+    """
+    if exc.worktree_path is None:
+        return None
+    try:
+        return _read_worktree_diff(exc.worktree_path)
+    except WorktreeError as read_exc:
+        _logger.warning("could not read worktree diff for diagnosis: %s", read_exc)
+        return None
+
+
+def _format_blocked_comment(exc: AbortedRunError, heal: SelfHealResult) -> str:
+    """Comment body for atlas:blocked (T-L3.7) — names the failure mode and
+    both run_ids where applicable (TRD-v3 §14 Security: "atlas:blocked is a
+    fail-safe state, not a fail-silent one")."""
+    lines = [f"atlas loop could not deliver this issue: {heal.detail}"]
+    if exc.run_id is not None:
+        lines.append(f"original plumb run_id: `{exc.run_id}`")
+    if heal.run_id is not None:
+        lines.append(f"retry plumb run_id: `{heal.run_id}`")
+    if heal.classification is not None:
+        lines.append(
+            f"failure mode: `{heal.classification.mode}` — {heal.classification.rationale}"
+        )
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +1015,7 @@ def _sweep_orphaned_worktrees(repo_root: Path, *, ignore_current_run: bool = Fal
 
 __all__ = [
     "AbortedRunError",
+    "JudgeGateFailedError",
     # Re-exported from loop_budget for backwards compatibility.
     "LoopState",
     "TickResult",

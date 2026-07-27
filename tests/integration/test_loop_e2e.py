@@ -543,3 +543,78 @@ def test_zero_touch_smoke_faked(tmp_path: Path) -> None:
 
     comment_body = comment_mock.call_args.kwargs["body"]
     assert "plumb run_id" in comment_body
+
+
+# ---------------------------------------------------------------------------
+# Retry-cap invariant (T-L3.8, TRD-v3 §13 #9) — its own dedicated test, not
+# incidental coverage, mirroring L2's own precedent of a named test for a
+# safety property (e.g. Deliverer "never pushes main").
+# ---------------------------------------------------------------------------
+
+
+def test_retry_cap_doubly_failing_issue_dispatches_exactly_twice(tmp_path: Path) -> None:
+    """A doubly-failing issue must be dispatched exactly twice — 1 original
+    + 1 retry, never 3+ — regardless of how many further ticks run against
+    the now-atlas:blocked issue. gh and the pipeline dispatch are faked;
+    what's under test is tick()/self_heal's own retry-cap control flow, not
+    the pipeline internals (already covered by test_one_shot_lane_end_to_end
+    _faked and judge_gate's/self_heal's own unit tests)."""
+    repo_root = _init_repo(tmp_path / "repo")
+    cfg = _cfg(repo_root)
+    state = loop.LoopState(day=loop._today())
+    issue = _issue(number=77, labels=frozenset({"wf:quick"}))
+
+    dispatch_calls: list[str | None] = []
+
+    def _always_fails(
+        _issue_arg: Issue, _cfg_arg: Config, *, repo_root: Path, **kwargs: object
+    ) -> tuple[object, str, float]:
+        dispatch_calls.append(kwargs.get("parent_run_id"))  # type: ignore[arg-type]
+        raise loop.AbortedRunError("verify failed", run_id=f"run-{len(dispatch_calls)}")
+
+    from atlas.judge_gate import FailureClassification
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        # First tick(): the issue is ready. After it's blocked, a real
+        # `gh issue list --label atlas:ready` query would no longer return
+        # it — asserted here by construction, not assumed, via a second
+        # list_ready call returning empty.
+        patch("atlas.queue_gh.list_ready", side_effect=[[issue], []]),
+        patch("atlas.loop.current_gh_user", return_value="anant"),
+        patch("atlas.queue_gh.claim"),
+        # Two separate patch targets, not one: self_heal.py did `from
+        # atlas.loop import run_one_shot` / `from atlas.judge_gate import
+        # classify_failure`, which binds its own names at first import —
+        # patching atlas.loop.run_one_shot alone would not reach the retry
+        # call self_heal makes through its own bound name (and vice versa
+        # for classify_failure), so both call sites need their own patch.
+        patch("atlas.loop.run_one_shot", side_effect=_always_fails) as run_mock,
+        patch("atlas.self_heal.run_one_shot", side_effect=_always_fails) as retry_mock,
+        patch(
+            "atlas.self_heal.classify_failure",
+            return_value=FailureClassification(
+                mode="wrong_approach", rationale="retry once", retryable=True
+            ),
+        ),
+        patch("atlas.queue_gh.comment"),
+        patch("atlas.queue_gh.relabel") as relabel_mock,
+    ):
+        first = loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+        second = loop.tick(cfg, state, repos=[_REPO], repo_root=repo_root)
+
+    # Exactly 2 dispatch attempts total: the original call (no parent_run_id)
+    # and the one retry (parent_run_id set) — never a 3rd, even though tick()
+    # ran twice.
+    assert run_mock.call_count == 1
+    assert retry_mock.call_count == 1
+    assert len(dispatch_calls) == 2
+    assert dispatch_calls[0] is None
+    assert dispatch_calls[1] == "run-1"
+
+    assert first.action == "failed"
+    relabel_mock.assert_called_once_with(issue, state="blocked")
+
+    # Second tick() found nothing ready (the blocked issue was excluded by
+    # the atlas:ready-label query) and dispatched nothing further.
+    assert second.action == "idle"

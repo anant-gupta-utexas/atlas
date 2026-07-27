@@ -125,6 +125,15 @@ Gate score metric names are namespaced by workflow: `dev` workflow uses bare nam
 
 `plumb run stats` shows atlas run history. `plumb example promote` turns gate rejections into regression test cases.
 
+### Judge gate (loop mode, Phase L3)
+
+The loop daemon's pre-PR judge gate and diagnosis-injected retry (`src/atlas/judge_gate.py`) call `plumb.adapters.get_judge_adapter` directly — the library `JudgeAdapter` API, not the batch `plumb judge run` CLI (that CLI only scores already-persisted runs; the gate needs a synchronous score before a run's PR opens). This requires:
+
+- `PLUMB_JUDGE_PROVIDER` (`anthropic` or `openai_compat`) plus its provider's credentials, exactly as documented in plumb's own judge setup.
+- Two prompt files copied into `$PLUMB_DATA_DIR/judge_prompts/` (default `~/.plumb/judge_prompts/`): [`task_completion.md`](./judge_prompts/task_completion.md) and [`failure_mode.md`](./judge_prompts/failure_mode.md). Both files in this repo are documentation examples only — plumb does not load them automatically; copy them over before running `atlas loop`.
+
+Without a configured provider, the gate call fails open (delivers the PR anyway, matching "errors surface, don't hang") while the failure-mode classifier fails to `not_retryable` (an unclassified failure should not blind-retry) — see TRD-v3 §14 Phase L3 Pending Decision #5.
+
 ---
 
 ## Configuration

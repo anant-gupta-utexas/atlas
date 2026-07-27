@@ -85,6 +85,22 @@ Each phase below is detailed into its own per-phase TRS via `dev-docs-be`.
 - [ ] **Phase L3 — self-healing + routing** *(→ v3.2)*. Pre-PR plumb judge gate;
       diagnosis-injected single child-run retry (`parent_run_id`); failed runs
       → plumb examples; score-informed engine/workflow routing (stretch).
+- [ ] **Router v1 (TRD-v3 §14 Phase L3, stretch — not built this phase).**
+      Prefer the engine/workflow that scores better in plumb for the task
+      class, at the seam named in `loop.py::_engine_for_issue`. Needs a
+      defined "task class" taxonomy the codebase doesn't have yet — non-
+      trivial, and explicitly out of Phase L3's committed §13 exit criteria
+      (only #9 diagnosis-injected retry and #10 the judge gate are). Distinct
+      from the `extract_cost`/`max_dollars_per_day` enforcement gap below —
+      Router v1 needs *historical* plumb run stats to route by, while
+      `extract_cost` is about capturing *current*-run spend; the two don't
+      block each other. *(from Phase L3 TRS, T-L3.9, Pending Decision #4)*
+- [ ] **`extract_cost` / real `max_dollars_per_day` enforcement.** The judge
+      gate's two new per-run judge calls (Phase L3) are intended to count
+      toward `max_dollars_per_day` the same way the triage classifier's cost
+      already does (L2 Decision #17) — wired mechanically but not yet
+      enforceable end-to-end, same pre-existing gap, not Phase L3's to fix.
+      *(from Phase L3 TRS, T-L3.9)*
 - [ ] **Phase L4 — scale-out** *(→ v3.3)*. Second target repo (plumb backlog);
       `concurrency > 1` (lift the `.atlas/current-run` single-run assumption via
       per-run state keys); weekly cost-per-landed-PR report.

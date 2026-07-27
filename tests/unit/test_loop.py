@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from atlas import loop, loop_budget
+from atlas import judge_gate, loop, loop_budget
 from atlas.config import Config, LoopConfig
 from atlas.deliverer import DeliveryError, PrRef
 from atlas.queue_gh import Issue, PrStatus
@@ -293,6 +293,10 @@ def test_tick_claims_before_dispatch(tmp_path: Path) -> None:
 
 
 def test_tick_failed_run_no_pr_but_comments(tmp_path: Path) -> None:
+    """AbortedRunError now routes through self_heal (T-L3.7); with no judge
+    provider configured, classify_failure fails to not_retryable (Pending
+    Decision #5) and the issue is relabeled atlas:blocked rather than left
+    silently atlas:working (L2's old behavior for this exception type)."""
     cfg = _cfg(tmp_path)
     state = _state()
     issue = _issue(labels=frozenset({"wf:quick"}))
@@ -304,6 +308,7 @@ def test_tick_failed_run_no_pr_but_comments(tmp_path: Path) -> None:
         patch("atlas.queue_gh.claim"),
         patch("atlas.loop.run_one_shot", side_effect=loop.AbortedRunError("boom")),
         patch("atlas.queue_gh.comment") as comment_mock,
+        patch("atlas.queue_gh.relabel") as relabel_mock,
     ):
         result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
 
@@ -311,9 +316,10 @@ def test_tick_failed_run_no_pr_but_comments(tmp_path: Path) -> None:
     # counting dispatches by action must not over-count (I1).
     assert result.action == "failed"
     assert result.pr_ref is None
-    assert "boom" in result.detail
+    assert "judge unavailable" in result.detail
+    relabel_mock.assert_called_once_with(issue, state="blocked")
     comment_mock.assert_called_once()
-    assert "failed" in comment_mock.call_args.kwargs["body"]
+    assert "judge unavailable" in comment_mock.call_args.kwargs["body"]
 
 
 def test_tick_delivery_failure_leaves_issue_working_no_crash(tmp_path: Path) -> None:
@@ -334,6 +340,121 @@ def test_tick_delivery_failure_leaves_issue_working_no_crash(tmp_path: Path) -> 
     assert result.action == "failed"
     assert result.pr_ref is None
     comment_mock.assert_called_once()
+
+
+def test_tick_retried_success_matches_first_try_success_shape(tmp_path: Path) -> None:
+    """retried_success must produce the same TickResult/label/comment shape
+    as a first-try success (T-L3.7 acceptance: operator-visible parity) —
+    action='dispatched', no relabel call, a run-summary comment."""
+    import atlas.self_heal as self_heal_module
+
+    cfg = _cfg(tmp_path)
+    state = _state()
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    pr_ref = PrRef(number=42, url="https://example.com/pulls/42")
+    heal_result = self_heal_module.SelfHealResult(
+        outcome="retried_success",
+        pr_ref=pr_ref,
+        run_id="child-run",
+        classification=None,
+        detail="retried",
+        cost=0.75,
+    )
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready", return_value=issue),
+        patch("atlas.loop.current_gh_user", return_value="anant"),
+        patch("atlas.queue_gh.claim"),
+        patch("atlas.loop.run_one_shot", side_effect=loop.AbortedRunError("boom")),
+        patch("atlas.self_heal.handle_failure", return_value=heal_result),
+        patch("atlas.queue_gh.comment") as comment_mock,
+        patch("atlas.queue_gh.relabel") as relabel_mock,
+    ):
+        result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert result.action == "dispatched"
+    assert result.pr_ref == pr_ref
+    relabel_mock.assert_not_called()
+    comment_mock.assert_called_once()
+    assert "child-run" in comment_mock.call_args.kwargs["body"]
+    assert state.dollars_today == pytest.approx(0.75)
+    assert state.runs_today == 1
+
+
+def test_tick_blocked_comment_names_mode_and_both_run_ids(tmp_path: Path) -> None:
+    import atlas.self_heal as self_heal_module
+    from atlas.judge_gate import FailureClassification
+
+    cfg = _cfg(tmp_path)
+    state = _state()
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    classification = FailureClassification(
+        mode="wrong_approach", rationale="tried the wrong file", retryable=True
+    )
+    heal_result = self_heal_module.SelfHealResult(
+        outcome="retried_failed",
+        pr_ref=None,
+        run_id="retry-run-id",
+        classification=classification,
+        detail="retry failed: still broken",
+    )
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready", return_value=issue),
+        patch("atlas.loop.current_gh_user", return_value="anant"),
+        patch("atlas.queue_gh.claim"),
+        patch(
+            "atlas.loop.run_one_shot",
+            side_effect=loop.AbortedRunError("boom", run_id="original-run-id"),
+        ),
+        patch("atlas.self_heal.handle_failure", return_value=heal_result),
+        patch("atlas.queue_gh.comment") as comment_mock,
+        patch("atlas.queue_gh.relabel") as relabel_mock,
+    ):
+        result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert result.action == "failed"
+    relabel_mock.assert_called_once_with(issue, state="blocked")
+    comment_mock.assert_called_once()
+    body = comment_mock.call_args.kwargs["body"]
+    assert "wrong_approach" in body
+    assert "original-run-id" in body
+    assert "retry-run-id" in body
+
+
+def test_tick_records_outcome_on_retry_branches(tmp_path: Path) -> None:
+    """record_tick_outcome must fire on every self-heal branch — existing
+    L2 budget/breaker bookkeeping must not regress (T-L3.7 acceptance)."""
+    import atlas.self_heal as self_heal_module
+
+    cfg = _cfg(tmp_path, no_progress_limit=1, identical_error_limit=100)
+    state = _state()
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    heal_result = self_heal_module.SelfHealResult(
+        outcome="not_retryable",
+        pr_ref=None,
+        run_id=None,
+        classification=None,
+        detail="infeasible",
+    )
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready", return_value=issue),
+        patch("atlas.loop.current_gh_user", return_value="anant"),
+        patch("atlas.queue_gh.claim"),
+        patch("atlas.loop.run_one_shot", side_effect=loop.AbortedRunError("boom")),
+        patch("atlas.self_heal.handle_failure", return_value=heal_result),
+        patch("atlas.queue_gh.comment"),
+        patch("atlas.queue_gh.relabel"),
+    ):
+        loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    # no_progress_limit=1 means a single made_progress=False call opens the
+    # breaker — proves record_tick_outcome actually ran on this branch.
+    assert loop.breaker_open(state, cfg.loop)
 
 
 def test_trusted_authors_empty_means_no_check(tmp_path: Path) -> None:
@@ -760,6 +881,7 @@ def test_run_one_shot_returns_engine_reported_cost(tmp_path: Path) -> None:
         # these tests are about the cost value run_one_shot returns.
         patch("atlas.loop._commit_all"),
         patch("atlas.loop._assert_branch_has_commits"),
+        patch("atlas.loop._read_worktree_diff", return_value="diff --git a b"),
         patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=7, url="u")),
     ):
         _pr, _run_id, cost = loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
@@ -795,6 +917,7 @@ def test_run_one_shot_reports_zero_when_engine_reports_no_cost(tmp_path: Path) -
         # these tests are about the cost value run_one_shot returns.
         patch("atlas.loop._commit_all"),
         patch("atlas.loop._assert_branch_has_commits"),
+        patch("atlas.loop._read_worktree_diff", return_value="diff --git a b"),
         patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=8, url="u")),
     ):
         _pr, _run_id, cost = loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
@@ -832,11 +955,158 @@ def test_run_one_shot_dispatches_in_loop_mode(tmp_path: Path) -> None:
         patch("atlas.loop.GhPrDeliverer"),
         patch("atlas.loop._commit_all"),
         patch("atlas.loop._assert_branch_has_commits"),
+        patch("atlas.loop._read_worktree_diff", return_value="diff --git a b"),
         patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=9, url="u")),
     ):
         loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
 
     assert mk.call_args.kwargs["loop_mode"] is True
+
+
+# ---------------------------------------------------------------------------
+# Judge gate (T-L3.4) + parent_run_id/diagnosis (T-L3.5)
+# ---------------------------------------------------------------------------
+
+
+def _pipeline_mock(tmp_path: Path, *, run_id: str = "u" * 32) -> tuple[MagicMock, object]:
+    from atlas.orchestrator import RunContext, RunResult
+
+    ctx = RunContext(run_id=run_id, slug="fix-bug", task="t", repo_root=tmp_path)
+    finished = RunContext(
+        run_id=run_id,
+        slug=ctx.slug,
+        task=ctx.task,
+        repo_root=tmp_path,
+        worktree_path=tmp_path / "wt",
+    )
+    pipeline = MagicMock()
+    pipeline.start.return_value = ctx
+    pipeline.run_to_completion.return_value = RunResult(
+        ctx=finished, status="success", dollar_cost=0.1
+    )
+    return pipeline, ctx
+
+
+def test_judge_gate_below_threshold_blocks_delivery_not_cleanup(tmp_path: Path) -> None:
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    pipeline, _ctx = _pipeline_mock(tmp_path)
+    gate_result = judge_gate.JudgeGateResult(
+        passed=False, value_numeric=0.3, rationale="incomplete", scorer_version="v1"
+    )
+
+    with (
+        patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
+        patch("atlas.loop.WorktreeManager") as wt_mgr_cls,
+        patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.loop._commit_all"),
+        patch("atlas.loop._assert_branch_has_commits"),
+        patch("atlas.loop._read_worktree_diff", return_value="diff --git a b"),
+        patch("atlas.judge_gate.score_diff", return_value=gate_result),
+        patch("atlas.queue_gh.deliver_pr") as deliver_mock,
+    ):
+        with pytest.raises(loop.JudgeGateFailedError) as excinfo:
+            loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
+
+    deliver_mock.assert_not_called()
+    assert excinfo.value.result is gate_result
+    # Worktree cleanup is never called on this path — self_heal still needs
+    # the diff on disk.
+    wt_mgr_cls.return_value.cleanup.assert_not_called()
+
+
+def test_judge_gate_passing_score_delivers_as_before(tmp_path: Path) -> None:
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    pipeline, _ctx = _pipeline_mock(tmp_path)
+    gate_result = judge_gate.JudgeGateResult(
+        passed=True, value_numeric=0.9, rationale="good", scorer_version="v1"
+    )
+
+    with (
+        patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
+        patch("atlas.loop.WorktreeManager"),
+        patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.loop._commit_all"),
+        patch("atlas.loop._assert_branch_has_commits"),
+        patch("atlas.loop._read_worktree_diff", return_value="diff --git a b"),
+        patch("atlas.judge_gate.score_diff", return_value=gate_result) as score_mock,
+        patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=10, url="u")) as deliver_mock,
+    ):
+        pr_ref, _run_id, _cost = loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
+
+    score_mock.assert_called_once()
+    deliver_mock.assert_called_once()
+    assert pr_ref.number == 10
+
+
+def test_parent_run_id_triggers_reopen_run(tmp_path: Path) -> None:
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    pipeline, _ctx = _pipeline_mock(tmp_path)
+
+    with (
+        patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
+        patch("atlas.loop.WorktreeManager"),
+        patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.loop._commit_all"),
+        patch("atlas.loop._assert_branch_has_commits"),
+        patch("atlas.loop._read_worktree_diff", return_value="diff --git a b"),
+        patch(
+            "atlas.judge_gate.score_diff",
+            return_value=judge_gate.JudgeGateResult(
+                passed=True, value_numeric=0.9, rationale="ok", scorer_version="v1"
+            ),
+        ),
+        patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=11, url="u")),
+    ):
+        loop.run_one_shot(
+            issue, _cfg(tmp_path), repo_root=tmp_path, parent_run_id="p" * 32
+        )
+
+    pipeline.plumb.reopen_run.assert_called_once_with("p" * 32)
+    # reopen_run must happen before run_to_completion (child-run handoff
+    # BEFORE the pipeline runs, so every span lands under the child).
+    call_names = [c[0] for c in pipeline.mock_calls]
+    assert call_names.index("plumb.reopen_run") < call_names.index("run_to_completion")
+
+
+def test_no_parent_run_id_never_calls_reopen_run(tmp_path: Path) -> None:
+    """Regression guard: the pre-L3 call shape must not touch reopen_run at all."""
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    pipeline, _ctx = _pipeline_mock(tmp_path)
+
+    with (
+        patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
+        patch("atlas.loop.WorktreeManager"),
+        patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.loop._commit_all"),
+        patch("atlas.loop._assert_branch_has_commits"),
+        patch("atlas.loop._read_worktree_diff", return_value="diff --git a b"),
+        patch(
+            "atlas.judge_gate.score_diff",
+            return_value=judge_gate.JudgeGateResult(
+                passed=True, value_numeric=0.9, rationale="ok", scorer_version="v1"
+            ),
+        ),
+        patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=12, url="u")),
+    ):
+        loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
+
+    pipeline.plumb.reopen_run.assert_not_called()
+
+
+def test_diagnosis_appears_after_issue_body_and_before_scope_preamble() -> None:
+    issue = _issue()
+    prompt = loop.build_issue_prompt(issue, diagnosis="wrong_approach: tried X, needed Y")
+    body_idx = prompt.index(issue.body)
+    diag_idx = prompt.index("wrong_approach: tried X, needed Y")
+    preamble_idx = prompt.index(loop._SCOPE_PREAMBLE)
+    assert body_idx < diag_idx < preamble_idx
+
+
+def test_no_diagnosis_prompt_byte_identical_to_pre_l3() -> None:
+    issue = _issue()
+    assert loop.build_issue_prompt(issue) == (
+        f"{issue.title}\n\n{issue.body}\n\n{loop._SCOPE_PREAMBLE}"
+    )
 
 
 def test_budget_trips_on_dollars_once_cost_is_real(tmp_path: Path) -> None:
