@@ -647,3 +647,65 @@ def test_telemetry_without_permission_mode_measures_but_does_not_widen(
     assert "--dangerously-skip-permissions" not in argv
     assert outcome.usage is not None
     assert outcome.usage.tokens == (3, 0)
+
+
+def test_loop_mode_dispatches_with_cwd_set_to_the_worktree(tmp_path: Path) -> None:
+    """Unattended runs must actually start inside the worktree.
+
+    Attended runs use cwd=atlas_root so workspace-scoped plugin
+    slash-commands resolve, and the worktree is communicated to the agent
+    only as prose ("Working directory: ..."). For an unattended agent that
+    is not isolation, and T-L2.13 broke on it twice on 2026-07-27: first the
+    agent committed into repo_root, then it read repo_root's already-fixed
+    copy, decided the task was done, and wrote nothing — reporting success
+    both times.
+    """
+    dev_wf = load_workflow_file(_DEV_YAML)
+    research = next(s for s in dev_wf.stages if s.name == "research")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    ctx = RunContext(
+        run_id="7" * 32,
+        slug="s",
+        task="t",
+        repo_root=tmp_path,
+        worktree_path=worktree,
+    )
+
+    attended = SubprocessStageRunner(
+        model="haiku", default_backend="claude", loaded_workflow=dev_wf
+    )
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout="ok")
+        attended.run(ctx=ctx, stage=research)
+    assert mock_run.call_args.kwargs["cwd"] != str(worktree)
+
+    unattended = SubprocessStageRunner(
+        model="haiku",
+        default_backend="claude",
+        loaded_workflow=dev_wf,
+        loop_cwd_is_worktree=True,
+    )
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout="ok")
+        unattended.run(ctx=ctx, stage=research)
+    assert mock_run.call_args.kwargs["cwd"] == str(worktree)
+
+
+def test_loop_mode_without_a_worktree_falls_back_to_atlas_root(tmp_path: Path) -> None:
+    """Non-isolate loop stages (plan, verify) have no worktree yet."""
+    dev_wf = load_workflow_file(_DEV_YAML)
+    research = next(s for s in dev_wf.stages if s.name == "research")
+    ctx = RunContext(run_id="8" * 32, slug="s", task="t", repo_root=tmp_path)
+
+    runner = SubprocessStageRunner(
+        model="haiku",
+        default_backend="claude",
+        loaded_workflow=dev_wf,
+        loop_cwd_is_worktree=True,
+    )
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout="ok")
+        runner.run(ctx=ctx, stage=research)
+    assert mock_run.call_args.kwargs["cwd"]  # resolved, not crashed

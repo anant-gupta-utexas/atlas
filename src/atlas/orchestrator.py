@@ -629,6 +629,7 @@ class SubprocessStageRunner:
         permission_mode: str | None = None,
         backend_override: str | None = None,
         backend_models: dict[str, str] | None = None,
+        loop_cwd_is_worktree: bool = False,
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
@@ -641,6 +642,9 @@ class SubprocessStageRunner:
         # Per-engine model names; `model` above is the Claude one and is not
         # portable across engines. See cli_backend.resolve_model.
         self._backend_models = backend_models or {}
+        # Unattended runs dispatch with cwd set to the worktree rather than
+        # the atlas install root — see the comment at the subprocess.run call.
+        self._loop_cwd_is_worktree = loop_cwd_is_worktree
         self._workflow = loaded_workflow
         # Per-run turn cap, passed through to the backend as --max-turns.
         # None (the default for `atlas run`) leaves the backend's own default
@@ -746,10 +750,26 @@ class SubprocessStageRunner:
             extra_flags=extra_flags,
         )
 
+        # Attended runs keep cwd=atlas_root so workspace-scoped plugin
+        # slash-commands resolve — unchanged, and dev.yaml depends on it.
+        #
+        # Unattended runs cd into the worktree instead. Telling an agent its
+        # working directory in prose while starting it in the operator's own
+        # checkout is not isolation, and T-L2.13 broke on it twice in two
+        # different ways on 2026-07-27: first the agent committed its change
+        # into repo_root (outside the worktree entirely), then — once
+        # repo_root already contained the change and the worktree did not —
+        # it read repo_root, concluded the task was already done, and
+        # returned success having written nothing. Both spans reported
+        # success; both runs delivered nothing.
+        run_cwd = atlas_root
+        if self._loop_cwd_is_worktree and ctx.worktree_path is not None:
+            run_cwd = ctx.worktree_path
+
         try:
             result = subprocess.run(
                 argv,
-                cwd=str(atlas_root),
+                cwd=str(run_cwd),
                 capture_output=True,
                 check=False,
                 timeout=timeout_s,

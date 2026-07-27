@@ -103,6 +103,7 @@ def make_pipeline(
         max_turns=max_turns,
         telemetry_json=loop_mode or telemetry_json,
         permission_mode="acceptEdits" if loop_mode else None,
+        loop_cwd_is_worktree=loop_mode,
     )
     # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
     # CompositeStageRunner is always used so dev.yaml's plain plugin-command
