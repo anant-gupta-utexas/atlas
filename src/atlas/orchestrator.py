@@ -625,7 +625,8 @@ class SubprocessStageRunner:
         default_backend: str = "claude",
         loaded_workflow: object = None,  # LoadedWorkflow | None; typed as object to avoid cycle
         max_turns: int | None = None,
-        loop_mode: bool = False,
+        telemetry_json: bool = False,
+        permission_mode: str | None = None,
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
@@ -637,12 +638,16 @@ class SubprocessStageRunner:
         # in place; the loop daemon sets it from cfg.loop.max_turns so an
         # unattended run can't spin indefinitely.
         self._max_turns = max_turns
-        # Unattended dispatch: request the JSON envelope (the only way any
-        # token/cost telemetry exists at all) and apply TRD-v3 §3.6's headless
-        # permission profile. False for `atlas run`, which keeps attended argv
-        # byte-identical to pre-L0 — see
-        # test_dev_pipeline_unaffected_by_phase_l0.
-        self._loop_mode = loop_mode
+        # Request the JSON envelope — the only way any token/cost telemetry
+        # exists at all. Kept separate from the permission mode on purpose:
+        # `atlas run --telemetry` should be able to *measure* an attended run
+        # without also silently granting acceptEdits to a run a human is
+        # watching. Both default off, so plain `atlas run` argv stays
+        # byte-identical to pre-L0 (test_dev_pipeline_unaffected_by_phase_l0).
+        self._telemetry_json = telemetry_json
+        # TRD-v3 §3.6's headless profile value ("acceptEdits"), set only by the
+        # loop daemon. Never "bypassPermissions".
+        self._permission_mode = permission_mode
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
         from atlas.cli_backend import (
@@ -708,15 +713,15 @@ class SubprocessStageRunner:
         extra_flags: dict[str, str] = {}
         if self._max_turns is not None:
             extra_flags["max_turns"] = str(self._max_turns)
-        if self._loop_mode:
-            # TRD-v3 §3.6: JSON telemetry + acceptEdits, never
-            # --dangerously-skip-permissions. The --allowedTools allowlist is
-            # deliberately NOT passed here — the TRD stores it in the target
-            # repo's checked-in .claude/settings.json, which the CLI reads on
-            # its own, so duplicating it into argv would create a second place
-            # to keep in sync.
+        if self._telemetry_json:
             extra_flags["telemetry"] = "json"
-            extra_flags["permission_mode"] = "acceptEdits"
+        if self._permission_mode:
+            # TRD-v3 §3.6: acceptEdits, never --dangerously-skip-permissions.
+            # The --allowedTools allowlist is deliberately NOT passed here —
+            # the TRD stores it in the target repo's checked-in
+            # .claude/settings.json, which the CLI reads on its own, so
+            # duplicating it into argv would create a second place to sync.
+            extra_flags["permission_mode"] = self._permission_mode
 
         argv = backend.build_argv(
             prompt=prompt,

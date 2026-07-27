@@ -259,12 +259,12 @@ def test_job_workflow_tailor_materials_dispatches_via_claude_backend(
 def test_dev_pipeline_unaffected_by_phase_l0(tmp_path: Path) -> None:
     """Attended dev-pipeline dispatch is provably unaffected by loop mode.
 
-    SubprocessStageRunner defaults to ``loop_mode=False``, so the attended
-    path sets no telemetry or permission flags. This proves the
-    byte-identical-argv claim end to end, not just at the
-    ClaudeCodeBackend.build_argv unit-test level. Its loop-mode counterpart
-    is test_loop_mode_dispatch_requests_telemetry_and_permission_profile —
-    the two together are what keep the profile scoped to unattended runs.
+    ``telemetry_json`` and ``permission_mode`` both default off, so the
+    attended path sets no extra flags. This proves the byte-identical-argv
+    claim end to end, not just at the ClaudeCodeBackend.build_argv unit-test
+    level. Its loop-mode counterpart is
+    test_loop_mode_dispatch_requests_telemetry_and_permission_profile — the
+    two together are what keep the profile scoped to unattended runs.
     """
     dev_wf = load_workflow_file(_DEV_YAML)
     research = next(s for s in dev_wf.stages if s.name == "research")
@@ -311,7 +311,8 @@ def test_loop_mode_dispatch_requests_telemetry_and_permission_profile(tmp_path: 
         default_backend="claude",
         loaded_workflow=dev_wf,
         max_turns=40,
-        loop_mode=True,
+        telemetry_json=True,
+        permission_mode="acceptEdits",
     )
     ctx = RunContext(run_id="f" * 32, slug="test-loop-mode", task="do it", repo_root=tmp_path)
 
@@ -609,3 +610,40 @@ def test_cli_run_and_resume_updated_for_run_result(tmp_path: Path) -> None:
 
     # Mirrors cli.py::run's bare-statement call (no assignment).
     pipeline.run_to_completion(ctx)
+
+
+def test_telemetry_without_permission_mode_measures_but_does_not_widen(
+    tmp_path: Path,
+) -> None:
+    """`atlas run --telemetry` measures an attended run without granting acceptEdits.
+
+    TRD-v3 §13 #1 wants a live attended run whose code_gen span carries real
+    tokens; §13 #2 wants `atlas run` unchanged. Those are only compatible if
+    telemetry is opt-in AND separable from the permission profile — a run a
+    human is watching must not silently gain acceptEdits just because the
+    operator asked for token counts.
+    """
+    dev_wf = load_workflow_file(_DEV_YAML)
+    research = next(s for s in dev_wf.stages if s.name == "research")
+
+    runner = SubprocessStageRunner(
+        model="haiku",
+        default_backend="claude",
+        loaded_workflow=dev_wf,
+        telemetry_json=True,
+    )
+    ctx = RunContext(run_id="9" * 32, slug="measured", task="t", repo_root=tmp_path)
+
+    envelope = json.dumps(
+        [{"type": "result", "subtype": "success", "result": "ok", "usage": {"input_tokens": 3}}]
+    )
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout=envelope)
+        outcome = runner.run(ctx=ctx, stage=research)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert "--permission-mode" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+    assert outcome.usage is not None
+    assert outcome.usage.tokens == (3, 0)

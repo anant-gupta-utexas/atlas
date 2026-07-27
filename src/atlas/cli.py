@@ -86,6 +86,20 @@ def run(
         "--workflow-file",
         help="Literal path to a workflow YAML file. Takes priority over --workflow.",
     ),
+    backend: str = typer.Option(
+        "",
+        "--backend",
+        "-b",
+        help="CLI backend to dispatch with (claude / agy / codex). Overrides "
+        "the configured default; a stage's own `backend:` field still wins.",
+    ),
+    telemetry: bool = typer.Option(
+        False,
+        "--telemetry",
+        help="Request the backend's JSON envelope so token/cost telemetry is "
+        "recorded to plumb. Off by default: it changes the dispatched argv, "
+        "and attended runs are byte-identical to pre-loop-mode without it.",
+    ),
 ) -> None:
     """Start a new atlas pipeline run."""
     repo_root = _find_repo_root()
@@ -101,6 +115,8 @@ def run(
             auto_approve=auto_approve,
             workflow=workflow or None,
             workflow_file=Path(workflow_file) if workflow_file else None,
+            backend_override=backend or None,
+            telemetry_json=telemetry,
         )
     except RoutingDriftError as exc:
         typer.echo(f"Routing fixture mismatch: {exc}", err=True)

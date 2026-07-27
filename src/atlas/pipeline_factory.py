@@ -58,6 +58,7 @@ def make_pipeline(
     backend_override: str | None = None,
     max_turns: int | None = None,
     loop_mode: bool = False,
+    telemetry_json: bool = False,
 ) -> tuple[Pipeline, LastOutcomeRunner]:
     """Construct a Pipeline + recorder exactly as `atlas run` does.
 
@@ -72,10 +73,16 @@ def make_pipeline(
     (a human is watching); the loop daemon passes ``cfg.loop.max_turns`` so
     an unattended run can't spin indefinitely.
 
-    ``loop_mode`` switches CLI dispatch to the unattended profile: the JSON
-    telemetry envelope (the only source of token/cost data) plus TRD-v3
-    §3.6's ``acceptEdits`` permission mode. ``atlas run`` leaves it False,
-    which keeps attended argv byte-identical to pre-L0.
+    ``loop_mode`` switches CLI dispatch to the full unattended profile: the
+    JSON telemetry envelope (the only source of token/cost data) plus TRD-v3
+    §3.6's ``acceptEdits`` permission mode.
+
+    ``telemetry_json`` requests *only* the envelope, without the permission
+    change — this is what ``atlas run --telemetry`` uses. Keeping the two
+    separable is what lets an attended run be measured (TRD-v3 §13 #1)
+    without silently widening permissions on a run a human is watching.
+    Both default off, so plain ``atlas run`` argv stays byte-identical to
+    pre-L0 (§13 #2).
     """
     loaded = resolve_workflow(
         workflow_file=workflow_file, workflow_name=workflow, repo_root=repo_root
@@ -90,7 +97,8 @@ def make_pipeline(
         default_backend=backend_override or cfg.default_backend,
         loaded_workflow=loaded,
         max_turns=max_turns,
-        loop_mode=loop_mode,
+        telemetry_json=loop_mode or telemetry_json,
+        permission_mode="acceptEdits" if loop_mode else None,
     )
     # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
     # CompositeStageRunner is always used so dev.yaml's plain plugin-command
