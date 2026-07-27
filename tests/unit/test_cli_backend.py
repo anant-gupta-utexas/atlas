@@ -26,6 +26,7 @@ from atlas.cli_backend import (
     codex_usage_to_tokens,
     make_backend,
     resolve_backend,
+    resolve_model,
 )
 from atlas.stages import StageSpec
 from atlas.workflow_loader import LoadedWorkflow
@@ -1120,3 +1121,76 @@ def test_no_override_preserves_original_tier_order() -> None:
     )
     assert resolve_backend(stage=_stage(), workflow=None, config_default="codex") == "codex"
     assert resolve_backend(stage=_stage(), workflow=None, config_default=None) == "claude"
+
+
+def test_codex_real_turn_failed_surfaces_readable_reason() -> None:
+    """`turn.failed` exists — and its message must reach the operator.
+
+    Captured live: `codex exec --model haiku` returns HTTP 400 and emits
+    item.completed(type=error) + error + turn.failed, no turn.completed,
+    exit 1. Before this, parse_result returned the whole raw JSONL blob as
+    its error text, so a plain bad-model error looked like a wall of JSON.
+    """
+    stdout = (_REAL_FIXTURES / "turn_failed_real.jsonl").read_text(encoding="utf-8")
+    status, text, error_type = CodexBackend().parse_result(stdout, "", 1)
+
+    assert status == "failure"
+    assert error_type == "codex_nonzero_exit"
+    assert "not supported when using Codex" in text
+    # The raw stream must NOT be dumped verbatim.
+    assert '{"type":"thread.started"' not in text
+
+
+def test_codex_failure_reason_deduplicates_repeated_messages() -> None:
+    """turn.failed usually restates the error event verbatim."""
+    stdout = (_REAL_FIXTURES / "turn_failed_real.jsonl").read_text(encoding="utf-8")
+    _status, text, _err = CodexBackend().parse_result(stdout, "", 1)
+    assert text.count("not supported when using Codex") == 1
+
+
+def test_codex_no_turn_completed_still_reports_reason_on_clean_exit() -> None:
+    """An exit-0 stream with turn.failed must not be read as success."""
+    stdout = (_REAL_FIXTURES / "turn_failed_real.jsonl").read_text(encoding="utf-8")
+    status, text, error_type = CodexBackend().parse_result(stdout, "", 0)
+    assert status == "failure"
+    assert error_type == "codex_no_turn_completed"
+    assert "not supported when using Codex" in text
+
+
+# ---------------------------------------------------------------------------
+# resolve_model — model names are engine-specific (2026-07-26)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_model_does_not_leak_claude_model_to_other_engines() -> None:
+    """Regression: `codex exec --model haiku` is an HTTP 400, not a soft default.
+
+    Config.model is a single global string defaulting to "haiku", a Claude
+    name. Handing it to codex killed every --backend codex run in the plan
+    stage. Non-claude engines get "" and fall back to their own default.
+    """
+    assert resolve_model(backend_name="claude", config_model="haiku") == "haiku"
+    assert resolve_model(backend_name="codex", config_model="haiku") == ""
+    assert resolve_model(backend_name="agy", config_model="haiku") == ""
+
+
+def test_resolve_model_honors_explicit_per_engine_config() -> None:
+    models = {"codex": "gpt-5.1-codex", "agy": "gemini-flash-lite"}
+    assert resolve_model(backend_name="codex", config_model="haiku", backend_models=models) == (
+        "gpt-5.1-codex"
+    )
+    assert resolve_model(backend_name="claude", config_model="haiku", backend_models=models) == (
+        "haiku"
+    )
+
+
+def test_codex_argv_omits_model_flag_when_unresolved() -> None:
+    """The empty model must produce NO --model flag, not `--model ''`."""
+    argv = CodexBackend().build_argv(
+        prompt="p",
+        model=resolve_model(backend_name="codex", config_model="haiku"),
+        add_dirs=[_DIR_A],
+        timeout_s=60,
+        extra_flags={},
+    )
+    assert "--model" not in argv

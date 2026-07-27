@@ -98,6 +98,7 @@ def make_pipeline(
         model=cfg.model,
         default_backend=cfg.default_backend,
         backend_override=backend_override,
+        backend_models=cfg.backend_models,
         loaded_workflow=loaded,
         max_turns=max_turns,
         telemetry_json=loop_mode or telemetry_json,

@@ -35,6 +35,12 @@ class Config:
     timeout_overrides: dict[str, int] = field(default_factory=dict)
     model: str = "haiku"  # default to haiku for cost efficiency
     default_backend: str = "claude"  # from .atlas.toml [backend] default
+    # Per-engine model names from .atlas.toml [backend.models], e.g.
+    #   [backend.models]
+    #   codex = "gpt-5.1-codex"
+    # Model names are engine-specific; `model` above is the Claude one. An
+    # engine with no entry gets "" and falls back to its own CLI default.
+    backend_models: dict[str, str] = field(default_factory=dict)
     loop: LoopConfig = field(default_factory=LoopConfig)
 
     @classmethod
@@ -76,6 +82,10 @@ class Config:
             if isinstance(backend_section, dict)
             else "claude"
         )
+        raw_models = backend_section.get("models", {}) if isinstance(backend_section, dict) else {}
+        backend_models: dict[str, str] = (
+            {str(k): str(v) for k, v in raw_models.items()} if isinstance(raw_models, dict) else {}
+        )
         loop_section = merged.get("loop", {})
         loop_cfg = _parse_loop_config(loop_section if isinstance(loop_section, dict) else {})
         return cls(
@@ -85,6 +95,7 @@ class Config:
             timeout_overrides=timeout_overrides,
             model=str(merged.get("model", "haiku")),
             default_backend=default_backend,
+            backend_models=backend_models,
             loop=loop_cfg,
         )
 

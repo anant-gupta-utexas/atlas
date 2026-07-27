@@ -493,12 +493,26 @@ carries no status field, so:
 - `returncode == 0` + a `turn.completed` event present → success.
 - `returncode == 0` with **no** `turn.completed` (truncated/interrupted stream) → treated as
   failure by atlas (`codex_no_turn_completed`), even though the exit code was clean.
-- **No distinct failure-path event type exists.** T-L1.1 deliberately triggered a sandbox
-  denial (`--sandbox read-only`, asked to write a file): the write was correctly refused,
-  yet the run exited `0` and emitted a normal `turn.completed`. There is no `turn.failed`,
-  no error event, nothing to branch on — so `parse_result` correctly does not look for one.
+- **`turn.failed` and `error` events DO exist** — but only for *infrastructure* failures,
+  not for an agent that declines a task. Both distinctions were observed directly:
+  - **Agent-level refusal → looks like success.** A sandbox denial (`--sandbox read-only`,
+    asked to write a file) was correctly refused, yet exited `0` and emitted a normal
+    `turn.completed`. Nothing in the stream marks it as a failure.
+  - **Turn-level failure → three error signals at once.** A rejected `--model` (HTTP 400)
+    emitted `item.completed` with `item.type == "error"`, a top-level `error` event, **and**
+    `turn.failed` carrying `error.message` — with no `turn.completed`, and exit code `1`.
+
+  atlas keeps status **exit-code-driven** regardless (Resolved Decision #8 stands) and uses
+  these events only to render a legible message. Before that, a failed dispatch surfaced the
+  entire raw JSONL blob as its error text, which is how a plain bad-model error reached the
+  operator as an unreadable wall of JSON.
 - A **hard** failure (preflight, e.g. an untrusted directory) exits non-zero with **empty
   stdout** and the message on stderr — hence the exit-code branch must come first.
+
+> **Corrects an earlier claim in this doc.** A 2026-07-26 revision stated "no distinct
+> failure-path event type exists," generalizing from the sandbox-denial capture alone. That
+> capture genuinely has no error event — but it is the *agent-refusal* case, not the
+> *turn-failure* case. The two paths differ, and only the latter emits `turn.failed`.
 
 A clean exit with a completed turn is reported as `success` even if the agent's actual work
 failed (tests still red, task not accomplished) — Codex's JSONL gives atlas no way to

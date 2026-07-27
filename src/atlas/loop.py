@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from atlas import queue_gh
-from atlas.cli_backend import UnknownBackendError, UsageReporting, make_backend
+from atlas.cli_backend import UnknownBackendError, UsageReporting, make_backend, resolve_model
 from atlas.config import Config, LoopConfig
 from atlas.deliverer import DeliveryError, GhPrDeliverer, PrRef
 
@@ -219,8 +219,9 @@ def run_planned_first_pass(
     run_id = plumb.open_run(task=prompt_context)
     ctx_slug = _slugify(issue.title)
 
+    engine = _engine_for_issue(issue) or cfg.default_backend
     try:
-        backend = make_backend(_engine_for_issue(issue) or cfg.default_backend)
+        backend = make_backend(engine)
     except UnknownBackendError as exc:
         plumb.close_run(run_id=run_id, status="failure")
         raise AbortedRunError(f"planned-lane dispatch failed: {exc}") from exc
@@ -237,7 +238,13 @@ def run_planned_first_pass(
             f"/dev-docs-be Detail this GitHub issue into a TRS triad under "
             f"dev/active/{ctx_slug}/. Issue:\n\n{prompt_context}"
         ),
-        model=cfg.model,
+        # cfg.model is a Claude model name and is not portable across engines
+        # (`codex exec --model haiku` is an HTTP 400) — see resolve_model.
+        model=resolve_model(
+            backend_name=engine,
+            config_model=cfg.model,
+            backend_models=cfg.backend_models,
+        ),
         add_dirs=[wt_path],
         timeout_s=1800,
         # Same unattended profile SubprocessStageRunner applies in loop mode —

@@ -628,6 +628,7 @@ class SubprocessStageRunner:
         telemetry_json: bool = False,
         permission_mode: str | None = None,
         backend_override: str | None = None,
+        backend_models: dict[str, str] | None = None,
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
@@ -637,6 +638,9 @@ class SubprocessStageRunner:
         # loop issue's `engine:X` label). Outranks the workflow YAML's
         # default_backend — see resolve_backend's docstring for why.
         self._backend_override = backend_override
+        # Per-engine model names; `model` above is the Claude one and is not
+        # portable across engines. See cli_backend.resolve_model.
+        self._backend_models = backend_models or {}
         self._workflow = loaded_workflow
         # Per-run turn cap, passed through to the backend as --max-turns.
         # None (the default for `atlas run`) leaves the backend's own default
@@ -660,6 +664,7 @@ class SubprocessStageRunner:
             UsageReporting,
             make_backend,
             resolve_backend,
+            resolve_model,
         )
         from atlas.plugin_resolver import build_prompt, resolve  # local import to avoid cycles
 
@@ -731,7 +736,11 @@ class SubprocessStageRunner:
 
         argv = backend.build_argv(
             prompt=prompt,
-            model=self._model,
+            model=resolve_model(
+                backend_name=backend_name,
+                config_model=self._model,
+                backend_models=self._backend_models,
+            ),
             add_dirs=add_dirs,
             timeout_s=timeout_s,
             extra_flags=extra_flags,

@@ -359,6 +359,41 @@ class AntigravityBackend:
         return None
 
 
+def _codex_failure_reason(events: list[dict[str, object]]) -> str:
+    """Best available human-readable reason from a failed Codex stream.
+
+    Codex reports failures in three places, in decreasing specificity:
+    ``turn.failed.error.message``, a top-level ``error`` event's ``message``,
+    and an ``item.completed`` whose item ``type`` is ``error``. All three were
+    observed on a single real failure (a rejected ``--model``), so this
+    collects whatever is present rather than betting on one shape.
+    """
+    reasons: list[str] = []
+    for event in events:
+        etype = event.get("type")
+        if etype == "turn.failed":
+            err = event.get("error")
+            if isinstance(err, dict) and err.get("message"):
+                reasons.append(str(err["message"]))
+        elif etype == "error":
+            if event.get("message"):
+                reasons.append(str(event["message"]))
+        elif etype == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "error" and item.get("message"):
+                reasons.append(str(item["message"]))
+
+    # Dedupe while preserving order: turn.failed usually restates the error
+    # event verbatim, and printing it twice helps no one.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for reason in reasons:
+        if reason not in seen:
+            seen.add(reason)
+            unique.append(reason)
+    return "\n".join(unique)
+
+
 @dataclass(frozen=True)
 class CodexUsageStats:
     """Token telemetry parsed from a `codex exec --json` turn.completed event.
@@ -421,11 +456,9 @@ class CodexBackend:
     def parse_result(
         self, stdout: str, stderr: str, returncode: int
     ) -> tuple[str, str, str | None]:
-        # The JSONL stream carries no status field — status is exit-code-only
-        # (VERIFIED against codex-cli 0.144.4). See Resolved Decision #8.
-        if returncode != 0:
-            return ("failure", stdout or stderr, "codex_nonzero_exit")
-
+        # Status stays exit-code-driven (Resolved Decision #8) — the failure
+        # events below are used only to make the *message* legible, never to
+        # override the exit code.
         events: list[dict[str, object]] = []
         for line in stdout.splitlines():
             line = line.strip()
@@ -438,9 +471,19 @@ class CodexBackend:
             if isinstance(event, dict):
                 events.append(event)
 
+        if returncode != 0:
+            # `turn.failed` and `error` events DO exist (VERIFIED 2026-07-26 —
+            # `codex exec --model haiku` returns HTTP 400 and emits both).
+            # Without this, a failed dispatch surfaced the entire raw JSONL
+            # blob as its error text, which is how a plain bad-model error
+            # reached the operator as an unreadable wall of JSON.
+            reason = _codex_failure_reason(events)
+            return ("failure", reason or stdout or stderr, "codex_nonzero_exit")
+
         saw_turn_completed = any(e.get("type") == "turn.completed" for e in events)
         if not saw_turn_completed:
-            return ("failure", stdout, "codex_no_turn_completed")
+            reason = _codex_failure_reason(events)
+            return ("failure", reason or stdout, "codex_no_turn_completed")
 
         messages: list[str] = []
         for e in events:
@@ -676,6 +719,43 @@ def resolve_backend(
     if config_default is not None:
         return config_default
     return "claude"
+
+
+def resolve_model(
+    *,
+    backend_name: str,
+    config_model: str,
+    backend_models: dict[str, str] | None = None,
+) -> str:
+    """Pick the model name to hand a specific backend.
+
+    Model names are **engine-specific and not interchangeable**, but
+    ``Config.model`` is a single global string defaulting to ``"haiku"`` —
+    a Claude name. Passing it to another engine is not a degraded default,
+    it is a hard failure: ``codex exec --model haiku`` returns HTTP 400
+    (*"The 'haiku' model is not supported when using Codex with a ChatGPT
+    account"*), which is exactly why every `--backend codex` run died in the
+    plan stage with an opaque ``codex_nonzero_exit`` (found live 2026-07-26).
+
+    Resolution:
+
+    1. An explicit ``[backend.models]`` entry for this engine, if configured.
+    2. ``config_model`` for ``claude`` — preserves existing behavior and the
+       byte-identical attended argv.
+    3. ``""`` for every other engine, which each backend reads as "use your
+       own default" (``CodexBackend`` omits ``--model`` entirely;
+       ``AntigravityBackend`` substitutes its ``default_model``).
+
+    Deliberately *not* a hardcoded cross-engine mapping table: model lineups
+    change faster than atlas releases, and guessing a wrong name reproduces
+    the same 400 with a different string. An unset engine gets the CLI's own
+    current default, which is always valid.
+    """
+    if backend_models:
+        configured = backend_models.get(backend_name)
+        if configured:
+            return configured
+    return config_model if backend_name == "claude" else ""
 
 
 class UnknownBackendError(Exception):
