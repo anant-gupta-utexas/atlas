@@ -642,7 +642,7 @@ signal than `agy`'s.
 - Gemini in Chrome — <https://gemini.google/overview/gemini-in-chrome/>
 - Codex CLI (`codex exec`) schema — verified directly against `codex-cli 0.144.4` output and
   `codex exec --help` (real capture, 2026-07-24); see
-  `dev/active/loop-mode-phase-L1/loop-mode-phase-L1-context.md` for the raw sample and
+  `dev/archive/loop-mode-phase-L1/loop-mode-phase-L1-context.md` for the raw sample and
   verification log. No public URL captured for this source — pin to the version string if
   cross-checking later.
 

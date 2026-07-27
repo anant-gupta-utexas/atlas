@@ -146,7 +146,7 @@ class CodexBackend:            # codex exec ...
 > 3. Agent output text lives in **`item.completed`** events where `item.type == "agent_message"` (field `item.text`) — a *different* event type from the terminal one, so extraction is a two-pass scan.
 > 4. There is **no `total_cost_usd`** (or any cost field). Codex reports four token counts: `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`.
 >
-> Implementation detail and the resulting parse algorithm live in the Phase L1 TRS ([`dev/active/loop-mode-phase-L1/`](../../dev/active/loop-mode-phase-L1/loop-mode-phase-L1-plan.md)).
+> Implementation detail and the resulting parse algorithm live in the Phase L1 TRS ([`dev/archive/loop-mode-phase-L1/`](../../dev/archive/loop-mode-phase-L1/loop-mode-phase-L1-plan.md)).
 
 **Per-CLI contract (extends TRD-v2 §3.4 table):**
 

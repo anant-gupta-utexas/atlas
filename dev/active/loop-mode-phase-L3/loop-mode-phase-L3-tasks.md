@@ -60,4 +60,4 @@ This file tracks checkbox-level progress only.
       (**no longer blocked** — the shared `plugin_resolver` gap was fixed
       2026-07-25; needs only a human operator session. An operator runbook
       lives at the bottom of
-      [`loop-mode-phase-L2-tasks.md`](../loop-mode-phase-L2/loop-mode-phase-L2-tasks.md))
+      [`loop-mode-phase-L2-tasks.md`](../../archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md))

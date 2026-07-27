@@ -24,7 +24,7 @@ The honest framing on T-L2.13 in the commit message ("blocked on a `plugin_resol
 
 ### 🔴 C1 — The planned lane creates an empty worktree *after* the work is done, then opens a PR with no commits
 
-**Location:** [`loop.py:302-319`](../../src/atlas/loop.py#L302) (`run_planned_first_pass`)
+**Location:** [`loop.py:302-319`](../../../src/atlas/loop.py#L302) (`run_planned_first_pass`)
 
 ```python
 result_proc = subprocess.run(argv, cwd=str(repo_root), ...)   # ← writes into repo_root
@@ -38,12 +38,12 @@ pr_ref = queue_gh.deliver_pr(..., worktree_path=wt_path, ...)  # ← pushes zero
 Three compounding problems, in execution order:
 
 1. **The `dev-docs-be` subprocess runs with `cwd=repo_root`, not in a worktree.** Whatever TRS triad it produces lands in the *main working tree*, dirty and uncommitted.
-2. **`WorktreeManager.create()` calls `_check_repo_clean()`** ([`worktree.py:50`](../../src/atlas/worktree.py#L50)). Step 1 just made the repo dirty by writing the triad. So `create()` raises `WorktreeError` on the happy path. This is caught by `tick()`'s handler and reported as a failure — meaning **the planned lane's success path terminates in a caught error.**
+2. **`WorktreeManager.create()` calls `_check_repo_clean()`** ([`worktree.py:50`](../../../src/atlas/worktree.py#L50)). Step 1 just made the repo dirty by writing the triad. So `create()` raises `WorktreeError` on the happy path. This is caught by `tick()`'s handler and reported as a failure — meaning **the planned lane's success path terminates in a caught error.**
 3. Even if the repo *were* clean (agent produced nothing), `create()` branches off `main` and nothing is ever `git add`/`git commit`-ed — `grep -n "commit\|git add" src/atlas/loop.py` returns nothing. `deliver_pr` → `git push -u origin <branch>` pushes a branch identical to `main`, and `gh pr create` fails with "No commits between main and ...".
 
 So there is no input under which this function opens a plan PR. TRD-v3 §13 #6 — L2's own exit criterion — requires exactly that.
 
-Contrast with the quick lane, which is correct: `Pipeline` creates the worktree *before* the isolated stage ([`orchestrator.py:305-306`](../../src/atlas/orchestrator.py#L305)), the agent works inside it, and `loop.py` reads back `result.ctx.worktree_path`. The planned lane inverted that order.
+Contrast with the quick lane, which is correct: `Pipeline` creates the worktree *before* the isolated stage ([`orchestrator.py:305-306`](../../../src/atlas/orchestrator.py#L305)), the agent works inside it, and `loop.py` reads back `result.ctx.worktree_path`. The planned lane inverted that order.
 
 **Why the tests missed it:** `test_loop.py:257` patches `run_planned_first_pass` wholesale; `test_loop_e2e.py` mocks at the same boundary. The function's body has no direct test.
 
@@ -65,7 +65,7 @@ Add a direct test for `run_planned_first_pass` against a real temp git repo (the
 
 ### 🔴 C2 — `sync_prior_prs()` reuses one `PlumbIO` handle across PRs; `close_run()`'s `_closed` latch silently drops all scores after the first
 
-**Location:** [`loop.py:341-355`](../../src/atlas/loop.py#L341)
+**Location:** [`loop.py:341-355`](../../../src/atlas/loop.py#L341)
 
 A fresh `PlumbIO(real=True)` is constructed *inside* the loop body, so each PR gets its own object — that part is fine. The problem is the interaction with `close_run`'s idempotence latch:
 
@@ -76,7 +76,7 @@ def close_run(self, *, run_id: str, status: str) -> None:
     self._closed = True
 ```
 
-`reopen_run` does reset `self._closed = False` ([`plumb_io.py:100`](../../src/atlas/plumb_io.py#L100)), so the per-PR `PlumbIO` instances are individually coherent. **The real defect is different and worse:** `reopen_run` opens a *child run* with a new `run_id` and returns it, then `record_user_signal(run_id=active_run_id, ...)` writes through `self._run_handle` — ignoring the `run_id` argument entirely ([`plumb_io.py:185-192`](../../src/atlas/plumb_io.py#L185)). That's fine here. But note what `sync_prior_prs` writes:
+`reopen_run` does reset `self._closed = False` ([`plumb_io.py:100`](../../../src/atlas/plumb_io.py#L100)), so the per-PR `PlumbIO` instances are individually coherent. **The real defect is different and worse:** `reopen_run` opens a *child run* with a new `run_id` and returns it, then `record_user_signal(run_id=active_run_id, ...)` writes through `self._run_handle` — ignoring the `run_id` argument entirely ([`plumb_io.py:185-192`](../../../src/atlas/plumb_io.py#L185)). That's fine here. But note what `sync_prior_prs` writes:
 
 ```python
 span_id="",   # ← empty string, not None
@@ -96,7 +96,7 @@ Secondly, and independently: **the `state.synced_pr_outcomes` dedupe list is app
 
 ### 🟠 I1 — `tick()` claims the issue, then reports `action="dispatched"` on the gh-identity failure path *before* any dispatch happens
 
-**Location:** [`loop.py:419-435`](../../src/atlas/loop.py#L419)
+**Location:** [`loop.py:419-435`](../../../src/atlas/loop.py#L419)
 
 If `current_gh_user()` raises, `tick()` returns `TickResult(action="dispatched", ...)` with `detail="failed: could not resolve gh identity"`. Nothing was dispatched — the issue is still `atlas:ready`, unclaimed. `TickResult.action` is the machine-readable field (`Literal[...]`); `detail` is the human one. Anything that counts dispatches by `action` (a future `atlas loop status`, a weekly report in L4, a metrics query) over-counts.
 
@@ -106,7 +106,7 @@ The same overload happens on the exception path at line 467 — a run that faile
 
 ### 🟠 I2 — `run_one_shot` / `run_planned_first_pass` return a hardcoded `0.0` cost, making `max_dollars_per_day` permanently inert
 
-**Location:** [`loop.py:245`](../../src/atlas/loop.py#L245), [`loop.py:320`](../../src/atlas/loop.py#L320)
+**Location:** [`loop.py:245`](../../../src/atlas/loop.py#L245), [`loop.py:320`](../../../src/atlas/loop.py#L320)
 
 ```python
 return pr_ref, result.ctx.run_id, 0.0
@@ -125,7 +125,7 @@ Decision #17 also says triage-classifier cost should count toward the dollar cap
 
 ### 🟠 I3 — `cfg.loop.max_turns` is parsed, documented, and never used
 
-**Location:** [`config.py:18`](../../src/atlas/config.py#L18) declares it; `grep -rn "max_turns" src/atlas/` shows the only consumer is `cli_backend.py:110`, which reads it from a stage's `extra_flags`, not from `LoopConfig`.
+**Location:** [`config.py:18`](../../../src/atlas/config.py#L18) declares it; `grep -rn "max_turns" src/atlas/` shows the only consumer is `cli_backend.py:110`, which reads it from a stage's `extra_flags`, not from `LoopConfig`.
 
 Neither `run_one_shot` (via `make_pipeline`) nor `run_planned_first_pass` (which passes `extra_flags={}` explicitly at line 278) ever threads `cfg.loop.max_turns` through. It's a config knob that does nothing — the same class of problem as I2 but with no plumb dependency as an excuse. For an unattended loop, "max turns per run" is a real runaway-cost guard.
 
@@ -133,7 +133,7 @@ Neither `run_one_shot` (via `make_pipeline`) nor `run_planned_first_pass` (which
 
 ### 🟠 I4 — `reconcile_orphans` matches worktrees to active issues by title slug, which collides and strands
 
-**Location:** [`loop.py:569-579`](../../src/atlas/loop.py#L569)
+**Location:** [`loop.py:569-579`](../../../src/atlas/loop.py#L569)
 
 ```python
 def _is_worktree_for_active_issue(worktree_dir, active_slugs) -> bool:
@@ -154,7 +154,7 @@ The directory name is `{slug}-{run_id[:8]}`, and `.atlas/current-run` already tr
 
 ### 🔵 m1 — `queue_gh.deliver_pr`'s try/except is a no-op
 
-[`queue_gh.py:170-171`](../../src/atlas/queue_gh.py#L170):
+[`queue_gh.py:170-171`](../../../src/atlas/queue_gh.py#L170):
 
 ```python
 except DeliveryError:
@@ -165,19 +165,19 @@ Catching an exception only to re-raise it unchanged does nothing but suggest to 
 
 ### 🔵 m2 — `_find_linked_pr_number`'s docstring describes an implementation it doesn't have
 
-[`queue_gh.py:211-217`](../../src/atlas/queue_gh.py#L211) — the docstring discusses `timelineItems` being "unnecessarily heavy" and a `gh pr list --search "linked:<n>"`-style lookup, then the body does neither (it uses `closedByPullRequestsReferences`). It reads like notes from an abandoned approach. Same for `sync()`'s docstring at line 190-198, which describes matching "by number embedded in a `Closes #<n>` reference … resolved by the caller" — the caller doesn't do that either. Both are actively misleading to the next reader. Rewrite to describe what the code does.
+[`queue_gh.py:211-217`](../../../src/atlas/queue_gh.py#L211) — the docstring discusses `timelineItems` being "unnecessarily heavy" and a `gh pr list --search "linked:<n>"`-style lookup, then the body does neither (it uses `closedByPullRequestsReferences`). It reads like notes from an abandoned approach. Same for `sync()`'s docstring at line 190-198, which describes matching "by number embedded in a `Closes #<n>` reference … resolved by the caller" — the caller doesn't do that either. Both are actively misleading to the next reader. Rewrite to describe what the code does.
 
 ### 🔵 m3 — `triage._classify` records `latency_ms=0.0` unconditionally
 
-[`triage.py:81`](../../src/atlas/triage.py#L81) initializes `latency_ms = 0.0` and never updates it, so every triage span in plumb reports zero latency. `run_planned_first_pass` does this correctly with `time.monotonic()` (line 263/283) — mirror that. Small, but it silently poisons any latency analysis over triage spans.
+[`triage.py:81`](../../../src/atlas/triage.py#L81) initializes `latency_ms = 0.0` and never updates it, so every triage span in plumb reports zero latency. `run_planned_first_pass` does this correctly with `time.monotonic()` (line 263/283) — mirror that. Small, but it silently poisons any latency analysis over triage spans.
 
 ### 🔵 m4 — `_format_run_summary` takes a `cost` parameter it ignores
 
-[`loop.py:496-497`](../../src/atlas/loop.py#L496) — the signature accepts `cost: float` and the body never references it. Given I2, that's consistent (cost is always 0.0), but an unused parameter is a lint miss and will silently stay unused when cost *does* get wired. Either include it in the comment body or drop the parameter.
+[`loop.py:496-497`](../../../src/atlas/loop.py#L496) — the signature accepts `cost: float` and the body never references it. Given I2, that's consistent (cost is always 0.0), but an unused parameter is a lint miss and will silently stay unused when cost *does* get wired. Either include it in the comment body or drop the parameter.
 
 ### 🔵 m5 — `run_forever`'s breaker check sleeps without persisting or logging
 
-[`loop.py:510-512`](../../src/atlas/loop.py#L510):
+[`loop.py:510-512`](../../../src/atlas/loop.py#L510):
 
 ```python
 if breaker_open(state, cfg.loop):
@@ -240,7 +240,7 @@ files, coverage 95.02%.
 
 2. **One correction to C1 as originally written.** I claimed `WorktreeManager.create()` would
    raise on the happy path because `dev-docs-be` dirties the repo. That's wrong in the common
-   case: `_check_repo_clean()` deliberately ignores untracked files ([`worktree.py:160-167`](../../src/atlas/worktree.py#L160)),
+   case: `_check_repo_clean()` deliberately ignores untracked files ([`worktree.py:160-167`](../../../src/atlas/worktree.py#L160)),
    and a brand-new `dev/active/<slug>/` triad is entirely untracked. The `WorktreeError` only
    fires if the agent also modifies a tracked file. The other two failure modes (wrong cwd,
    no commit → empty branch) stand unchanged, and the lane still could not open a PR under

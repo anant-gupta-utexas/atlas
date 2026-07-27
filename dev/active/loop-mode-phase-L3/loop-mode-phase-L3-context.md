@@ -38,7 +38,7 @@ unblock T-L3.10 (and, as a side effect, L2's own still-open T-L2.13).
 > preserved as the authoring-time snapshot; read them as history, not current
 > state. L2's T-L2.13 is likewise unblocked and now needs only a human operator
 > — a runbook lives at the bottom of
-> [`loop-mode-phase-L2-tasks.md`](../loop-mode-phase-L2/loop-mode-phase-L2-tasks.md).
+> [`loop-mode-phase-L2-tasks.md`](../../archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md).
 
 **The user's framing for this request** — "previous phases have been
 implemented but manual testing remains across phases" — is accurate and is
@@ -65,7 +65,7 @@ open manual checks" section.
   limitation, and the exact shipped module list (`loop.py`, `loop_budget.py`,
   `pipeline_factory.py`, `triage.py`, `queue_gh.py`) this TRS builds on top of
   are all documented there, not re-derived here.
-- [`dev/active/loop-mode-phase-L2/`](../loop-mode-phase-L2/) — the L2 TRS triad.
+- [`dev/archive/loop-mode-phase-L2/`](../../archive/loop-mode-phase-L2/) — the L2 TRS triad.
   This TRS follows its task-numbering convention (`T-L3.N`), its
   plan/decisions/tasks-detail file split (adopted here for the same 800-line-cap
   reason), and its "what this TRS does NOT cover" discipline.

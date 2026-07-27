@@ -65,7 +65,7 @@ committed task list while leaving a named seam for it.
   loop passes pick up the committed TRS and implement it task by task... yields
   multiple PRs per issue"). That machinery does not exist yet (L2 explicitly scoped
   the planned lane to first-pass-only, Decision #2 in
-  `dev/active/loop-mode-phase-L2/loop-mode-phase-L2-decisions.md`). Retrying a
+  `dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-decisions.md`). Retrying a
   **planned-lane** failure is therefore narrower in L3 than retrying a **quick-lane**
   failure — see Task T-L3.6 and Pending Decision #2.
 - `Pipeline`/`orchestrator.py` — unchanged, per Appendix A's standing rule ("if

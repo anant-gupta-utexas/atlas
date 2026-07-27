@@ -3,7 +3,7 @@
 Full text of all decisions flagged during this TRS's authoring. Split out from
 `loop-mode-phase-L3-plan.md` to keep that file under the repo's 800-line cap
 (matches the L2 TRS's own precedent — see
-`dev/active/loop-mode-phase-L2/loop-mode-phase-L2-decisions.md`). Normative, not
+`dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-decisions.md`). Normative, not
 optional reading — several of these change which files T-L3.1/T-L3.3 touch.
 
 ---

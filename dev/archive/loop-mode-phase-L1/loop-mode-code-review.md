@@ -23,7 +23,7 @@ Findings below are **one Medium and four Low/Nit**. None block the phase. The Me
 
 ### 🟡 Medium — M1: `codex_usage_to_tokens` can silently over-count ~4×, and nothing fails loudly if it's wrong
 
-**Location (as reviewed, `adbc232`):** `cli_backend.py:382-392` → now [`codex_usage_to_tokens`](../../src/atlas/cli_backend.py#L391)
+**Location (as reviewed, `adbc232`):** `cli_backend.py:382-392` → now [`codex_usage_to_tokens`](../../../src/atlas/cli_backend.py#L391)
 
 ```python
 in_tokens = (usage.input_tokens or 0) + (usage.cached_input_tokens or 0)
@@ -67,7 +67,7 @@ Also worth noting: the docstring justifies the addend choice via "Anthropic's co
 
 ### 🟢 Low — L1: `CodexBackend.build_argv` sets `-C`, but `SubprocessStageRunner` overrides the actual cwd
 
-**Location (as reviewed, `adbc232`):** `cli_backend.py:267` vs `orchestrator.py:649` → now [`build_argv`](../../src/atlas/cli_backend.py#L270) vs [`SubprocessStageRunner.run`](../../src/atlas/orchestrator.py#L649)
+**Location (as reviewed, `adbc232`):** `cli_backend.py:267` vs `orchestrator.py:649` → now [`build_argv`](../../../src/atlas/cli_backend.py#L270) vs [`SubprocessStageRunner.run`](../../../src/atlas/orchestrator.py#L649)
 
 `build_argv` computes `primary = add_dirs[-1]` and passes `-C <primary>` — for an `isolate: true` stage that's the worktree path. But the runner spawns with `cwd=str(atlas_root)` (the atlas install root, chosen so Claude's workspace-scoped plugins resolve).
 
@@ -94,7 +94,7 @@ For Codex this is probably harmless — `-C` should win over the inherited cwd �
 
 ### 🟢 Low — L2: `_parse_pr_url` returns `number=0` on a malformed URL instead of failing
 
-**Location (as reviewed, `81f55fb`):** `deliverer.py:110-114` → now [`_parse_pr_url`](../../src/atlas/deliverer.py#L161)
+**Location (as reviewed, `81f55fb`):** `deliverer.py:110-114` → now [`_parse_pr_url`](../../../src/atlas/deliverer.py#L161)
 
 ```python
 number = int(match.group(1)) if match else 0
@@ -115,7 +115,7 @@ Your T-L0.6 implementation note explains the choice: a malformed-but-zero-exit `
 
 ### 🟢 Low — L3: `Deliverer`'s `main` check is exact-match only
 
-**Location (as reviewed, `81f55fb`):** `deliverer.py:62` → now [`deliver`'s branch guard](../../src/atlas/deliverer.py#L105)
+**Location (as reviewed, `81f55fb`):** `deliverer.py:62` → now [`deliver`'s branch guard](../../../src/atlas/deliverer.py#L105)
 
 `if branch == "main"` doesn't cover `master`, `refs/heads/main`, or a repo whose default branch is something else entirely. The hardcoded-argv defense (no `--force`, explicit `-u origin <branch>`) is the real protection and it's solid — this assertion is defense-in-depth, which is why this is Low and not Medium.
 
@@ -136,7 +136,7 @@ Still, defense-in-depth that only covers one spelling of the hazard gives more c
 
 ### ⚪ Nit — N1: `CodexUsageStats.total_cost_usd` is a permanently-`None` field
 
-**Location (as reviewed, `adbc232`):** `cli_backend.py:242` → now [`CodexUsageStats`](../../src/atlas/cli_backend.py#L230) (field removed)
+**Location (as reviewed, `adbc232`):** `cli_backend.py:242` → now [`CodexUsageStats`](../../../src/atlas/cli_backend.py#L230) (field removed)
 
 Documented three times (dataclass docstring, `parse_usage` comment, tasks.md) as always `None`, existing "only for call-site symmetry with `UsageStats`." The documentation is genuinely excellent — anyone who encounters it will not file a bug.
 

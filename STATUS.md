@@ -50,7 +50,7 @@ stay recomputable because the raw breakdown and rule name were persisted to
 `spans.attributes` (the L1 review's M1 mechanism earning its keep).
 
 Full defect list and the live evidence for each:
-[`dev/active/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md`](dev/active/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md)
+[`dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md`](dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-tasks.md)
 (field-findings section).
 
 
@@ -65,7 +65,7 @@ statements below the pre-L2 average; well above the CI floor of 80%). Completes
 `v3.1` (the loop daemon itself).
 
 The Phase L2 code review
-([`loop-mode-phase-L2-code-review.md`](dev/active/loop-mode-phase-L2/loop-mode-phase-L2-code-review.md),
+([`loop-mode-phase-L2-code-review.md`](dev/archive/loop-mode-phase-L2/loop-mode-phase-L2-code-review.md),
 verdict **Approve with changes**) found 2 Critical, 4 Important and 5 Minor
 issues; **all were fixed** in the same pass, along with both of its
 architecture recommendations. The Criticals are worth knowing about:
@@ -157,7 +157,7 @@ delivery, planned-lane, and crash-recovery smoke tests against the real
 GitHub repo) — no longer blocked (see the `plugin_resolver` fix above); it
 now needs only a human operator session, since it drives real GitHub and
 spends real tokens. Everything else in the Phase L2 TRS
-([`dev/active/loop-mode-phase-L2/`](dev/active/loop-mode-phase-L2/)) is done.
+([`dev/archive/loop-mode-phase-L2/`](dev/archive/loop-mode-phase-L2/)) is done.
 
 ---
 
@@ -209,7 +209,7 @@ cold/warm-cache pair to settle the cached-token question) and T-L1.8
 (`atlas run --workflow loop_dev` against both `--backend claude` and
 `--backend codex`, the latter contingent on Codex auth being available).
 Everything else in the Phase L1 TRS
-([`dev/active/loop-mode-phase-L1/`](dev/active/loop-mode-phase-L1/)) is done.
+([`dev/archive/loop-mode-phase-L1/`](dev/archive/loop-mode-phase-L1/)) is done.
 
 ---
 
@@ -241,7 +241,7 @@ primitives the v3 loop depends on — no loop or `atlas loop` command yet
 a real JSON envelope) and T-L0.9 (a real `GhPrDeliverer.deliver()` against a
 scratch GitHub repo). These are the phase's two manual exit-criteria checks
 and have not been executed yet — everything else in the Phase L0 TRS
-([`dev/active/loop-mode-phase-L0/`](dev/active/loop-mode-phase-L0/)) is done.
+([`dev/archive/loop-mode-phase-L0/`](dev/archive/loop-mode-phase-L0/)) is done.
 
 Prior to L0: the v1 7-stage dev pipeline (6 human gates, git worktree
 boundary, post-commit hook, full plumb span-tree integration) plus the v2
