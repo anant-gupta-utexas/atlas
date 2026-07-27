@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from atlas import queue_gh
 from atlas.deliverer import DeliveryError, PrRef
 from atlas.queue_gh import (
     GhCliError,
@@ -437,3 +438,30 @@ def test_loop_module_never_shells_gh_directly() -> None:
         if path.name not in sanctioned and forbidden.search(path.read_text())
     ]
     assert not offenders, f"these modules must not shell out to gh directly: {offenders}"
+
+
+def test_sync_lists_working_issues_in_all_states() -> None:
+    """A merged PR's issue is already closed — sync must still see it.
+
+    atlas writes `Closes #<n>` into every PR body, so GitHub closes the issue
+    the instant the PR merges, before atlas's next tick runs. Filtering to
+    --state open made the merged outcome structurally unobservable: no
+    user_signal score was ever written and the issue stayed on atlas:working
+    forever. Found live during T-L2.13, 2026-07-27.
+    """
+    with patch("atlas.queue_gh._run_gh", return_value="[]") as run_mock:
+        queue_gh.sync("owner/repo")
+
+    argv = run_mock.call_args_list[0].args[0]
+    assert argv[argv.index("--state") + 1] == "all"
+    assert argv[argv.index("--label") + 1] == "atlas:working"
+
+
+def test_list_ready_still_only_sees_open_issues() -> None:
+    """The inverse must hold: a closed issue is never picked up as new work."""
+    with patch("atlas.queue_gh._run_gh", return_value="[]") as run_mock:
+        queue_gh.list_ready("owner/repo")
+
+    argv = run_mock.call_args.args[0]
+    assert argv[argv.index("--state") + 1] == "open"
+    assert argv[argv.index("--label") + 1] == "atlas:ready"

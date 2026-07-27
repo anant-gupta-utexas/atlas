@@ -81,7 +81,13 @@ def list_labeled(repo: str, label: str, *, timeout_s: int = _DEFAULT_TIMEOUT_S) 
     return _list_labeled(repo, label, timeout_s=timeout_s)
 
 
-def _list_labeled(repo: str, label: str, *, timeout_s: int) -> list[Issue]:
+def _list_labeled(repo: str, label: str, *, timeout_s: int, state: str = "open") -> list[Issue]:
+    """List issues carrying ``label``.
+
+    ``state`` defaults to ``open`` — a closed issue must never be picked up
+    as new work. ``sync()`` overrides it to ``all``; see its docstring for
+    why a merged PR's issue is necessarily already closed.
+    """
     argv = [
         "gh",
         "issue",
@@ -91,7 +97,7 @@ def _list_labeled(repo: str, label: str, *, timeout_s: int) -> list[Issue]:
         "--label",
         label,
         "--state",
-        "open",
+        state,
         "--json",
         "number,title,body,labels,author",
     ]
@@ -195,8 +201,18 @@ def sync(repo: str, *, timeout_s: int = _DEFAULT_TIMEOUT_S) -> list[PrStatus]:
     link from the PR body's `Closes #<n>`), then `gh pr view --json
     state,mergedAt,number` for its outcome. Issues with no linked PR yet are
     omitted from the result entirely.
+
+    **`state="all"` is load-bearing, not defensive.** atlas writes
+    `Closes #<n>` into every PR body, so GitHub closes the issue the instant
+    the PR merges — before atlas's next tick can look. Listing only open
+    issues therefore made the merged case *structurally unobservable*: the
+    `user_signal` score was never written and the issue sat on
+    `atlas:working` forever, which is exactly what TRD-v3 §13 #5's second
+    half ("merging makes the next tick write a user_signal and close the
+    issue") requires. Confirmed live during T-L2.13 on 2026-07-27. The
+    `atlas:working` label is the real filter here; issue state is not.
     """
-    working = _list_labeled(repo, "atlas:working", timeout_s=timeout_s)
+    working = _list_labeled(repo, "atlas:working", timeout_s=timeout_s, state="all")
     statuses: list[PrStatus] = []
     for issue in working:
         pr_number = _find_linked_pr_number(issue, timeout_s=timeout_s)
