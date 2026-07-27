@@ -48,6 +48,7 @@ class PlumbIO:
         self.spans: list[dict] = []  # type: ignore[type-arg]
         self.scores: list[dict] = []  # type: ignore[type-arg]
         self.examples: list[dict] = []  # type: ignore[type-arg]
+        self.usage: list[dict] = []  # type: ignore[type-arg]
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -178,6 +179,47 @@ class PlumbIO:
             }
         )
         return span_id
+
+    def set_usage(
+        self,
+        *,
+        run_id: str,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        dollar_cost: float | None = None,
+    ) -> None:
+        """Write run-level usage/cost via plumb v1.1's ``RunHandle.set_usage``.
+
+        This is the plumb **P1-a** capability that atlas's Phase L0 had to
+        defer: in v1.0.1 ``runs.dollar_cost`` existed in the schema but was
+        unreachable from the online ``with run()`` path, so cost could only be
+        held in memory. v1.1.0 added the setter, which is what lets
+        ``max_dollars_per_day`` be a real budget rather than a documented
+        intention.
+
+        Last call wins per field (plumb FR-USAGE-1). Omitted fields are left
+        untouched — in particular, leaving ``tokens_in``/``tokens_out`` unset
+        lets plumb auto-fill them from the buffered spans at close time
+        (FR-USAGE-3), which is strictly better than atlas re-summing what
+        plumb already has. ``dollar_cost`` is never auto-filled (FR-USAGE-3a),
+        so it is the one field atlas must write itself.
+        """
+        if self._real and self._run_handle is not None:
+            self._run_handle.set_usage(
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                dollar_cost=dollar_cost,
+            )
+            return
+
+        self.usage.append(
+            {
+                "run_id": run_id,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "dollar_cost": dollar_cost,
+            }
+        )
 
     def record_user_signal(
         self,

@@ -721,3 +721,152 @@ def test_build_issue_prompt_includes_title_body_and_scope_preamble() -> None:
     assert issue.title in prompt
     assert issue.body in prompt
     assert "scope" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# Cost extraction (2026-07-26) — run_one_shot must report real spend
+#
+# run_one_shot previously returned a hardcoded 0.0, so state.dollars_today
+# never advanced and max_dollars_per_day could not trip no matter how much a
+# run cost. The tick()-level tests above always passed because they mock
+# run_one_shot's return value; only these exercise the real one.
+# ---------------------------------------------------------------------------
+
+
+def test_run_one_shot_returns_engine_reported_cost(tmp_path: Path) -> None:
+    from atlas.orchestrator import RunContext, RunResult
+
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    ctx = RunContext(run_id="r" * 32, slug="fix-bug", task="t", repo_root=tmp_path)
+    finished = RunContext(
+        run_id=ctx.run_id,
+        slug=ctx.slug,
+        task=ctx.task,
+        repo_root=tmp_path,
+        worktree_path=tmp_path / "wt",
+    )
+
+    pipeline = MagicMock()
+    pipeline.start.return_value = ctx
+    pipeline.run_to_completion.return_value = RunResult(
+        ctx=finished, status="success", dollar_cost=1.75
+    )
+
+    with (
+        patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
+        patch("atlas.loop.WorktreeManager"),
+        patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=7, url="u")),
+    ):
+        _pr, _run_id, cost = loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
+
+    assert cost == pytest.approx(1.75)
+
+
+def test_run_one_shot_reports_zero_when_engine_reports_no_cost(tmp_path: Path) -> None:
+    """Codex reports no cost — the run must still complete, contributing 0.0."""
+    from atlas.orchestrator import RunContext, RunResult
+
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    ctx = RunContext(run_id="s" * 32, slug="fix-bug", task="t", repo_root=tmp_path)
+    finished = RunContext(
+        run_id=ctx.run_id,
+        slug=ctx.slug,
+        task=ctx.task,
+        repo_root=tmp_path,
+        worktree_path=tmp_path / "wt",
+    )
+
+    pipeline = MagicMock()
+    pipeline.start.return_value = ctx
+    pipeline.run_to_completion.return_value = RunResult(
+        ctx=finished, status="success", dollar_cost=None
+    )
+
+    with (
+        patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())),
+        patch("atlas.loop.WorktreeManager"),
+        patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=8, url="u")),
+    ):
+        _pr, _run_id, cost = loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
+
+    assert cost == 0.0
+
+
+def test_run_one_shot_dispatches_in_loop_mode(tmp_path: Path) -> None:
+    """The quick lane must request the telemetry/permission profile.
+
+    Without loop_mode=True the dispatch gets no JSON envelope, so cost and
+    tokens are both unavailable — the exact gap that made §13 #1 unprovable.
+    """
+    from atlas.orchestrator import RunContext, RunResult
+
+    issue = _issue(labels=frozenset({"wf:quick"}))
+    ctx = RunContext(run_id="t" * 32, slug="fix-bug", task="t", repo_root=tmp_path)
+    pipeline = MagicMock()
+    pipeline.start.return_value = ctx
+    pipeline.run_to_completion.return_value = RunResult(
+        ctx=RunContext(
+            run_id=ctx.run_id,
+            slug=ctx.slug,
+            task=ctx.task,
+            repo_root=tmp_path,
+            worktree_path=tmp_path / "wt",
+        ),
+        status="success",
+        dollar_cost=0.1,
+    )
+
+    with (
+        patch("atlas.loop.make_pipeline", return_value=(pipeline, MagicMock())) as mk,
+        patch("atlas.loop.WorktreeManager"),
+        patch("atlas.loop.GhPrDeliverer"),
+        patch("atlas.queue_gh.deliver_pr", return_value=PrRef(number=9, url="u")),
+    ):
+        loop.run_one_shot(issue, _cfg(tmp_path), repo_root=tmp_path)
+
+    assert mk.call_args.kwargs["loop_mode"] is True
+
+
+def test_budget_trips_on_dollars_once_cost_is_real(tmp_path: Path) -> None:
+    """The dollar cap now has teeth — previously unreachable with 0.0 costs."""
+    cfg = _cfg(tmp_path, max_runs_per_day=100, max_dollars_per_day=2.0)
+    state = _state(runs_today=1, dollars_today=2.5)
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready") as pull_mock,
+    ):
+        result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert result.action == "budget_exhausted"
+    pull_mock.assert_not_called()
+
+
+def test_tick_handles_current_gh_user_failure(tmp_path: Path) -> None:
+    """Closes the L2 known gap: loop.py's current_gh_user()-raises branch.
+
+    Flagged untested in the Phase L2 TRS implementation notes.
+    """
+    from atlas.queue_gh import GhCliError
+
+    cfg = _cfg(tmp_path)
+    state = _state()
+    issue = _issue(labels=frozenset({"wf:quick"}))
+
+    with (
+        patch("atlas.loop.sync_prior_prs", return_value=[]),
+        patch("atlas.loop._pull_next_ready", return_value=issue),
+        patch("atlas.loop.current_gh_user", side_effect=GhCliError("gh not authed")),
+        patch("atlas.queue_gh.claim") as claim_mock,
+        patch("atlas.loop.run_one_shot") as run_mock,
+    ):
+        result = loop.tick(cfg, state, repos=[_REPO], repo_root=tmp_path)
+
+    assert result.action == "failed"
+    # Must fail *before* claiming or dispatching — a claim we can't attribute
+    # would strand the issue in atlas:working.
+    claim_mock.assert_not_called()
+    run_mock.assert_not_called()
+    assert state.consecutive_no_progress == 1

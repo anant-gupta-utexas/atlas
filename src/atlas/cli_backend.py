@@ -23,22 +23,125 @@ _KNOWN_BACKENDS: frozenset[str] = frozenset({"claude", "agy", "codex"})
 
 
 @dataclass(frozen=True)
+class SpanUsage:
+    """Backend-agnostic usage for one dispatch, ready for plumb.
+
+    The runner converts each backend's own usage dataclass into this shape so
+    ``StageOutcome`` — and therefore ``orchestrator``/``loop`` — never has to
+    know which engine produced a span. ``tokens`` is the reduced ``(in, out)``
+    pair plumb's ``record_span`` expects; ``attributes`` is the raw per-engine
+    breakdown persisted alongside it so a reduction rule that later proves
+    wrong is recomputable rather than silently corrupt (L1 code review M1).
+
+    ``dollar_cost`` is ``None`` for engines that report no cost figure (Codex
+    never does — see ``CodexUsageStats``). Only Claude populates it.
+    """
+
+    tokens: tuple[int, int]
+    attributes: dict[str, object]
+    dollar_cost: float | None
+
+
+@runtime_checkable
+class UsageReporting(Protocol):
+    """Optional capability: a backend that can report usage for a dispatch.
+
+    Deliberately a *second* Protocol rather than a fourth ``CliBackend``
+    method (L0 Resolved Decision #1 keeps ``CliBackend`` at three members, and
+    ``AntigravityBackend`` genuinely has no usage to report). The runner does
+    an ``isinstance`` check, so adding usage to a backend is additive and
+    mypy-checkable rather than a ``hasattr`` probe.
+    """
+
+    def span_usage(self, stdout: str) -> SpanUsage | None: ...
+
+
+@dataclass(frozen=True)
 class UsageStats:
     """Cost/token telemetry parsed from a `claude -p --output-format json` envelope.
 
-    total_cost_usd is surfaced in-memory only — plumb has no per-span or
-    run-level sink reachable from the online run path in v1.0.1 (see
-    docs/1_product_and_research/BACKLOG.md, plumb P1-a). input_tokens /
-    output_tokens are threaded to PlumbIO.record_span(tokens=(in, out)).
+    VERIFIED against Claude Code 2.1.220 (2026-07-26) — see
+    ``_claude_result_event`` for the envelope shape, which is NOT what this
+    class was originally designed against.
+
+    The four token fields are **disjoint** in Anthropic's convention:
+    ``input_tokens`` counts only uncached input, with cache hits/writes
+    reported separately. Summing them is what ``claude_usage_to_tokens``
+    does; reading ``input_tokens`` alone undercounts a warm-cache run by
+    orders of magnitude (a real captured run reported ``input_tokens=2``
+    against ``cache_read_input_tokens=19589``).
     """
 
     total_cost_usd: float | None
     input_tokens: int | None
     output_tokens: int | None
+    cache_creation_input_tokens: int | None
+    cache_read_input_tokens: int | None
 
 
 def _looks_like_json_envelope(stdout: str) -> bool:
-    return stdout.lstrip().startswith("{")
+    """True for both envelope shapes `claude -p --output-format json` may emit.
+
+    Claude Code 2.1.220 emits a JSON **array** of stream events terminated by
+    a ``type: "result"`` element, despite ``--help`` still describing the mode
+    as "single result". Testing only for ``{`` (as this did before 2026-07-26)
+    silently routed every real envelope into the plain-text branch, which is
+    why no live run ever produced telemetry. Both shapes are accepted so a
+    revert to a bare object on some future version keeps working.
+    """
+    return stdout.lstrip().startswith(("{", "["))
+
+
+def _is_parseable_json(stdout: str) -> bool:
+    try:
+        json.loads(stdout)
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def _as_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _claude_result_event(stdout: str) -> dict[str, object] | None:
+    """Return the terminal ``result`` object from a Claude JSON envelope.
+
+    Handles both observed shapes:
+
+    * **array** (VERIFIED, Claude Code 2.1.220) — a list of stream events
+      (``system``/``assistant``/``rate_limit_event``/...) whose last
+      ``type: "result"`` element carries ``subtype``, ``result``,
+      ``total_cost_usd`` and ``usage``. The *last* such element wins, mirroring
+      ``CodexBackend.parse_usage``'s handling of ``turn.completed``.
+    * **bare object** — the shape ``--help`` documents and this module
+      originally assumed. Kept so the parser is not version-locked.
+
+    Returns ``None`` for unparseable JSON or an array with no ``result``
+    element; callers distinguish those two cases themselves.
+    """
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(payload, dict):
+        return payload
+
+    if isinstance(payload, list):
+        found: dict[str, object] | None = None
+        for event in payload:
+            if isinstance(event, dict) and event.get("type") == "result":
+                found = event
+        return found
+
+    return None
 
 
 @runtime_checkable
@@ -123,15 +226,21 @@ class ClaudeCodeBackend:
             return ("success", stdout, None)
 
         # JSON branch (loop-mode `--output-format json`).
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError:
+        if not _is_parseable_json(stdout):
             return ("failure", stdout, "claude_unparseable_json")
 
-        subtype = payload.get("subtype")
+        event = _claude_result_event(stdout)
+        if event is None:
+            # Well-formed JSON, but no terminal `result` element — a truncated
+            # or interrupted stream. Mirrors CodexBackend's turn.completed
+            # presence check rather than reporting a phantom success.
+            return ("failure", stdout, "claude_no_result_event")
+
+        subtype = event.get("subtype")
+        result_text = event.get("result")
         if subtype != "success":
-            return ("failure", payload.get("result") or stdout, f"claude_{subtype}")
-        return ("success", payload.get("result") or "", None)
+            return ("failure", str(result_text) if result_text else stdout, f"claude_{subtype}")
+        return ("success", str(result_text) if result_text else "", None)
 
     def parse_usage(self, stdout: str) -> UsageStats | None:
         """Extract cost/token telemetry from a JSON-envelope stdout.
@@ -142,16 +251,40 @@ class ClaudeCodeBackend:
         """
         if not _looks_like_json_envelope(stdout):
             return None
-        try:
-            payload = json.loads(stdout)
-        except json.JSONDecodeError:
+
+        event = _claude_result_event(stdout)
+        if event is None:
             return None
 
-        usage = payload.get("usage") or {}
+        raw_usage = event.get("usage")
+        usage: dict[str, object] = raw_usage if isinstance(raw_usage, dict) else {}
+
+        logger.debug(
+            "claude usage: input_tokens=%r cache_creation_input_tokens=%r "
+            "cache_read_input_tokens=%r output_tokens=%r total_cost_usd=%r",
+            usage.get("input_tokens"),
+            usage.get("cache_creation_input_tokens"),
+            usage.get("cache_read_input_tokens"),
+            usage.get("output_tokens"),
+            event.get("total_cost_usd"),
+        )
+
         return UsageStats(
-            total_cost_usd=payload.get("total_cost_usd"),
-            input_tokens=usage.get("input_tokens"),
-            output_tokens=usage.get("output_tokens"),
+            total_cost_usd=_as_float(event.get("total_cost_usd")),
+            input_tokens=_as_int(usage.get("input_tokens")),
+            output_tokens=_as_int(usage.get("output_tokens")),
+            cache_creation_input_tokens=_as_int(usage.get("cache_creation_input_tokens")),
+            cache_read_input_tokens=_as_int(usage.get("cache_read_input_tokens")),
+        )
+
+    def span_usage(self, stdout: str) -> SpanUsage | None:
+        usage = self.parse_usage(stdout)
+        if usage is None:
+            return None
+        return SpanUsage(
+            tokens=claude_usage_to_tokens(usage),
+            attributes=claude_usage_attributes(usage),
+            dollar_cost=usage.total_cost_usd,
         )
 
     def preflight(self) -> tuple[str, str | None] | None:
@@ -366,6 +499,18 @@ class CodexBackend:
             reasoning_output_tokens=usage.get("reasoning_output_tokens"),
         )
 
+    def span_usage(self, stdout: str) -> SpanUsage | None:
+        usage = self.parse_usage(stdout)
+        if usage is None:
+            return None
+        return SpanUsage(
+            tokens=codex_usage_to_tokens(usage),
+            attributes=codex_usage_attributes(usage),
+            # Structurally always None — the Codex CLI reports no cost figure
+            # (VERIFIED, 0.144.4). v3 compares engines on tokens, not dollars.
+            dollar_cost=None,
+        )
+
     def preflight(self) -> tuple[str, str | None] | None:
         if os.environ.get("OPENAI_API_KEY"):
             return None
@@ -385,6 +530,51 @@ class CodexBackend:
 
 # Bumped whenever the reduction rule below changes, so stored spans record
 # which convention produced their `tokens` total (L1 code review finding M1).
+CLAUDE_TOKEN_REDUCTION_RULE = "cache_fields_disjoint_addends_v1"
+
+
+def claude_usage_to_tokens(usage: UsageStats) -> tuple[int, int]:
+    """Reduce UsageStats to the (in, out) tuple plumb's record_span expects.
+
+    Unlike Codex's equivalent, this rule is **verified, not assumed**:
+    Anthropic's usage fields are disjoint, so total billed input is
+    ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens``.
+    A real captured run (2026-07-26, Claude Code 2.1.220) reported
+    ``input_tokens=2`` alongside ``cache_read_input_tokens=19589`` — taking
+    ``input_tokens`` alone, as this module's original design did, would have
+    recorded 2 tokens for a ~31.5k-token dispatch.
+
+    Same recoverability guarantee as Codex: ``claude_usage_attributes()``
+    persists the raw breakdown plus ``CLAUDE_TOKEN_REDUCTION_RULE`` into
+    ``spans.attributes``. Change the rule here and bump the constant — do not
+    edit stored spans.
+    """
+    in_tokens = (
+        (usage.input_tokens or 0)
+        + (usage.cache_creation_input_tokens or 0)
+        + (usage.cache_read_input_tokens or 0)
+    )
+    return (in_tokens, usage.output_tokens or 0)
+
+
+def claude_usage_attributes(usage: UsageStats) -> dict[str, object]:
+    """Raw Claude token breakdown for durable storage in ``spans.attributes``.
+
+    Mirrors ``codex_usage_attributes``. Includes ``total_cost_usd`` because
+    plumb stores dollars only at run level — the per-stage split is otherwise
+    unrecoverable once several spans roll up into one run total.
+    """
+    return {
+        "engine": "claude",
+        "token_reduction_rule": CLAUDE_TOKEN_REDUCTION_RULE,
+        "input_tokens": usage.input_tokens,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+        "cache_read_input_tokens": usage.cache_read_input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_cost_usd": usage.total_cost_usd,
+    }
+
+
 CODEX_TOKEN_REDUCTION_RULE = "cached_input_as_addend_v1"
 
 

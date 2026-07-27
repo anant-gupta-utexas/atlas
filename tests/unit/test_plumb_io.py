@@ -73,13 +73,47 @@ def test_record_span_real_mode_passes_tokens_to_add_span() -> None:
     ]
 
 
-def test_no_run_level_cost_or_token_write_method_exists() -> None:
-    """Negative assertion (T-L0.5): confirms the plumb-P1-a deferral.
+def test_set_usage_writes_run_level_cost() -> None:
+    """Inverted from T-L0.5's negative assertion, deliberately.
 
-    Run-level dollar_cost/tokens_in/tokens_out are not writable from the
-    online run path in plumb v1.0.1 -- PlumbIO must expose no method that
-    attempts one.
+    That test pinned the plumb-P1-a *deferral*: in v1.0.1 run-level
+    dollar_cost was unreachable from the online run path, so PlumbIO was
+    required to expose no setter at all. plumb v1.1.0 shipped
+    ``RunHandle.set_usage``, which is exactly the capability that deferral
+    was waiting on, so the correct assertion is now the positive one. If this
+    test ever needs reverting, the plumb dependency has gone backwards.
     """
-    forbidden_names = {"set_usage", "record_cost", "set_dollar_cost", "record_usage"}
-    plumb_methods = {name for name in dir(PlumbIO) if not name.startswith("_")}
-    assert forbidden_names.isdisjoint(plumb_methods)
+    plumb = PlumbIO(real=False)
+    run_id = plumb.open_run(task="t")
+
+    plumb.set_usage(run_id=run_id, dollar_cost=1.25)
+
+    assert plumb.usage == [
+        {"run_id": run_id, "tokens_in": None, "tokens_out": None, "dollar_cost": 1.25}
+    ]
+
+
+def test_set_usage_omits_tokens_so_plumb_autofills_them() -> None:
+    """atlas must not re-sum span tokens it already handed plumb.
+
+    plumb auto-fills run-level tokens_in/tokens_out from buffered spans at
+    close time (v1.1 FR-USAGE-3); dollar_cost is the only field it never
+    auto-fills. Passing None for the token fields is therefore correct, not
+    an oversight -- this pins the intent so a later "fix" doesn't double-count.
+    """
+    plumb = PlumbIO(real=False)
+    run_id = plumb.open_run(task="t")
+    plumb.record_span(
+        run_id=run_id,
+        kind="llm",
+        name="code_gen",
+        status="success",
+        latency_ms=1.0,
+        error_type=None,
+        tokens=(10, 20),
+    )
+
+    plumb.set_usage(run_id=run_id, dollar_cost=0.5)
+
+    assert plumb.usage[0]["tokens_in"] is None
+    assert plumb.usage[0]["tokens_out"] is None

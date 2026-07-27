@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from atlas.cli_backend import SpanUsage
 from atlas.orchestrator import (
     GateDecision,
     NoActiveRunError,
@@ -358,3 +359,109 @@ def test_run_to_completion_on_rejection_closes_with_failure(tmp_path):
 
     # Examples row written on rejection
     assert len(plumb.examples) == 1
+
+
+# ---------------------------------------------------------------------------
+# Usage plumbing (2026-07-26) — StageOutcome.usage -> spans + run-level cost
+#
+# Before this, Pipeline.step() called record_span() with no tokens= and no
+# attributes=, so TRD-v3 §13 #1 ("the code_gen span carries real tokens")
+# could not hold no matter what the backend parsed.
+# ---------------------------------------------------------------------------
+
+
+class _UsageRunner:
+    """Emits a fixed SpanUsage on every stage, like a loop-mode CLI dispatch."""
+
+    def __init__(self, usage: SpanUsage | None) -> None:
+        self._usage = usage
+
+    def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
+        return StageOutcome(
+            stage=stage,
+            span_id="",
+            status="success",
+            output_text=f"output of {stage.name}",
+            error_type=None,
+            usage=self._usage,
+        )
+
+
+def _usage(cost: float | None) -> SpanUsage:
+    return SpanUsage(
+        tokens=(100, 20),
+        attributes={"engine": "claude", "token_reduction_rule": "test_v1"},
+        dollar_cost=cost,
+    )
+
+
+def test_step_writes_span_tokens_and_attributes_from_outcome_usage(tmp_path):
+    pipeline, plumb, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(0.01)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+
+    assert plumb.spans[-1]["tokens"] == (100, 20)
+    assert plumb.spans[-1]["attributes"]["engine"] == "claude"
+
+
+def test_step_leaves_tokens_none_when_backend_reports_no_usage(tmp_path):
+    """Attended runs and agy dispatches must keep today's exact behavior."""
+    pipeline, plumb, _ = _make_pipeline(tmp_path, runner=_UsageRunner(None))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+
+    assert plumb.spans[-1]["tokens"] is None
+    assert plumb.spans[-1]["attributes"] is None
+
+
+def test_run_dollar_cost_accumulates_across_stages(tmp_path):
+    pipeline, _, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(0.25)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+    pipeline.step(ctx)
+
+    assert pipeline.run_dollar_cost == pytest.approx(0.50)
+
+
+def test_run_dollar_cost_is_none_when_no_engine_reports_cost(tmp_path):
+    """None and 0.0 must stay distinct — 'unknown' is not 'free'.
+
+    Codex reports no cost at all, so a Codex-only run must not look like a
+    $0.00 run to the loop's daily budget.
+    """
+    pipeline, _, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(None)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    pipeline.step(ctx)
+
+    assert pipeline.run_dollar_cost is None
+
+
+def test_run_to_completion_writes_run_level_cost_to_plumb(tmp_path):
+    pipeline, plumb, _ = _make_pipeline(tmp_path, runner=_UsageRunner(_usage(0.1)))
+    ctx = pipeline.start(task="task", slug="slug")
+
+    result = pipeline.run_to_completion(ctx)
+
+    assert result.dollar_cost == pytest.approx(0.6)  # 6 stages dispatched
+    # Tokens are deliberately omitted so plumb auto-fills them from the spans.
+    assert plumb.usage == []  # paused run: flush happens at terminal status only
+
+
+def test_failed_run_still_reports_cost_to_the_budget(tmp_path):
+    """A run that fails still spent money; the daily cap must see it."""
+    reject = GateDecision(label="rejected", turn_count=1, reason="bad")
+    pipeline, plumb, _ = _make_pipeline(
+        tmp_path, runner=_UsageRunner(_usage(0.3)), prompter=_FakePrompter(decisions=[reject])
+    )
+    ctx = pipeline.start(task="task", slug="slug")
+
+    result = pipeline.run_to_completion(ctx)
+
+    assert result.status == "failure"
+    assert result.dollar_cost == pytest.approx(0.3)
+    assert plumb.usage[-1]["dollar_cost"] == pytest.approx(0.3)
+    assert plumb.usage[-1]["tokens_in"] is None

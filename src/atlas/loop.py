@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from atlas import queue_gh
-from atlas.cli_backend import UnknownBackendError, make_backend
+from atlas.cli_backend import UnknownBackendError, UsageReporting, make_backend
 from atlas.config import Config, LoopConfig
 from atlas.deliverer import DeliveryError, GhPrDeliverer, PrRef
 
@@ -121,6 +121,7 @@ def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, 
         workflow=_WORKFLOW_NAME,
         backend_override=engine,
         max_turns=cfg.loop.max_turns,
+        loop_mode=True,
     )
     ctx = pipeline.start(task=prompt_context, slug=_slugify(issue.title))
     try:
@@ -149,7 +150,7 @@ def run_one_shot(issue: Issue, cfg: Config, *, repo_root: Path) -> tuple[PrRef, 
         worktree_path=result.ctx.worktree_path,
         deliverer=deliverer,
     )
-    return pr_ref, result.ctx.run_id, 0.0
+    return pr_ref, result.ctx.run_id, result.dollar_cost or 0.0
 
 
 def _pr_body(issue: Issue, run_id: str) -> str:
@@ -239,7 +240,14 @@ def run_planned_first_pass(
         model=cfg.model,
         add_dirs=[wt_path],
         timeout_s=1800,
-        extra_flags={"max_turns": str(cfg.loop.max_turns)},
+        # Same unattended profile SubprocessStageRunner applies in loop mode —
+        # this lane bypasses the Pipeline, so it has to set them itself or the
+        # planned lane would be the one dispatch path with no telemetry.
+        extra_flags={
+            "max_turns": str(cfg.loop.max_turns),
+            "telemetry": "json",
+            "permission_mode": "acceptEdits",
+        },
     )
     t0 = time.monotonic()
     result_proc = subprocess.run(
@@ -249,6 +257,7 @@ def run_planned_first_pass(
     status, output_text, error_type = backend.parse_result(
         result_proc.stdout, result_proc.stderr, result_proc.returncode
     )
+    usage = backend.span_usage(result_proc.stdout) if isinstance(backend, UsageReporting) else None
     plumb.record_span(
         run_id=run_id,
         kind="plan",
@@ -256,7 +265,12 @@ def run_planned_first_pass(
         status=status,
         latency_ms=latency_ms,
         error_type=error_type,
+        tokens=usage.tokens if usage is not None else None,
+        attributes=usage.attributes if usage is not None else None,
     )
+    plan_cost = usage.dollar_cost if usage is not None else None
+    if plan_cost is not None:
+        plumb.set_usage(run_id=run_id, dollar_cost=plan_cost)
 
     if status != "success":
         plumb.close_run(run_id=run_id, status="failure")
@@ -288,7 +302,7 @@ def run_planned_first_pass(
         worktree_path=wt_path,
         deliverer=deliverer,
     )
-    return pr_ref, run_id, 0.0
+    return pr_ref, run_id, plan_cost or 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +501,7 @@ def _format_run_summary(run_id: str, pr_ref: PrRef) -> str:
 
 
 def run_forever(cfg: Config, *, repos: list[str], repo_root: Path) -> None:
-    _warn_on_unenforced_budget(cfg.loop)
+    _warn_on_unenforced_budget(cfg.loop, engine=cfg.default_backend)
     state = LoopState.load_or_init(repo_root)
     reconcile_orphans(cfg, repos=repos, repo_root=repo_root)
 

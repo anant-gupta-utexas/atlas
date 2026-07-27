@@ -134,11 +134,14 @@ def test_loop_status_populated_state_reports_summary(tmp_path: Path) -> None:
     assert "20" in result.output
     assert "2026-07-24T18:03:11Z" in result.output
     assert "closed" in result.output.lower()
-    # The dollar cap is not enforced (no per-run cost data until plumb P1-a),
-    # so status must say so rather than printing a confident spend figure (I2).
-    assert "not tracked" in result.output.lower()
-    assert "not enforced" in result.output.lower()
-    assert "1.42" not in result.output
+    # The dollar cap is live since 2026-07-26 (L0 telemetry chain wired +
+    # plumb v1.1 set_usage), so status reports the real accumulated spend
+    # against the cap. Inverted from the old "not tracked" assertion (I2),
+    # which encoded the plumb-P1-a deferral.
+    assert "1.42" in result.output
+    assert "10.00" in result.output
+    # The one remaining honest caveat must still be surfaced.
+    assert "codex" in result.output.lower()
 
 
 def test_loop_status_reports_open_breaker(tmp_path: Path) -> None:

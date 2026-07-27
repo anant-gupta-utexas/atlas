@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Protocol
 from atlas.stages import StageSpec
 
 if TYPE_CHECKING:
+    from atlas.cli_backend import SpanUsage
     from atlas.plumb_io import PlumbIO
     from atlas.state import StateStore
     from atlas.worktree import WorktreeManager
@@ -109,6 +110,12 @@ class StageOutcome:
     status: str  # "success" | "failure" | "awaiting_hook" | "rejected"
     output_text: str
     error_type: str | None
+    # Per-dispatch token/cost telemetry, when the backend reports any.
+    # None for every non-CLI runner (LIB:/SHELL:), for backends that report
+    # no usage (agy), and for attended runs, which never request the JSON
+    # envelope. Populated by SubprocessStageRunner in loop mode and consumed
+    # by Pipeline.step() to write spans.tokens / spans.attributes.
+    usage: SpanUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +130,11 @@ class RunResult:
 
     ctx: RunContext
     status: str  # "success" | "failure" | "paused"  (paused = awaiting_hook timeout)
+    # Summed engine-reported cost for this run, or None when no stage reported
+    # one (every attended run, and every all-Codex run — the Codex CLI emits no
+    # cost figure at all). None and 0.0 are deliberately distinct: the loop's
+    # budget must not treat "unknown" as "free".
+    dollar_cost: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +177,13 @@ class Pipeline:
         self._worktree = worktree
         self._commit_wait_timeout_s = commit_wait_timeout_s
         self._last_code_gen_span_id: str = ""
+        # Run-level usage roll-up across every stage of this run. plumb
+        # auto-fills run tokens from buffered spans at close, but NEVER
+        # auto-fills dollar_cost (plumb v1.1 FR-USAGE-3a), so atlas has to
+        # sum and write it explicitly. `_run_cost_seen` distinguishes "no
+        # engine reported cost" (leave NULL) from "cost genuinely was $0".
+        self._run_dollar_cost: float = 0.0
+        self._run_cost_seen: bool = False
         # Latest RunContext as mutated inside step() (e.g. with worktree_path
         # after stage 5).  run_to_completion() reads this back so caller-owned
         # ctx in same-process flow does not drift from in-flight ctx.
@@ -329,13 +348,17 @@ class Pipeline:
             status=outcome.status if outcome.status != "rejected" else "failure",
             latency_ms=latency_ms,
             error_type=outcome.error_type,
+            tokens=outcome.usage.tokens if outcome.usage is not None else None,
+            attributes=outcome.usage.attributes if outcome.usage is not None else None,
         )
+        self._accumulate_usage(outcome.usage)
         outcome = StageOutcome(
             stage=stage,
             span_id=span_id,
             status=outcome.status,
             output_text=outcome.output_text,
             error_type=outcome.error_type,
+            usage=outcome.usage,
         )
 
         # NOTE: tasks.md checkbox is NOT marked here. We only check the box once
@@ -468,13 +491,16 @@ class Pipeline:
             if self._latest_ctx is not None:
                 ctx = self._latest_ctx
             if outcome is None:
+                self._flush_run_usage(run_id=ctx.run_id)
                 self._plumb.close_run(run_id=ctx.run_id, status="success")
                 self._state.delete_current_run()
-                return RunResult(ctx=ctx, status="success")
+                return RunResult(ctx=ctx, status="success", dollar_cost=self.run_dollar_cost)
             if outcome.status in ("failure", "rejected"):
+                self._flush_run_usage(run_id=ctx.run_id)
                 self._plumb.close_run(run_id=ctx.run_id, status="failure")
                 self._state.delete_current_run()
-                return RunResult(ctx=ctx, status="failure")
+                # A failed run still spent money — the budget must see it.
+                return RunResult(ctx=ctx, status="failure", dollar_cost=self.run_dollar_cost)
             if outcome.status == "awaiting_hook":
                 awaiting_attempts += 1
                 if awaiting_attempts > _AWAITING_HOOK_MAX_ATTEMPTS:
@@ -486,13 +512,39 @@ class Pipeline:
                     run_id=ctx.run_id,
                     timeout_s=self._commit_wait_timeout_s,
                 ):
-                    # Timed out waiting for the commit; leave the run open for resume.
-                    return RunResult(ctx=ctx, status="paused")
+                    # Timed out waiting for the commit; leave the run open for
+                    # resume. Deliberately no _flush_run_usage here: the run is
+                    # still open and more stages may spend, and set_usage is
+                    # last-call-wins, so the resumed process writes the total.
+                    return RunResult(ctx=ctx, status="paused", dollar_cost=self.run_dollar_cost)
             # success: continue to next stage
+
+    @property
+    def run_dollar_cost(self) -> float | None:
+        """Summed engine-reported cost so far, or None if nothing reported any."""
+        return self._run_dollar_cost if self._run_cost_seen else None
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _accumulate_usage(self, usage: SpanUsage | None) -> None:
+        if usage is None or usage.dollar_cost is None:
+            return
+        self._run_dollar_cost += usage.dollar_cost
+        self._run_cost_seen = True
+
+    def _flush_run_usage(self, *, run_id: str) -> None:
+        """Write the run-level cost roll-up to plumb before the run closes.
+
+        Tokens are left to plumb, which auto-fills run-level `tokens_in`/
+        `tokens_out` from the buffered spans at close time (v1.1 FR-USAGE-3).
+        `dollar_cost` is never auto-filled, so it must be written here or it
+        stays NULL forever.
+        """
+        if not self._run_cost_seen:
+            return
+        self._plumb.set_usage(run_id=run_id, dollar_cost=self._run_dollar_cost)
 
     def _wait_for_commit_score(
         self,
@@ -573,6 +625,7 @@ class SubprocessStageRunner:
         default_backend: str = "claude",
         loaded_workflow: object = None,  # LoadedWorkflow | None; typed as object to avoid cycle
         max_turns: int | None = None,
+        loop_mode: bool = False,
     ) -> None:
         self._timeout_overrides = timeout_overrides or {}
         self._command_overrides = command_overrides or {}
@@ -584,9 +637,20 @@ class SubprocessStageRunner:
         # in place; the loop daemon sets it from cfg.loop.max_turns so an
         # unattended run can't spin indefinitely.
         self._max_turns = max_turns
+        # Unattended dispatch: request the JSON envelope (the only way any
+        # token/cost telemetry exists at all) and apply TRD-v3 §3.6's headless
+        # permission profile. False for `atlas run`, which keeps attended argv
+        # byte-identical to pre-L0 — see
+        # test_dev_pipeline_unaffected_by_phase_l0.
+        self._loop_mode = loop_mode
 
     def run(self, *, ctx: RunContext, stage: StageSpec) -> StageOutcome:
-        from atlas.cli_backend import UnknownBackendError, make_backend, resolve_backend
+        from atlas.cli_backend import (
+            UnknownBackendError,
+            UsageReporting,
+            make_backend,
+            resolve_backend,
+        )
         from atlas.plugin_resolver import build_prompt, resolve  # local import to avoid cycles
 
         # T4.3 — allow-list check before any subprocess call
@@ -644,6 +708,15 @@ class SubprocessStageRunner:
         extra_flags: dict[str, str] = {}
         if self._max_turns is not None:
             extra_flags["max_turns"] = str(self._max_turns)
+        if self._loop_mode:
+            # TRD-v3 §3.6: JSON telemetry + acceptEdits, never
+            # --dangerously-skip-permissions. The --allowedTools allowlist is
+            # deliberately NOT passed here — the TRD stores it in the target
+            # repo's checked-in .claude/settings.json, which the CLI reads on
+            # its own, so duplicating it into argv would create a second place
+            # to keep in sync.
+            extra_flags["telemetry"] = "json"
+            extra_flags["permission_mode"] = "acceptEdits"
 
         argv = backend.build_argv(
             prompt=prompt,
@@ -674,12 +747,18 @@ class SubprocessStageRunner:
         status, output_text, error_type = backend.parse_result(
             result.stdout, result.stderr, result.returncode
         )
+        # Usage is only present when the backend was asked for a machine-readable
+        # envelope (loop mode) AND implements UsageReporting — agy does not.
+        usage: SpanUsage | None = None
+        if isinstance(backend, UsageReporting):
+            usage = backend.span_usage(result.stdout)
         return StageOutcome(
             stage=stage,
             span_id="",
             status=status,
             output_text=output_text,
             error_type=error_type,
+            usage=usage,
         )
 
 

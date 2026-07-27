@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from atlas.cli_backend import ClaudeCodeBackend, CodexBackend, UsageStats, codex_usage_to_tokens
+from atlas.cli_backend import ClaudeCodeBackend, CodexBackend, codex_usage_to_tokens
 from atlas.orchestrator import (
     GateDecision,
     Pipeline,
@@ -257,12 +257,14 @@ def test_job_workflow_tailor_materials_dispatches_via_claude_backend(
 
 
 def test_dev_pipeline_unaffected_by_phase_l0(tmp_path: Path) -> None:
-    """Attended dev-pipeline dispatch is provably unaffected by Phase L0.
+    """Attended dev-pipeline dispatch is provably unaffected by loop mode.
 
-    SubprocessStageRunner.run() never sets extra_flags in L0 — no CLI surface
-    exists yet to request loop-mode telemetry/permission flags (that's L2's
-    `atlas loop` command). This proves the byte-identical-argv claim end to
-    end, not just at the ClaudeCodeBackend.build_argv unit-test level.
+    SubprocessStageRunner defaults to ``loop_mode=False``, so the attended
+    path sets no telemetry or permission flags. This proves the
+    byte-identical-argv claim end to end, not just at the
+    ClaudeCodeBackend.build_argv unit-test level. Its loop-mode counterpart
+    is test_loop_mode_dispatch_requests_telemetry_and_permission_profile —
+    the two together are what keep the profile scoped to unattended runs.
     """
     dev_wf = load_workflow_file(_DEV_YAML)
     research = next(s for s in dev_wf.stages if s.name == "research")
@@ -288,6 +290,62 @@ def test_dev_pipeline_unaffected_by_phase_l0(tmp_path: Path) -> None:
     assert "--dangerously-skip-permissions" not in argv
     assert outcome.status == "success"
     assert outcome.output_text == "research output"
+    # Attended runs get no JSON envelope, so there is no usage to report.
+    assert outcome.usage is None
+
+
+def test_loop_mode_dispatch_requests_telemetry_and_permission_profile(tmp_path: Path) -> None:
+    """Loop mode must actually request the JSON envelope and TRD-v3 §3.6's profile.
+
+    Regression test for the 2026-07-26 finding: nothing in src/ ever set
+    extra_flags["telemetry"], so `--output-format json` was never passed on
+    any real dispatch and no run could produce token/cost telemetry. The
+    parsing side had been unit-tested in isolation the whole time, which is
+    exactly why the gap survived to L2.
+    """
+    dev_wf = load_workflow_file(_DEV_YAML)
+    research = next(s for s in dev_wf.stages if s.name == "research")
+
+    runner = SubprocessStageRunner(
+        model="haiku",
+        default_backend="claude",
+        loaded_workflow=dev_wf,
+        max_turns=40,
+        loop_mode=True,
+    )
+    ctx = RunContext(run_id="f" * 32, slug="test-loop-mode", task="do it", repo_root=tmp_path)
+
+    envelope = json.dumps(
+        [
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "ok",
+                "total_cost_usd": 0.03,
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 7,
+                    "cache_creation_input_tokens": 11,
+                    "cache_read_input_tokens": 13,
+                },
+            }
+        ]
+    )
+    with patch("atlas.orchestrator.subprocess.run") as mock_run:
+        mock_run.return_value = _completed(stdout=envelope)
+        outcome = runner.run(ctx=ctx, stage=research)
+
+    argv = mock_run.call_args.args[0]
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    assert argv[argv.index("--max-turns") + 1] == "40"
+    # The permission profile is acceptEdits, never a blanket bypass.
+    assert "--dangerously-skip-permissions" not in argv
+
+    assert outcome.status == "success"
+    assert outcome.usage is not None
+    assert outcome.usage.tokens == (5 + 11 + 13, 7)
+    assert outcome.usage.dollar_cost == 0.03
 
 
 # ---------------------------------------------------------------------------
@@ -296,13 +354,13 @@ def test_dev_pipeline_unaffected_by_phase_l0(tmp_path: Path) -> None:
 
 
 def test_claude_backend_loop_mode_telemetry_end_to_end(tmp_path: Path) -> None:
-    """Loop-mode dispatch (mocked subprocess) -> UsageStats -> PlumbIO.record_span.
+    """Loop-mode dispatch (mocked subprocess) -> SpanUsage -> plumb span + run cost.
 
-    No `atlas loop` command exists in L0 (that's L2), so this test drives the
-    telemetry pieces directly the way a future loop-mode call site would,
-    proving build_argv/parse_result/parse_usage/record_span compose correctly
-    end to end. total_cost_usd is asserted present in-memory but never
-    written to plumb (deferred to plumb P1-a — see BACKLOG.md).
+    Uses the **array** envelope shape verified against Claude Code 2.1.220 on
+    2026-07-26, not the bare object this module originally assumed. Both the
+    span-token write and the run-level dollar_cost write (plumb v1.1
+    ``set_usage``) are asserted — the deferral this test previously encoded
+    ("total_cost_usd never written to plumb, pending P1-a") is closed.
     """
     backend = ClaudeCodeBackend()
 
@@ -321,13 +379,25 @@ def test_claude_backend_loop_mode_telemetry_end_to_end(tmp_path: Path) -> None:
     assert "--output-format" in argv
     assert "--dangerously-skip-permissions" not in argv
 
+    # Real-shape envelope: a stream array terminated by a `result` element,
+    # with Anthropic's four disjoint token fields.
     json_envelope = json.dumps(
-        {
-            "subtype": "success",
-            "result": "task complete",
-            "total_cost_usd": 0.042,
-            "usage": {"input_tokens": 1234, "output_tokens": 567},
-        }
+        [
+            {"type": "system", "subtype": "init", "session_id": "s1"},
+            {"type": "assistant", "message": {"role": "assistant"}},
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "task complete",
+                "total_cost_usd": 0.042,
+                "usage": {
+                    "input_tokens": 1234,
+                    "output_tokens": 567,
+                    "cache_creation_input_tokens": 800,
+                    "cache_read_input_tokens": 200,
+                },
+            },
+        ]
     )
 
     # Mocked subprocess result — no real `claude` binary spawned.
@@ -340,12 +410,14 @@ def test_claude_backend_loop_mode_telemetry_end_to_end(tmp_path: Path) -> None:
     assert output_text == "task complete"
     assert error_type is None
 
-    usage = backend.parse_usage(result.stdout)
-    assert usage == UsageStats(total_cost_usd=0.042, input_tokens=1234, output_tokens=567)
+    usage = backend.span_usage(result.stdout)
+    assert usage is not None
+    # Input is the sum of the three disjoint input fields, not input_tokens alone.
+    assert usage.tokens == (1234 + 800 + 200, 567)
+    assert usage.dollar_cost == 0.042
 
     plumb = PlumbIO(real=False)
     run_id = plumb.open_run(task="loop-mode-test")
-    assert usage is not None
     plumb.record_span(
         run_id=run_id,
         kind="code_gen",
@@ -353,12 +425,17 @@ def test_claude_backend_loop_mode_telemetry_end_to_end(tmp_path: Path) -> None:
         status="success",
         latency_ms=100.0,
         error_type=None,
-        tokens=(usage.input_tokens, usage.output_tokens),
+        tokens=usage.tokens,
+        attributes=usage.attributes,
     )
+    plumb.set_usage(run_id=run_id, dollar_cost=usage.dollar_cost)
 
-    assert plumb.spans[-1]["tokens"] == (1234, 567)
-    # total_cost_usd stays in-memory only — no plumb write for it (plumb P1-a).
-    assert not any("dollar_cost" in span for span in plumb.spans)
+    assert plumb.spans[-1]["tokens"] == (2234, 567)
+    # The raw breakdown is durable, so a wrong reduction rule stays recomputable.
+    assert plumb.spans[-1]["attributes"]["cache_read_input_tokens"] == 200
+    assert plumb.spans[-1]["attributes"]["engine"] == "claude"
+    # Cost now reaches plumb at run level (v1.1 set_usage), not just in memory.
+    assert plumb.usage[-1]["dollar_cost"] == 0.042
 
 
 # ---------------------------------------------------------------------------

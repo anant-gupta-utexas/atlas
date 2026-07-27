@@ -10,6 +10,7 @@ import pytest
 
 from atlas.cli_backend import (
     _KNOWN_BACKENDS,
+    CLAUDE_TOKEN_REDUCTION_RULE,
     CODEX_TOKEN_REDUCTION_RULE,
     AntigravityBackend,
     ClaudeCodeBackend,
@@ -17,7 +18,10 @@ from atlas.cli_backend import (
     CodexBackend,
     CodexUsageStats,
     UnknownBackendError,
+    UsageReporting,
     UsageStats,
+    claude_usage_attributes,
+    claude_usage_to_tokens,
     codex_usage_attributes,
     codex_usage_to_tokens,
     make_backend,
@@ -262,17 +266,189 @@ def test_claude_code_backend_parse_usage_plain_text_is_none() -> None:
 
 def test_claude_code_backend_parse_usage_json_envelope() -> None:
     usage = ClaudeCodeBackend().parse_usage(_json_envelope())
-    assert usage == UsageStats(total_cost_usd=0.0123, input_tokens=100, output_tokens=50)
+    assert usage == UsageStats(
+        total_cost_usd=0.0123,
+        input_tokens=100,
+        output_tokens=50,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+    )
 
 
 def test_claude_code_backend_parse_usage_missing_keys_no_keyerror() -> None:
     stdout = '{"subtype": "success", "result": "done"}'
     usage = ClaudeCodeBackend().parse_usage(stdout)
-    assert usage == UsageStats(total_cost_usd=None, input_tokens=None, output_tokens=None)
+    assert usage == UsageStats(
+        total_cost_usd=None,
+        input_tokens=None,
+        output_tokens=None,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+    )
 
 
 def test_claude_code_backend_parse_usage_malformed_json_is_none() -> None:
     assert ClaudeCodeBackend().parse_usage('{"subtype": ') is None
+
+
+# ---------------------------------------------------------------------------
+# ClaudeCodeBackend — the ARRAY envelope (VERIFIED, Claude Code 2.1.220)
+#
+# These are the regression tests for the 2026-07-26 finding: `claude -p
+# --output-format json` emits a JSON *array* of stream events, not the bare
+# object this module was designed against. Because the old envelope sniff
+# only tested for "{", every real envelope fell through to the plain-text
+# branch: parse_result returned the raw JSON blob as "output text" and
+# parse_usage returned None, so no live run could ever produce telemetry.
+# ---------------------------------------------------------------------------
+
+
+def _stream_envelope(**result_overrides: object) -> str:
+    """The real shape: stream events terminated by a `result` element."""
+    result_event: dict[str, object] = {
+        "type": "result",
+        "subtype": "success",
+        "result": "done",
+        "total_cost_usd": 0.0123,
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_creation_input_tokens": 300,
+            "cache_read_input_tokens": 700,
+        },
+    }
+    result_event.update(result_overrides)
+    return json.dumps(
+        [
+            {"type": "system", "subtype": "init", "session_id": "s1"},
+            {"type": "rate_limit_event", "session_id": "s1"},
+            {"type": "assistant", "message": {"role": "assistant"}},
+            result_event,
+        ]
+    )
+
+
+def test_claude_parse_result_reads_array_envelope() -> None:
+    status, output_text, error_type = ClaudeCodeBackend().parse_result(_stream_envelope(), "", 0)
+    assert (status, output_text, error_type) == ("success", "done", None)
+
+
+def test_claude_parse_result_array_envelope_failure_subtype() -> None:
+    stdout = _stream_envelope(subtype="error_max_turns", result="hit the cap")
+    status, output_text, error_type = ClaudeCodeBackend().parse_result(stdout, "", 0)
+    assert status == "failure"
+    assert error_type == "claude_error_max_turns"
+    assert output_text == "hit the cap"
+
+
+def test_claude_parse_result_array_without_result_event_is_failure() -> None:
+    """A truncated stream must not report a phantom success.
+
+    Mirrors CodexBackend's turn.completed presence check.
+    """
+    stdout = json.dumps([{"type": "system", "subtype": "init"}, {"type": "assistant"}])
+    status, _output, error_type = ClaudeCodeBackend().parse_result(stdout, "", 0)
+    assert status == "failure"
+    assert error_type == "claude_no_result_event"
+
+
+def test_claude_parse_result_uses_last_result_event() -> None:
+    stdout = json.dumps(
+        [
+            {"type": "result", "subtype": "success", "result": "first"},
+            {"type": "result", "subtype": "success", "result": "last"},
+        ]
+    )
+    assert ClaudeCodeBackend().parse_result(stdout, "", 0)[1] == "last"
+
+
+def test_claude_parse_usage_reads_array_envelope() -> None:
+    usage = ClaudeCodeBackend().parse_usage(_stream_envelope())
+    assert usage == UsageStats(
+        total_cost_usd=0.0123,
+        input_tokens=100,
+        output_tokens=50,
+        cache_creation_input_tokens=300,
+        cache_read_input_tokens=700,
+    )
+
+
+def test_claude_usage_to_tokens_sums_disjoint_input_fields() -> None:
+    """Anthropic's usage fields are disjoint — cache hits are NOT in input_tokens.
+
+    A real captured run reported input_tokens=2 against
+    cache_read_input_tokens=19589; reading input_tokens alone recorded a
+    ~31.5k-token dispatch as 2 tokens.
+    """
+    usage = UsageStats(
+        total_cost_usd=0.5,
+        input_tokens=2,
+        output_tokens=4,
+        cache_creation_input_tokens=11973,
+        cache_read_input_tokens=19589,
+    )
+    assert claude_usage_to_tokens(usage) == (2 + 11973 + 19589, 4)
+
+
+def test_claude_usage_to_tokens_treats_missing_fields_as_zero() -> None:
+    usage = UsageStats(
+        total_cost_usd=None,
+        input_tokens=None,
+        output_tokens=None,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+    )
+    assert claude_usage_to_tokens(usage) == (0, 0)
+
+
+def test_claude_usage_attributes_persist_raw_breakdown_and_rule() -> None:
+    """The reduction rule must be recomputable from stored data (L1 review M1)."""
+    attrs = claude_usage_attributes(
+        UsageStats(
+            total_cost_usd=0.25,
+            input_tokens=2,
+            output_tokens=4,
+            cache_creation_input_tokens=100,
+            cache_read_input_tokens=900,
+        )
+    )
+    assert attrs["engine"] == "claude"
+    assert attrs["token_reduction_rule"] == CLAUDE_TOKEN_REDUCTION_RULE
+    assert attrs["cache_read_input_tokens"] == 900
+    assert attrs["total_cost_usd"] == 0.25
+
+
+def test_claude_span_usage_composes_tokens_attributes_and_cost() -> None:
+    usage = ClaudeCodeBackend().span_usage(_stream_envelope())
+    assert usage is not None
+    assert usage.tokens == (100 + 300 + 700, 50)
+    assert usage.dollar_cost == 0.0123
+    assert usage.attributes["engine"] == "claude"
+
+
+def test_claude_span_usage_none_for_plain_text() -> None:
+    assert ClaudeCodeBackend().span_usage("just some prose") is None
+
+
+def test_codex_span_usage_reports_no_dollar_cost() -> None:
+    """Structural, not incidental: the Codex CLI emits no cost figure at all."""
+    stdout = json.dumps(
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+    )
+    usage = CodexBackend().span_usage(stdout)
+    assert usage is not None
+    assert usage.dollar_cost is None
+    assert usage.attributes["engine"] == "codex"
+
+
+def test_usage_reporting_protocol_excludes_agy() -> None:
+    """agy reports no usage — the runner must not try to read any from it."""
+    assert isinstance(ClaudeCodeBackend(), UsageReporting)
+    assert isinstance(CodexBackend(), UsageReporting)
+    assert not isinstance(AntigravityBackend(), UsageReporting)
 
 
 # ---------------------------------------------------------------------------

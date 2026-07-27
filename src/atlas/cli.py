@@ -284,13 +284,12 @@ def loop_status() -> None:
     state = LoopState.load_or_init(repo_root)
     typer.echo(f"Day: {state.day}")
     typer.echo(f"Runs today: {state.runs_today} / {cfg.loop.max_runs_per_day}")
-    # Don't print a confident "$0.00 / $10.00" — per-run cost is not yet
-    # extractable from RunResult (blocked on plumb P1-a, TRD-v3 §3.6), so
-    # max_dollars_per_day cannot trip. Reporting it as a working cap would
-    # read as a spend guarantee that doesn't exist.
+    # Live since 2026-07-26 (plumb v1.1 set_usage + the L0 telemetry chain).
+    # The Codex caveat is printed rather than assumed away: that engine
+    # reports no cost, so its runs advance the runs-cap but not this one.
     typer.echo(
-        f"Dollars today: not tracked (cap ${cfg.loop.max_dollars_per_day:.2f} "
-        "NOT enforced — pending plumb P1-a cost data)"
+        f"Dollars today: ${state.dollars_today:.4f} / ${cfg.loop.max_dollars_per_day:.2f}"
+        "  (claude-reported; codex runs report no cost)"
     )
     typer.echo(f"Last tick: {state.last_tick_at or 'never'}")
     if breaker_open(state, cfg.loop):

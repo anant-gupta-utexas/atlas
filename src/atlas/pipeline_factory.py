@@ -57,6 +57,7 @@ def make_pipeline(
     workflow_file: Path | None = None,
     backend_override: str | None = None,
     max_turns: int | None = None,
+    loop_mode: bool = False,
 ) -> tuple[Pipeline, LastOutcomeRunner]:
     """Construct a Pipeline + recorder exactly as `atlas run` does.
 
@@ -70,6 +71,11 @@ def make_pipeline(
     ``max_turns`` caps agent turns per stage. ``atlas run`` leaves it None
     (a human is watching); the loop daemon passes ``cfg.loop.max_turns`` so
     an unattended run can't spin indefinitely.
+
+    ``loop_mode`` switches CLI dispatch to the unattended profile: the JSON
+    telemetry envelope (the only source of token/cost data) plus TRD-v3
+    §3.6's ``acceptEdits`` permission mode. ``atlas run`` leaves it False,
+    which keeps attended argv byte-identical to pre-L0.
     """
     loaded = resolve_workflow(
         workflow_file=workflow_file, workflow_name=workflow, repo_root=repo_root
@@ -84,6 +90,7 @@ def make_pipeline(
         default_backend=backend_override or cfg.default_backend,
         loaded_workflow=loaded,
         max_turns=max_turns,
+        loop_mode=loop_mode,
     )
     # Construct LibraryStageRunner only when the loaded workflow uses LIB: stages.
     # CompositeStageRunner is always used so dev.yaml's plain plugin-command

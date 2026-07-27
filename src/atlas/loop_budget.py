@@ -96,10 +96,11 @@ def _reset_daily_counters_if_new_day(state: LoopState) -> None:
 def budget_exhausted(state: LoopState, cfg: LoopConfig) -> bool:
     """Whether either daily cap is spent.
 
-    NOTE: the dollar half is currently inert — per-run cost is not yet
-    extractable from RunResult (blocked on plumb P1-a, TRD-v3 §3.6), so
-    ``dollars_today`` never advances past 0.0 and only ``max_runs_per_day``
-    actually bounds the loop. ``run_forever`` warns about this at startup.
+    Both halves are live as of 2026-07-26: ``RunResult.dollar_cost`` carries
+    the engine-reported total (plumb v1.1's ``set_usage`` persists it), so
+    ``dollars_today`` genuinely accumulates. One honest caveat remains — the
+    Codex CLI reports no cost at all, so a Codex-only day advances the
+    runs-cap but not the dollar-cap. ``warn_on_unenforced_budget`` says so.
     """
     return (
         state.runs_today >= cfg.max_runs_per_day or state.dollars_today >= cfg.max_dollars_per_day
@@ -157,15 +158,19 @@ def error_signature(exc: Exception) -> str:
     return f"{type(exc).__name__}:{exc}"
 
 
-def warn_on_unenforced_budget(loop_cfg: LoopConfig) -> None:
-    """Per-run cost isn't extractable from RunResult yet (blocked on plumb
-    P1-a, TRD-v3 §3.6), so max_dollars_per_day can never trip. Say so loudly
-    at startup when an operator has deliberately set it — a spend cap that
-    silently does nothing is worse than no cap at all."""
-    if loop_cfg.max_dollars_per_day != LoopConfig().max_dollars_per_day:
+def warn_on_unenforced_budget(loop_cfg: LoopConfig, *, engine: str | None = None) -> None:
+    """Warn when the configured dollar cap cannot actually bind.
+
+    Since 2026-07-26 the Claude lane reports real per-run cost, so the cap is
+    enforced there. The Codex CLI reports no cost figure at all (VERIFIED,
+    0.144.4), so a Codex-pinned loop still advances only ``max_runs_per_day``
+    — a spend cap that silently does nothing is worse than no cap at all, so
+    that case keeps its loud startup warning.
+    """
+    if engine == "codex" and loop_cfg.max_dollars_per_day != LoopConfig().max_dollars_per_day:
         _logger.warning(
-            "[loop] max_dollars_per_day=%s is NOT enforced: per-run cost data is "
-            "unavailable until plumb P1-a lands. Only max_runs_per_day=%s bounds "
+            "[loop] max_dollars_per_day=%s cannot be enforced on the codex engine: "
+            "the Codex CLI reports no cost figure. Only max_runs_per_day=%s bounds "
             "this loop's spend.",
             loop_cfg.max_dollars_per_day,
             loop_cfg.max_runs_per_day,
